@@ -1,0 +1,308 @@
+#!/usr/bin/env python3
+"""The workspace wall for an agent on the stock Codex adapter (the supervisor).
+
+The agent keeps its tools (shell commands, file edits, web search), but its files stop at the
+project folder:
+
+- every shell command and file edit runs under a Codex permission profile. The disk can be read
+  except the user's home folder; inside the home folder only the project folder (and the folders
+  BUZZ_WALL_READ names) can be read. Only the project folder and a temporary folder of this
+  session can be written;
+- nothing can ask its way out: the approval policy is "never", so what the profile blocks fails
+  and is never offered for approval (the Buzz harness answers every approval with "allow");
+- the network is open, as it is for a walled Claude agent: the agent talks to Buzz with the buzz
+  command.
+
+How it holds. This program stands in for codex-acp. It starts the stock adapter and points it
+(CODEX_PATH) back at this program for its Codex CLI. Started that way as "app-server", it runs the
+real Codex app-server with the wall's settings on the command line, over every configuration
+file, and passes the adapter's requests on after removing what would widen the wall: the sandbox
+mode, permissions, extra workspace folders and configuration the adapter gives at thread and turn
+start. A request that runs a command, touches a file or changes the configuration or the account
+outside a thread's own tools is refused, and the session ends. This program lives outside the
+project folder, where the walled agent cannot read or change it.
+
+Left out, because they act outside the profile or were not verified under it: the user's own MCP
+servers, apps, plugins, hooks, computer and browser use, the image viewer, the JavaScript REPL
+and sub-agents. The project's own Codex configuration is not loaded (the project is marked
+untrusted), since the walled agent can write it; its AGENTS.md is read.
+
+Not covered: network access.
+
+BUZZ_WALL_PROJECT   the project folder (required for a session; the session must start inside it)
+BUZZ_WALL_READ      more folders shell commands may read, separated by ":" (optional)
+"""
+import json
+import os
+from pathlib import Path
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import threading
+
+SELF = Path(__file__).resolve()
+MAX_FRAME = 16 * 1024 * 1024
+ADAPTER_VERSION = "1.13.1"
+CLI_VERSION = "0.171.0"   # the wall is verified with this Codex CLI (test-wall-codex.py)
+PROFILE = "buzz_workspace_wall"
+# Capabilities that act outside the permission profile, or were not verified under it.
+DISABLED = ("apps", "plugins", "hooks", "computer_use", "browser_use", "view_image", "js_repl",
+            "multi_agent", "multi_agent_v2", "request_permissions_tool")
+# Requests that would act outside a thread's own tools: run a command, touch a file, or change
+# the configuration, the account or what is installed.
+REFUSED_GROUPS = ("command/", "process/", "fs/", "windowsSandbox/", "remoteControl/", "marketplace/",
+                  "externalAgentConfig/", "userVerification/", "project/")
+REFUSED = {"environment/add", "thread/shellCommand", "thread/fork", "review/start", "thread/inject_items",
+           "thread/approveGuardianDeniedAction", "config/value/write", "config/batchWrite",
+           "skills/config/write", "account/login/start", "account/logout", "accountSession/switch",
+           "modelProvider/config/write", "modelProvider/default/set", "plugin/install",
+           "plugin/uninstall", "plugin/reconcile", "mcpServer/oauth/login", "mcpServer/tool/call",
+           "experimentalFeature/enablement/set", "memory/reset"}
+# What a thread or a turn may not choose for itself: the wall's settings are the configuration's.
+STRIPPED = ("sandbox", "sandboxPolicy", "permissions", "environments", "runtimeWorkspaceRoots")
+
+
+def stop(message):
+    sys.exit("wall/codex-acp: " + message)
+
+
+def inside(path, folder):
+    return path == folder or path.startswith(folder.rstrip("/") + "/")
+
+
+def project_folder():
+    """The project folder, checked: it exists and is not the home folder or a folder around it."""
+    project = os.environ.get("BUZZ_WALL_PROJECT", "")
+    if not project or not os.path.isdir(project):
+        stop("BUZZ_WALL_PROJECT must name the project folder; start the agent with the team's own command")
+    project = os.path.realpath(project)
+    home = os.path.realpath(os.path.expanduser("~"))
+    if inside(home, project):
+        stop(f"the project folder {project} is the home folder or a folder around it; no wall can hold there")
+    return project, home
+
+
+def adapter_path():
+    """The stock Codex ACP adapter on PATH, which this program stands in for."""
+    adapter = shutil.which("codex-acp")
+    if not adapter:
+        stop("codex-acp is missing from PATH")
+    if Path(adapter).resolve() == SELF:
+        stop("PATH must resolve the installed Codex ACP adapter")
+    return adapter
+
+
+def codex_cli(verify=True):
+    """The Codex CLI the walled agent runs: the skill's private one when installed, else the one on PATH."""
+    private = Path.home() / ".local/share/buzz-agent-team/node_modules/.bin/codex"
+    cli = str(private) if private.is_file() else shutil.which("codex")
+    if not cli:
+        stop(f"no Codex CLI found; install @openai/codex@{CLI_VERSION} (the skill's preflight says how)")
+    if verify:
+        try:
+            found = subprocess.check_output([cli, "--version"], text=True, stdin=subprocess.DEVNULL, timeout=15).split()[-1]
+        except (subprocess.SubprocessError, OSError, IndexError) as exc:
+            stop(f"the Codex CLI at {cli} did not answer ({exc})")
+        if found != CLI_VERSION:
+            stop(f"the wall is verified with codex-cli {CLI_VERSION} (found {found} at {cli})")
+    return cli
+
+
+def toml(value):
+    """A TOML value for a -c override: strings, booleans, lists and tables of them."""
+    if isinstance(value, dict):
+        return "{" + ", ".join(json.dumps(str(k)) + "=" + toml(v) for k, v in value.items()) + "}"
+    if isinstance(value, (list, tuple)):
+        return "[" + ", ".join(toml(v) for v in value) + "]"
+    return json.dumps(value)
+
+
+def readable_extras(home):
+    """The folders BUZZ_WALL_READ names: absolute, existing, and never the home folder or one around it."""
+    extras = []
+    for extra in os.environ.get("BUZZ_WALL_READ", "").split(":"):
+        if extra and os.path.isabs(extra) and os.path.isdir(extra):
+            extra = os.path.realpath(extra)
+            if not inside(home, extra) and extra not in extras:
+                extras.append(extra)
+    return extras
+
+
+def wall_settings(project, home):
+    """The -c overrides that put up the wall. They win over every configuration file."""
+    filesystem = {":root": "read", home: "deny", ":project_roots": {".": "write"}, ":tmpdir": "write"}
+    for extra in readable_extras(home):
+        filesystem[extra] = "read"
+    settings = {
+        "default_permissions": PROFILE,
+        f"permissions.{PROFILE}.filesystem": filesystem,
+        f"permissions.{PROFILE}.network.enabled": True,
+        "approval_policy": "never",
+        # The project folder is the whole project: nothing above it is searched for instructions.
+        "project_root_markers": [],
+        # The walled agent can write the project's own Codex configuration, so it is not loaded.
+        "projects": {project: {"trust_level": "untrusted"}},
+        "model_provider": "openai",
+        "forced_login_method": "chatgpt",
+        "features.skip_host_skill_discovery": True,
+        # The agent's own Buzz settings reach its shell, where the buzz command reads them.
+        "shell_environment_policy.inherit": "all",
+        "shell_environment_policy.ignore_default_excludes": True,
+    }
+    for feature in DISABLED:
+        settings["features." + feature] = False
+    args = []
+    for key, value in settings.items():
+        args.extend(["-c", f"{key}={toml(value)}"])
+    return args
+
+
+def probe(cli, project, home, settings):
+    """Run two commands under the wall's settings: the project folder is readable, the home folder is not."""
+    def listing(folder):
+        try:
+            return subprocess.run([cli, "sandbox", "-P", PROFILE, *settings, "--", "/bin/ls", folder], cwd=project,
+                                  stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                  timeout=30).returncode
+        except (subprocess.SubprocessError, OSError) as exc:
+            stop(f"the wall check could not run a command under the Codex sandbox ({exc})")
+    if listing(project) != 0:
+        stop(f"the wall check failed: a walled command cannot read the project folder {project}")
+    if listing(home) == 0:
+        stop(f"the wall check failed: a walled command can read the home folder {home}; the wall does not hold with this Codex CLI")
+
+
+def check_wall():
+    adapter = adapter_path()
+    cli = codex_cli()
+    try:
+        version = subprocess.check_output([adapter, "--version"], text=True, stdin=subprocess.DEVNULL, timeout=15).split()[-1]
+    except (subprocess.SubprocessError, OSError, IndexError) as exc:
+        stop(f"the wall check failed: the Codex adapter did not answer ({exc})")
+    if version != ADAPTER_VERSION:
+        stop(f"the wall needs @agentclientprotocol/codex-acp@{ADAPTER_VERSION} (found {version})")
+    if sys.platform == "darwin" and not os.access("/usr/bin/sandbox-exec", os.X_OK):
+        stop("the wall needs the macOS sandbox (/usr/bin/sandbox-exec), which is missing")
+    project, home = project_folder()
+    probe(cli, project, home, wall_settings(project, home))
+    return 0
+
+
+def user_mcp_servers_off(cli, settings, cwd):
+    """The user's own MCP servers run outside the profile, with the user's rights: all are switched off."""
+    try:
+        servers = json.loads(subprocess.check_output([cli, "mcp", "list", "--json", *settings], cwd=cwd,
+                                                     stdin=subprocess.DEVNULL, timeout=20))
+    except (subprocess.SubprocessError, OSError, ValueError) as exc:
+        stop(f"cannot list the configured MCP servers, so they cannot be switched off ({exc})")
+    names = [server["name"] for server in servers]
+    if not names:
+        return []
+    # A TOML inline table also handles server names that contain dots or quotes.
+    return ["-c", "mcp_servers={" + ", ".join(json.dumps(name) + "={enabled=false}" for name in names) + "}"]
+
+
+def sanitize(method, params, project):
+    """Remove from one request what would widen the wall. Raises ValueError for a refused request."""
+    if method in REFUSED or method.startswith(REFUSED_GROUPS):
+        raise ValueError(f"{method} is not available behind the workspace wall")
+    if method in ("thread/start", "thread/resume", "turn/start", "thread/settings/update", "turn/settings/update"):
+        for key in STRIPPED:
+            params.pop(key, None)
+        cwd = params.get("cwd")
+        if cwd is not None and not inside(os.path.realpath(cwd), project):
+            raise ValueError(f"{method} names the folder {cwd}, outside the project folder")
+        if method != "turn/settings/update":
+            params["approvalPolicy"] = "never"
+        if method in ("thread/start", "thread/resume"):
+            if cwd is None:
+                params["cwd"] = project
+            params["config"] = {}
+            params["modelProvider"] = "openai"
+            # A thread is resumed by its identifier, never from a file the request names.
+            params.pop("path", None)
+    elif method == "skills/extraRoots/set":
+        params["extraRoots"] = []
+    return params
+
+
+def app_server():
+    """Run the real Codex app-server behind the wall, and pass the adapter's requests on, sanitized."""
+    cli = os.environ.get("BUZZ_WALL_CODEX_CLI") or codex_cli()
+    project, home = project_folder()
+    settings = wall_settings(project, home)
+    # A temporary folder of this session's own: the profile lets commands write only there and in the project.
+    work = tempfile.mkdtemp(prefix="buzz-wall-")
+    # Git stops when it may not read the home folder's configuration, so it is told there is none.
+    env = dict(os.environ, TMPDIR=work, GIT_CONFIG_GLOBAL="/dev/null")
+    for name in ("CODEX_PATH", "BUZZ_WALL_CODEX_CLI"):
+        env.pop(name, None)
+    try:
+        args = [cli, "app-server", *settings, *user_mcp_servers_off(cli, settings, project)]
+        # The app-server runs in the project folder; every thread must name a folder inside it (sanitize).
+        proc = subprocess.Popen(args, stdin=subprocess.PIPE, cwd=project, env=env)
+
+        def forward():
+            source = os.fdopen(os.dup(0), "rb")
+            try:
+                while True:
+                    line = source.readline(MAX_FRAME + 1)
+                    if not line:
+                        break
+                    if len(line) > MAX_FRAME:
+                        raise ValueError("a request exceeds the frame limit")
+                    message = json.loads(line)
+                    method = message.get("method") if isinstance(message, dict) else None
+                    if isinstance(method, str):
+                        # A request or a notification from the adapter; an answer has no method.
+                        params = message.get("params")
+                        params = sanitize(method, params if isinstance(params, dict) else {}, project)
+                        if "params" in message or params:
+                            message["params"] = params
+                    proc.stdin.write(json.dumps(message, separators=(",", ":")).encode() + b"\n")
+                    proc.stdin.flush()
+            except (OSError, ValueError) as exc:
+                print(f"wall/codex-acp: the session was stopped: {type(exc).__name__}: {str(exc)[:200]}", file=sys.stderr)
+                proc.terminate()
+            finally:
+                source.close()
+                try:
+                    proc.stdin.close()
+                except OSError:
+                    pass
+
+        threading.Thread(target=forward, daemon=True).start()
+        for number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+            signal.signal(number, lambda *_: proc.terminate())
+        return proc.wait()
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def main():
+    args = sys.argv[1:]
+    if os.environ.get("BUZZ_WALL_CODEX_CLI"):
+        # Started by the adapter as its Codex CLI.
+        if args == ["app-server"]:
+            return app_server()
+        stop("the adapter asked its Codex CLI for something other than app-server: " + " ".join(args[:3]))
+    if args == ["--check-wall"]:
+        return check_wall()
+    if args[:1] == ["cli"]:
+        # "cli ARGS" runs the agent's own Codex CLI, as the adapter's cli does: the sign-in check asks it.
+        cli = codex_cli()
+        os.execv(cli, [cli, *args[1:]])
+    adapter = adapter_path()
+    if args in (["--version"], ["-v"], ["--help"]):
+        os.execv(adapter, [adapter, *args])
+    cli = codex_cli()
+    project_folder()
+    os.environ.pop("CODEX_CONFIG", None)   # the adapter's own configuration override: the wall's settings stand
+    env = dict(os.environ, CODEX_PATH=str(SELF), BUZZ_WALL_CODEX_CLI=cli)
+    os.execve(adapter, [adapter, *args], env)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
