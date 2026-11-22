@@ -1,11 +1,16 @@
-"""Exercise the workspace wall the way an agent session runs: the installed Claude ACP adapter,
-started through wall/claude-agent-acp, driven over ACP as the Buzz harness drives it, with a local
-model that asks for file and shell actions inside and outside the project folder.
+"""Exercise the sandbox settings the way a supervisor session runs: the installed Claude ACP adapter,
+with no program in front of it, started in a project folder whose .claude/settings.json was written
+by workspace-settings.py, and driven over ACP as the Buzz harness drives it: the client asks for
+bypassPermissions and answers every permission request with "allow". A local model asks for file
+and shell actions inside and outside the project folder.
 
 Offline: a loopback model endpoint, a fixture API key, a disposable home folder, a stand-in buzz.
 Nothing signs in, and nothing contacts a provider or a community.
 
-    python3 test-wall.py
+    python3 test-workspace-settings.py [--verbose]
+
+It asserts what the settings hold, and reports what they leave to the rule in the supervisor's
+prompt, so the documentation of both stays what was measured.
 """
 import http.server
 import json
@@ -22,8 +27,8 @@ import time
 SKILL = Path(__file__).resolve().parent / "buzz-agent-team"
 
 BUZZ_STANDIN = """#!/bin/sh
-# Reports whether it runs inside the wall: can it read a file outside the project folder?
-if cat "$HOME/private.txt" >/dev/null 2>&1; then w=UNWALLED; else w=walled; fi
+# Reports whether it runs inside the sandbox: can it read a file outside the project folder?
+if cat "$HOME/private.txt" >/dev/null 2>&1; then w=OUTSIDE-SANDBOX; else w=sandboxed; fi
 case "$1" in
   stdin) printf 'buzz[%s] stdin=' "$w"; cat ;;
   file) printf 'buzz[%s] file=' "$w"; cat "$2" 2>&1 ;;
@@ -136,9 +141,10 @@ class Acp:
                 pass
 
 
-def exercise(home, walled=True, set_bypass=False):
-    """One agent session. set_bypass: the client asks for bypassPermissions, as the harness does for
-    an agent whose settings say so; a walled agent is started with the default mode instead."""
+def exercise(home, earlier=None, settings=True):
+    """One supervisor session in bypassPermissions, the mode its settings file asks the harness for.
+    earlier: a settings.json the project folder already has, which the helper must complete.
+    settings=False: no settings file at all, to show that the checks can fail."""
     home = home.resolve()
     project = home / "WorkSpace" / "proj"
     project.mkdir(parents=True)
@@ -149,19 +155,29 @@ def exercise(home, walled=True, set_bypass=False):
     team = home / ".buzz-agents" / "team"
     (team / "supervisor").mkdir(parents=True)
     (team / "supervisor" / "identity.key").write_text("KEY-MARKER\n")
-    shutil.copytree(SKILL / "wall", team / "wall")
-    for name in ("claude-agent-acp", "walled-claude", "bin/buzz"):
-        (team / "wall" / name).chmod(0o700)
+    wall_text = None
+    if earlier is not None:
+        (project / ".claude").mkdir()
+        (project / ".claude" / "settings.json").write_text(json.dumps(earlier))
+    if settings:
+        # The settings are put there by the production helper, as create and team.sh do.
+        subprocess.run([sys.executable, "-I", str(SKILL / "scripts" / "workspace-settings.py"), "apply", str(project)],
+                       check=True, stdout=subprocess.DEVNULL)
+        wall_text = (project / ".claude" / "settings.json").read_text()
     os.symlink(home / "private.txt", project / "link-file")
     (home / "bin").mkdir()
     (home / "bin" / "buzz").write_text(BUZZ_STANDIN)
     (home / "bin" / "buzz").chmod(0o700)
     (home / "tmp").mkdir()
-    # The user's own settings try to open everything; the wall's settings must win over them.
+    (home / "tools").mkdir()
+    (home / "tools" / "hometool").write_text("#!/bin/sh\necho HOMETOOL-RAN\n")
+    (home / "tools" / "hometool").chmod(0o700)
+    # The user's own settings switch the sandbox off and allow every read; the project folder's
+    # settings rank above them. (A user settings file that adds working folders widens what counts as
+    # inside, by design: that is not set here.)
     (home / ".claude").mkdir()
     (home / ".claude" / "settings.json").write_text(json.dumps({
-        "permissions": {"additionalDirectories": [str(home)], "allow": ["Read(//**)", "Bash"]},
-        "sandbox": {"enabled": False}}))
+        "permissions": {"allow": ["Read(//**)", "Bash"]}, "sandbox": {"enabled": False}}))
     adapter = shutil.which("claude-agent-acp")
     if not adapter:
         raise SystemExit("Install the Claude ACP adapter before running this test.")
@@ -186,8 +202,8 @@ def exercise(home, walled=True, set_bypass=False):
         ("plain buzz with a here-document", "Bash", {"command": "buzz stdin <<'EOF'\nfirst line\nsecond line\nEOF"}),
         ("two buzz commands joined", "Bash", {"command": "buzz probe && buzz probe"}),
         ("git commit", "Bash", {"command": "git add inside.txt && git -c user.name=t -c user.email=t@example.org commit -q -m t && git log --oneline | wc -l"}),
-        ("read the wall's own file", "Read", {"file_path": str(team / "wall" / "walled-claude")}),
-        ("shell reads the wall's own file", "Bash", {"command": f"head -1 {team}/wall/walled-claude"}),
+        ("home tool in the sandbox", "Bash", {"command": "$HOME/tools/hometool 2>&1; echo rc=$?"}),
+        ("home tool, run again outside the sandbox", "Bash", {"command": "$HOME/tools/hometool 2>&1; echo rc=$?", "dangerouslyDisableSandbox": True}),
         ("write project settings that switch the sandbox off", "Write", {"file_path": str(project / ".claude" / "settings.json"),
                                                                          "content": json.dumps({"sandbox": {"enabled": False}})}),
         ("shell cat outside, after that", "Bash", {"command": f"cat {home}/private.txt"}),
@@ -203,9 +219,9 @@ def exercise(home, walled=True, set_bypass=False):
             "CLAUDE_CONFIG_DIR": str(home / ".claude"), "ANTHROPIC_API_KEY": "fixture-only",
             "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{server.server_port}", "NO_PROXY": "localhost,127.0.0.1",
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1", "DISABLE_TELEMETRY": "1",
-            "CLAUDE_AGENT_ACP_PROTOCOL": "v1", "BUZZ_WALL_PROJECT": str(project),
+            "CLAUDE_AGENT_ACP_PROTOCOL": "v1",
         }
-        command = [str(team / "wall" / "claude-agent-acp")] if walled else [adapter]
+        command = [adapter]
         acp = Acp(command, str(project), env, time.monotonic() + 420)
         try:
             init = acp.request("initialize", {"protocolVersion": 1, "clientCapabilities": {},
@@ -214,9 +230,7 @@ def exercise(home, walled=True, set_bypass=False):
             new = acp.request("session/new", {"cwd": str(project), "mcpServers": []})
             assert "result" in new, new
             session = new["result"]["sessionId"]
-            mode = {"result": None}
-            if set_bypass:
-                mode = acp.request("session/set_config_option", {"sessionId": session, "configId": "mode", "value": "bypassPermissions"})
+            mode = acp.request("session/set_config_option", {"sessionId": session, "configId": "mode", "value": "bypassPermissions"})
             done = acp.request("session/prompt", {"sessionId": session, "prompt": [{"type": "text", "text": "Run the fixture."}]})
             assert "result" in done, done
         finally:
@@ -239,67 +253,93 @@ def exercise(home, walled=True, set_bypass=False):
     state = {
         "mode_applied": "result" in mode, "approved": acp.approved, "project_instructions": "PROJECT-INSTRUCTIONS-MARKER" in first,
         "settings_planted": (project / ".claude" / "settings.local.json").exists(),
+        "settings_changed": wall_text is not None and (project / ".claude" / "settings.json").read_text() != wall_text,
+        "settings": json.loads((project / ".claude" / "settings.json").read_text()) if settings else {},
         "written_inside": (project / "written-inside.txt").exists(), "written_outside": (home / "written-outside.txt").exists(),
         "bash_inside": (project / "bash-inside.txt").exists(), "bash_outside": (home / "bash-outside.txt").exists(),
     }
     return out, state
 
 
-def check_walled(out, state, label):
-    # Nothing outside the project folder was read: no marker of an outside file is in any result.
-    for name, (_, text) in out.items():
-        assert "OUTSIDE-MARKER" not in text and "KEY-MARKER" not in text, f"{label}: leak in: {name}: {text[:200]}"
+HELD = "the settings hold"
+LEFT = "left to the rule in the supervisor's prompt"
+
+
+def leaked(text):
+    return "OUTSIDE-MARKER" in text or "KEY-MARKER" in text
+
+
+def check_held(out, state, label):
     # Inside the project folder everything works.
     assert not out["read inside"][0] and "INSIDE-MARKER" in out["read inside"][1], out["read inside"]
     assert not out["write inside"][0] and state["written_inside"], out["write inside"]
     assert not out["shell inside"][0] and "more" in out["shell inside"][1] and state["bash_inside"], out["shell inside"]
     assert "1" in out["git commit"][1] and not out["git commit"][0], out["git commit"]
-    # Outside it, the file tools and the shell are refused, and nothing is written.
-    for name in ("read outside", "read key", "write outside", "read symlink to outside", "read the wall's own file"):
-        assert out[name][0], f"{label}: not refused: {name}: {out[name][1][:200]}"
-    assert not state["written_outside"] and not state["bash_outside"], state
+    # The file tools are refused outside it, a symbolic link that leads outside included, and nothing is written.
+    for name in ("read outside", "read key", "write outside", "read symlink to outside"):
+        assert out[name][0] and not leaked(out[name][1]), f"{label}: not refused: {name}: {out[name][1][:200]}"
+    assert not state["written_outside"], state
+    # A sandboxed shell command reads no user folder outside the project folder and writes nothing there.
     for name in ("shell cat outside", "shell cat key, path built in the shell", "script opens outside file",
-                 "shell asks to skip the sandbox", "shell reads the wall's own file", "shell cat outside, after that"):
-        assert "not permitted" in out[name][1] or "blocked" in out[name][1] or out[name][0], f"{label}: not refused: {name}: {out[name][1][:200]}"
-    # A plain buzz command runs outside the sandbox, so it has the network; a path outside the project
-    # folder is refused to it, and a pipe into it runs walled as a whole.
-    assert "buzz[UNWALLED] ran" in out["plain buzz"][1], out["plain buzz"]
-    assert "buzz[UNWALLED] file=INSIDE-MARKER" in out["plain buzz, inside path"][1], out["plain buzz, inside path"]
-    assert out["plain buzz, outside path"][0], out["plain buzz, outside path"]
-    assert "this workspace is walled" in out["pipe into buzz"][1], out["pipe into buzz"]
-    # The agent cannot plant settings that would widen the wall for its next session.
-    assert not state["settings_planted"], state
+                 "shell cat outside, after that", "pipe into buzz"):
+        assert not leaked(out[name][1]), f"{label}: leak in: {name}: {out[name][1][:200]}"
+    assert not state["bash_outside"], state
+    assert "HOMETOOL-RAN" not in out["home tool in the sandbox"][1], out["home tool in the sandbox"]
+    # A plain buzz command runs outside the sandbox, so it has the network, and reads a project file.
+    assert "buzz[OUTSIDE-SANDBOX] ran" in out["plain buzz"][1], out["plain buzz"]
+    assert "buzz[OUTSIDE-SANDBOX] file=INSIDE-MARKER" in out["plain buzz, inside path"][1], out["plain buzz, inside path"]
+    # The agent cannot change or replace the settings that hold it, with a file tool or from the sandbox.
     assert out["write project settings that switch the sandbox off"][0], out["write project settings that switch the sandbox off"]
-    # No approval was needed, so the harness's "allow" to every request opened nothing.
-    assert state["approved"] == 0, state
+    assert not state["settings_changed"] and not state["settings_planted"], state
     # The project's own instructions still reach the agent.
     assert state["project_instructions"], "the project's CLAUDE.md did not reach the agent"
 
 
+def gaps(out):
+    """What the settings do not hold, as measured: each of these is in the supervisor's prompt rule."""
+    found = []
+    if leaked(out["shell asks to skip the sandbox"][1]):
+        found.append("a command run again outside the sandbox reads a file outside the project folder")
+    if "HOMETOOL-RAN" in out["home tool, run again outside the sandbox"][1]:
+        found.append("a command run again outside the sandbox runs a tool installed outside the project folder")
+    if leaked(out["plain buzz, outside path"][1]):
+        found.append("a plain buzz command reads a file outside the project folder that it is given")
+    return found
+
+
 def main():
     verbose = "--verbose" in sys.argv
-    runs = [("walled, started with the default mode as team.sh starts it", False),
-            ("walled, with a client that asks for bypassPermissions and allows every request", True)]
-    for label, set_bypass in runs:
-        with tempfile.TemporaryDirectory(prefix="buzz-wall-") as tmp:
-            out, state = exercise(Path(tmp), walled=True, set_bypass=set_bypass)
+    earlier = {"env": {"EXAMPLE_KEPT": "1"}, "sandbox": {"enabled": False, "excludedCommands": ["docker *"]}}
+    runs = [("a project folder that had no settings file", None),
+            ("a project folder whose settings file switched the sandbox off and held other settings", earlier)]
+    found = None
+    for label, before in runs:
+        with tempfile.TemporaryDirectory(prefix="buzz-settings-") as tmp:
+            out, state = exercise(Path(tmp), earlier=before)
         if verbose:
             print(f"--- {label}")
             for name, (error, text) in out.items():
                 print(f"  {name:52s} error={error!s:5} {text[:140]}")
-            print("  ", state)
-        check_walled(out, state, label)
-    if "--also-unwalled" in sys.argv:
-        # The same session without the wall reads the outside files: the checks above can fail.
-        with tempfile.TemporaryDirectory(prefix="buzz-wall-open-") as tmp:
-            open_out, open_state = exercise(Path(tmp), walled=False, set_bypass=True)
-        leaks = [name for name, (_, text) in open_out.items() if "OUTSIDE-MARKER" in text or "KEY-MARKER" in text]
+            print("  ", {k: v for k, v in state.items() if k != "settings"})
+        check_held(out, state, label)
+        if before is not None:
+            kept = state["settings"]
+            assert kept.get("env") == before["env"] and "docker *" in kept["sandbox"]["excludedCommands"], kept
+        found = gaps(out) if found is None else [g for g in found if g in gaps(out)]
+    if "--also-without" in sys.argv:
+        # The same session without the settings file reads and writes outside: the checks above can fail.
+        with tempfile.TemporaryDirectory(prefix="buzz-settings-open-") as tmp:
+            open_out, open_state = exercise(Path(tmp), settings=False)
+        leaks = [name for name, (_, text) in open_out.items() if leaked(text)]
         assert len(leaks) >= 5 and open_state["written_outside"], (leaks, open_state)
-        print(f"Without the wall, the same session read outside files in {len(leaks)} of {len(open_out)} actions and wrote outside.")
-    print("Verified over ACP, as the harness drives the adapter, in two sessions: reads and writes inside the project "
-          "folder work; the file tools and the shell are refused outside it, the key file and the wall's own files "
-          "included; hostile user settings and a client that allows every request open nothing; a plain buzz command "
-          "runs outside the sandbox and is refused a path outside the project folder.")
+        print(f"Without the settings file, the same session read outside files in {len(leaks)} of {len(open_out)} actions and wrote outside.")
+    print("Verified over ACP, as the harness drives the stock adapter (bypassPermissions, every request allowed), in two "
+          "sessions: reads and writes inside the project folder work; the file tools are refused outside it; a sandboxed "
+          "shell command reads no user folder outside it and writes nothing there; the agent cannot change the settings file; "
+          "a plain buzz command runs outside the sandbox.")
+    print(f"Not held by the settings ({LEFT}):")
+    for line in found or ["nothing measured"]:
+        print(f"  - {line}")
 
 
 if __name__ == "__main__":

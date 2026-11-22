@@ -420,7 +420,8 @@ for id in assistant supervisor; do
     check "$id: public key printed" has "$OUT/create-shop.out" "$(grep '^pubkey=' "$h/agent.conf" | cut -d= -f2)"
 done
 check 'workspace and root folders mode 700' eval '[ "$(mode_of "$ROOT")" = 700 ] && [ "$(mode_of "$ROOT/shop")" = 700 ]'
-check 'PROJECT.md is the only generated workspace file' eval '[ "$(ls -A "$TD/ws/shop")" = PROJECT.md ] && cmp "$TD/ws/shop/PROJECT.md" "$SKILL_DIR/templates/project.md"'
+check 'the workspace gets PROJECT.md and the supervisor'"'"'s sandbox settings, and nothing else' eval '[ "$(LC_ALL=C ls -A "$TD/ws/shop" | tr "\n" " ")" = ".claude PROJECT.md " ] && [ "$(ls -A "$TD/ws/shop/.claude")" = settings.json ] && cmp "$TD/ws/shop/PROJECT.md" "$SKILL_DIR/templates/project.md"'
+check 'the settings are the ones the helper shows, and create named the file before the project record' eval '[ "$(python3 -I "$SKILL_DIR/scripts/workspace-settings.py" show)" = "$(cat "$TD/ws/shop/.claude/settings.json")" ] && [ "$(grep -n -e "^Project folder settings: added: " -e "^Shared project record: " "$OUT/create-shop.out" | cut -d: -f2 | tr "\n" " ")" = "Project folder settings Shared project record " ]'
 check 'next steps name the Buzz Desktop step' has "$OUT/create-shop.out" 'Authorize external identity'
 check 'the two public keys differ' eval '[ "$(grep ^pubkey= "$ROOT/shop/assistant/agent.conf")" != "$(grep ^pubkey= "$ROOT/shop/supervisor/agent.conf")" ]'
 
@@ -646,7 +647,7 @@ for id in assistant supervisor; do
     check "$id: the role rules come first and are complete" \
         eval '[ "$(grep -n "own Buzz memory" "$p" | cut -d: -f1)" -lt "$(grep -n "### About this workspace" "$p" | cut -d: -f1)" ]'
 done
-check 'the brief is kept outside the shared record' eval '[ "$(ls -A "$TD/ws/notes")" = PROJECT.md ] && hasnt "$TD/ws/notes/PROJECT.md" "$BRIEF_L1"'
+check 'the brief is kept outside the shared record' eval '[ "$(LC_ALL=C ls -A "$TD/ws/notes" | tr "\n" " ")" = ".claude PROJECT.md " ] && hasnt "$TD/ws/notes/PROJECT.md" "$BRIEF_L1" && ! grep -rqF "$BRIEF_L1" "$TD/ws/notes/.claude"'
 check 'create names the stored brief' has "$OUT/brief-create.out" "Workspace brief: $BR/notes/brief.md"
 check 'without --brief: no brief file and no brief section (the shop agents)' \
     eval '[ ! -e "$ROOT/shop/brief.md" ] && hasnt "$ROOT/shop/assistant/prompt.md" "About this workspace" && hasnt "$ROOT/shop/supervisor/prompt.md" "About this workspace" && has "$OUT/create-shop.out" "Workspace brief: none"'

@@ -10,7 +10,8 @@
 # NEEDED ON PATH: run-buzz-acp.sh (the launcher), buzz-acp, buzz, and for each agent the adapter of
 # the provider it runs on (claude-agent-acp or codex-acp), signed in through your own subscription.
 # "team.sh check" verifies all of it and starts nothing; start runs the same check first.
-# python3 is used only to retrieve a provider's model list for the model menu (acp-models.py here).
+# python3 is used to retrieve a provider's model list for the model menu (acp-models.py here) and to
+# put the sandbox settings of a supervisor on Claude into the project folder (workspace-settings.py here).
 #
 # THE PROJECT FOLDER the agents work in is the folder this command is started from, or --workspace DIR:
 #   cd ~/code/shop && ~/.buzz-agents/shop/team.sh
@@ -71,9 +72,10 @@ start and check:
                             On Codex: a level the model list offers for that model (low to
                             ultra). default sets none for this run, whatever is saved.
   --yes                     ask nothing: every agent keeps its saved provider and model
-  --no-wall                 start an agent on the stock adapter (the supervisor) without the
-                            workspace wall, for this run. It can then read and write whatever
-                            your account can.
+  --no-wall                 do not put the sandbox settings into the project folder at this
+                            start, and start a supervisor on Claude in a folder that has none.
+                            Only the rule in its prompt then holds it. Settings that are
+                            already in the folder stay there and apply.
   --verbose                 also print the launcher's own check of each agent
   --check                   with start: the same as "team.sh check"
 
@@ -96,18 +98,23 @@ One agent at a time: each agent folder holds its own start command.
                                       provider, model and reasoning effort, as this command does;
                                       --yes asks nothing (start.sh --help)
 
-The workspace wall: every agent's files stop at the project folder.
+What holds each agent to the project folder:
   - The discussion partner and the reviewer run a restricted runtime: they read only the project
     folder, and they cannot edit files or run commands at all.
-  - The supervisor keeps its tools and is started behind wall/ in this folder: its file tools read
-    and write only inside the project folder, and its shell commands run in a sandbox that cannot
-    read your home folder outside the project folder and writes only inside the project folder and
-    a temporary folder. Your own Claude settings are not loaded for it. Network access is not
-    limited. A plain buzz command runs outside the sandbox, which has no network of its own, and is
-    refused a path outside the project folder.
-  - team.conf may name more folders the supervisor's shell commands may read, for tools installed
-    under your home folder: wall_read=/abs/dir:/abs/dir
-  - On Codex the supervisor has no wall, so start refuses it there unless --no-wall is given.
+  - A supervisor on Claude is held by plain Claude Code settings in the project folder,
+    .claude/settings.json, which Claude Code reads itself. Before a start this command puts them
+    there with workspace-settings.py from this folder, and an existing file keeps everything else
+    it holds. With them its file tools read and write only inside the project folder, and its
+    shell commands run in a sandbox: they write only inside the project folder and a temporary
+    folder, and they read no user folder outside the project folder. A plain buzz command runs
+    outside the sandbox, which has no direct network. Every Claude Code session started in that
+    folder, your own included, runs under the same settings.
+  - A supervisor on Codex runs its commands in Codex's workspace-write sandbox, which the stock
+    adapter sets on every turn: they write only inside the project folder and temporary folders,
+    and they have no network. They can read the whole disk. No file is written for it.
+  - The rule in the supervisor's prompt asks for what no setting holds: a command it runs again
+    outside the sandbox, a buzz command given a file outside the project folder, and on Codex
+    what it reads. Folders your own Claude settings add as working folders count as inside.
 
 Reasoning effort: how hard the model thinks on each turn; higher levels cost more of your
 allowance and take longer. A Claude agent gets its level as CLAUDE_CODE_EFFORT_LEVEL, which wins
@@ -663,24 +670,43 @@ choose_effort() { # ID -> RUN_EFFORT_<id>; on Codex the level also goes into RUN
     eval "RUN_EFFORT_$id=\$e"
 }
 
-# ---------------------------------------------------------------- the workspace wall
-# How an agent is held to the project folder for this run:
-#   runtime  its restricted runtime (the discussion partner, the reviewer): reads inside the project
-#            folder only, no edits, no commands
-#   wall     the stock Claude adapter behind wall/claude-agent-acp: file tools and shell stop at the
-#            project folder (wall/walled-claude says how)
-#   none     nothing holds it: the stock adapter on Codex, or --no-wall
+# ---------------------------------------------------------------- what holds an agent to the project folder
+# How an agent is held for this run:
+#   runtime   its restricted runtime (the discussion partner, the reviewer): reads inside the project
+#             folder only, no edits, no commands
+#   settings  the stock Claude adapter with the sandbox settings in the project folder,
+#             PROJECT/.claude/settings.json (workspace-settings.py in this folder writes and checks them)
+#   codex     the stock Codex adapter, which runs every turn in Codex's workspace-write sandbox
+#   none      the stock Claude adapter in a project folder without those settings (--no-wall)
+# Beside these, the supervisor's prompt carries the rule to stay inside the project folder.
 NO_WALL=no
+WS_APPLY_ERROR=''   # why a start could not put the settings into the project folder
 own_runtime() { # ID: its settings name a runtime of its own folder
     local v
     v=$(env_get "$T_DIR/$1/$ENV_NAME" BUZZ_ACP_AGENT_COMMAND) || v=''
     case $v in */runtime/claude-agent-acp | */runtime/codex-acp) return 0 ;; esac
     return 1
 }
-wall_kind() { # ID BACKEND
+# workspace_settings apply|check DIR: prints the helper's one line. Status: the helper's (0 written or
+# in place; 3 absent; 4 incomplete; 2 the file cannot be used), 5 without python3, 6 without the helper.
+workspace_settings() {
+    local py=${AGENT_TEAM_PYTHON:-python3}
+    [ "$py" != none ] || py=python3
+    if [ ! -f "$T_DIR/workspace-settings.py" ]; then
+        printf 'this team folder has no workspace-settings.py; add it with the skill: agent-team.sh upgrade <team>'
+        return 6
+    fi
+    if ! command -v "$py" >/dev/null 2>&1; then
+        printf 'python3 is needed to write the settings file, and it is not on PATH'
+        return 5
+    fi
+    "$py" -I "$T_DIR/workspace-settings.py" "$1" "$2" 2>&1
+}
+hold_kind() { # ID BACKEND
     if own_runtime "$1"; then printf 'runtime'
-    elif [ "$NO_WALL" = yes ] || [ "$2" != claude ]; then printf 'none'
-    else printf 'wall'; fi
+    elif [ "$2" = codex ]; then printf 'codex'
+    elif [ "$NO_WALL" = yes ] && ! workspace_settings check "$RUN_WORKSPACE" >/dev/null 2>&1; then printf 'none'
+    else printf 'settings'; fi
 }
 
 # ---------------------------------------------------------------- what an agent is started with
@@ -699,15 +725,9 @@ agent_env() { # ID
     # calling shell has it, as the user's own Claude Code settings are.
     eval "b=\$RUN_BACKEND_$1; e=\$RUN_EFFORT_$1"
     if [ "$b" = claude ] && [ -n "$e" ]; then export CLAUDE_CODE_EFFORT_LEVEL=$e; fi
-    # Behind the wall: the adapter is started through wall/, which holds the session in its own
-    # permission mode, so the harness sets none.
-    if [ "$(wall_kind "$1" "$b")" = wall ]; then
-        export BUZZ_ACP_AGENT_COMMAND=$T_DIR/wall/claude-agent-acp
-        export BUZZ_WALL_PROJECT=$RUN_WORKSPACE
-        export BUZZ_ACP_PERMISSION_MODE=default
-        v=$(conf_get "$T_DIR/team.conf" wall_read) || v=''
-        if [ -n "$v" ]; then export BUZZ_WALL_READ=$v; fi
-    fi
+    # On the stock Codex adapter: its workspace-write mode, whatever the calling shell exports. The
+    # adapter sends that mode's sandbox with every turn, over what a Codex config file says.
+    if [ "$(hold_kind "$1" "$b")" = codex ]; then export INITIAL_AGENT_MODE=agent; fi
     export RUN_BUZZ_ACP_KEY_FILE=$home/identity.key
     export BUZZ_ACP_SYSTEM_PROMPT_FILE=$home/prompt.md
     export RUN_BUZZ_ACP_WORKDIR=$RUN_WORKSPACE
@@ -756,6 +776,7 @@ run_checks() { # AGENT...: 0 when everything a start needs is in place
         line ok 'project folder' "$RUN_WORKSPACE ($WORKSPACE_SOURCE)"
         if [ "$RUN_WORKSPACE" != "$T_WORKSPACE" ]; then line note 'project folder' "this team was created for $T_WORKSPACE"; fi
         if [ ! -f "$RUN_WORKSPACE/PROJECT.md" ]; then line note 'project record' 'that folder has no PROJECT.md, the record both agents consult'; fi
+        if conf_get "$T_DIR/team.conf" wall_read >/dev/null; then line note 'team.conf' 'wall_read is no longer used: the sandbox settings are in the project folder, and you can edit them there'; fi
     else
         line PROBLEM 'project folder' "$RUN_WORKSPACE is not a folder on this machine ($WORKSPACE_SOURCE)" 'go to the project folder and run this command from there, or pass --workspace DIR'
     fi
@@ -791,20 +812,25 @@ run_checks() { # AGENT...: 0 when everything a start needs is in place
         if [ -n "$old" ] && [ "$old" != "$home/identity.key" ]; then
             line note 'moved folder' "the settings file names ${old%/identity.key}; this folder's own paths are used instead"
         fi
-        case $(wall_kind "$id" "$b") in
-            runtime) line ok wall 'its runtime reads only the project folder; no edits, no commands' ;;
-            wall)
-                if [ ! -x "$T_DIR/wall/claude-agent-acp" ] || [ ! -x "$T_DIR/wall/walled-claude" ] || [ ! -x "$T_DIR/wall/bin/buzz" ]; then
-                    line MISSING wall 'this team folder has no wall files' 'add them with the skill: agent-team.sh upgrade <team>'
-                    continue
-                fi
-                rc=0
-                out=$(BUZZ_WALL_PROJECT=$RUN_WORKSPACE "$T_DIR/wall/claude-agent-acp" --check-wall 2>&1 < /dev/null) || rc=$?
-                if [ "$rc" = 0 ]; then line ok wall "file tools and shell stop at $RUN_WORKSPACE"
-                else line PROBLEM wall 'the wall cannot be put up:'; printf '%s\n' "$out" | tail -n 6 | indent; fi ;;
+        case $(hold_kind "$id" "$b") in
+            runtime) line ok sandbox 'its runtime reads only the project folder; no edits, no commands' ;;
+            codex) line ok sandbox "Codex's workspace-write: its commands write only inside $RUN_WORKSPACE and temporary folders" ;;
             *)
-                if [ "$NO_WALL" = yes ]; then line note wall 'NONE (--no-wall): this agent can read and write whatever your account can'
-                else line PROBLEM wall "on $b this agent has no workspace wall" 'choose claude for it, or pass --no-wall to start it without one'; fi ;;
+                rc=0
+                out=$(workspace_settings check "$RUN_WORKSPACE") || rc=$?
+                if [ "$rc" = 0 ]; then
+                    line ok sandbox "the settings in $RUN_WORKSPACE/.claude/settings.json hold its file tools and shell to that folder"
+                elif [ "$NO_WALL" = yes ]; then
+                    line note sandbox 'NONE (--no-wall): the project folder has no sandbox settings; only the rule in its prompt holds this agent'
+                elif [ -n "$WS_APPLY_ERROR" ]; then
+                    line PROBLEM sandbox 'its sandbox settings could not be put into the project folder:' 'fix what the lines below name, or pass --no-wall to start it with only the rule in its prompt'
+                    printf '%s\n' "$WS_APPLY_ERROR" | tail -n 4 | indent
+                elif [ "$rc" = 3 ] || [ "$rc" = 4 ]; then
+                    line note sandbox "its settings are not in the project folder yet; a start puts them into $RUN_WORKSPACE/.claude/settings.json first"
+                else
+                    line PROBLEM sandbox 'its sandbox settings cannot be put into the project folder:' 'fix what the lines below name, or pass --no-wall to start it with only the rule in its prompt'
+                    printf '%s\n' "$out" | tail -n 4 | indent
+                fi ;;
         esac
         own=$(env_get "$home/$ENV_NAME" BUZZ_ACP_AGENT_COMMAND) || own=''
         if case $own in */runtime/claude-agent-acp | */runtime/codex-acp) true ;; *) false ;; esac; then
@@ -839,7 +865,7 @@ run_checks() { # AGENT...: 0 when everything a start needs is in place
 
 # ---------------------------------------------------------------- start and check
 cmd_start() { # MODE(start|check) ARGS...
-    local mode=$1 ids='' all=no yes=no id b m e w home log pid protocol wait_s max_bytes size i alive started='' todo='' explicit
+    local mode=$1 ids='' all=no yes=no id b m e w home log pid protocol wait_s max_bytes size i alive started='' todo='' explicit rc out
     shift
     while [ "$#" -gt 0 ]; do
         case $1 in
@@ -921,6 +947,19 @@ cmd_start() { # MODE(start|check) ARGS...
     case $wait_s in '' | *[!0-9]*) die 'AGENT_TEAM_START_WAIT must be whole seconds' ;; esac
     case $max_bytes in '' | *[!0-9]*) die 'AGENT_TEAM_LOG_MAX_BYTES must be a number of bytes' ;; esac
     [ "$wait_s" -le 60 ] || die 'AGENT_TEAM_START_WAIT is capped at 60 seconds'
+    # First, the sandbox settings of an agent on the stock Claude adapter go into the project folder.
+    # When that fails, the check below says why and nothing starts.
+    if [ "$NO_WALL" = no ] && [ -d "$RUN_WORKSPACE" ] && ! unsafe_workspace "$RUN_WORKSPACE" >/dev/null 2>&1; then
+        for id in $todo; do
+            eval "b=\$RUN_BACKEND_$id"
+            [ "$(hold_kind "$id" "$b")" = settings ] || continue
+            rc=0
+            out=$(workspace_settings apply "$RUN_WORKSPACE") || rc=$?
+            if [ "$rc" != 0 ]; then WS_APPLY_ERROR=$out
+            else case $out in 'in place:'*) ;; *) say "Project folder settings: $out" ;; esac; fi
+            break
+        done
+    fi
     # The whole selection is checked, sign-in included, before the first agent starts.
     # shellcheck disable=SC2086
     run_checks $todo || die 'the check failed; nothing was started'
@@ -946,7 +985,7 @@ cmd_start() { # MODE(start|check) ARGS...
         ) >> "$log" 2>&1 < /dev/null &
         pid=$!
         [ -n "$m" ] || m=$(saved_model "$id" "$b")
-        w=$(wall_kind "$id" "$b")
+        w=$(hold_kind "$id" "$b")
         printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n' "$pid" "$(proc_start "$pid")" "$b" "$m" "$RUN_WORKSPACE" "$e" "$w" > "$home/.new-pid"
         mv -f -- "$home/.new-pid" "$home/agent.pid"
         alive=yes
@@ -964,7 +1003,7 @@ cmd_start() { # MODE(start|check) ARGS...
             die "$id did not start"
         fi
         say "$id: started as PID $pid on $b, model ${m:-the runtime default}${e:+, reasoning effort $e} (log $log)"
-        if [ "$w" = none ]; then say "$id: WARNING: started WITHOUT the workspace wall; it can read and write whatever your account can"; fi
+        if [ "$w" = none ]; then say "$id: WARNING: started WITHOUT sandbox settings in its project folder; only the rule in its prompt holds it"; fi
         started="$started${started:+, }$id"
     done
     say "Stop them with: $T_DIR/team.sh stop      See them with: $T_DIR/team.sh status"
@@ -1038,9 +1077,11 @@ cmd_status() {
         se=$(saved_effort "$id" "$b")
         if ours_alive "$home"; then run="running on ${PF_BACKEND:-an unrecorded provider}${PF_MODEL:+, model $PF_MODEL}${PF_EFFORT:+, reasoning effort $PF_EFFORT}${PF_WORKSPACE:+, in $PF_WORKSPACE}; PID $PF_PID since $PF_START"
             case $PF_WALL in
-                wall) run="$run; behind the workspace wall" ;;
+                settings) run="$run; held by the sandbox settings in its project folder" ;;
+                codex) run="$run; in Codex's workspace-write sandbox" ;;
+                wall) run="$run; behind the workspace wall of a start before 2.0.0" ;;
                 runtime) run="$run; held to the project folder by its runtime" ;;
-                none) run="$run; NOT walled" ;;
+                none) run="$run; NO sandbox settings, only the rule in its prompt" ;;
             esac
         elif read_pidfile "$home"; then run='not running (it exited; see the log)'
         else run='not running'; fi

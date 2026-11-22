@@ -6,6 +6,7 @@ One skill, for Claude Code and for Codex, that sets up a set of Buzz agents for 
   - `VERSION`: the skill's version, one line (see [Versions](#versions)).
   - `SKILL.md`: the guided flow, for both tools.
   - `scripts/agent-team.sh`: the script that does every step (Bash 3.2 or later, mode 755). `agent-team.sh help` lists every command and option.
+  - `scripts/workspace-settings.py`: puts the sandbox settings of a supervisor on Claude into its project folder, and checks them (see What holds each agent). `create` and `upgrade` also copy it into each team folder, where `team.sh` runs it before a start.
   - `scripts/acp-models.py`: lists the models an ACP adapter offers, without a model turn (used by `agent-team.sh models`; `create` and `upgrade` also copy it into each team folder, where `team.sh` runs it before a model menu).
   - `templates/`: the role prompts. `assistant.md` and `supervisor.md` hold the role rules. `project.md` seeds the shared project record and `subscriptions.toml` configures which messages reach the discussion partner. `legacy/` holds the pre-20-November prompts; nothing uses them any more.
   - `templates/team.sh`: the team's own command. `create` and `upgrade` copy it into each team folder, where it checks, starts, stops and reports that folder's agents without this skill (see The team's own command).
@@ -13,7 +14,7 @@ One skill, for Claude Code and for Codex, that sets up a set of Buzz agents for 
   - `runtime/` contains the discussion partner's restricted Claude and Codex runtimes and its typed Buzz tools, installed into each partner's folder.
 - `install.sh`: copies the skill folder into Claude Code's and Codex's skills folders.
 - `CHANGELOG.md`: what changed in each version.
-- `test-agent-team.sh`, `test-team-sh.sh`, `test-wall.py`, `test-partner-runtime.py`, `test-codex-partner.py`: offline tests (see Test).
+- `test-agent-team.sh`, `test-team-sh.sh`, `test-workspace-settings.py`, `test-partner-runtime.py`, `test-codex-partner.py`: offline tests (see Test).
 
 ## Install, update, remove
 
@@ -60,7 +61,7 @@ agent-team.sh status shop                         # one team's recorded version 
 ```
 
 - **Three copies, one number each.** The source here, the installed skill folder and every team folder each hold a `VERSION` file, so you can see which copy is behind. `install.sh` prints the source's version beside the installed one and records it in its marker.
-- **A team folder's `VERSION`** is the version of the skill that created the folder or last upgraded it, and so the version its `team.sh`, each `start.sh`, `acp-models.py`, `wall/` and the agents' generated files come from. `create` writes it for a new team folder only. `upgrade` replaces it as its last step, so an upgrade that is cut short leaves the earlier version there, and shows the change in its plan as `VERSION: <recorded> -> <this skill's>`; when that is the plan's only line, nothing else in the team differs. A team made before 1.0.0 has none until it is upgraded.
+- **A team folder's `VERSION`** is the version of the skill that created the folder or last upgraded it, and so the version its `team.sh`, each `start.sh`, `acp-models.py`, `workspace-settings.py` and the agents' generated files come from. `create` writes it for a new team folder only. `upgrade` replaces it as its last step, so an upgrade that is cut short leaves the earlier version there, and shows the change in its plan as `VERSION: <recorded> -> <this skill's>`; when that is the plan's only line, nothing else in the team differs. A team made before 1.0.0 has none until it is upgraded.
 - **A skill folder without a valid `VERSION`** is refused by `install.sh`, and its `create` and `upgrade` stop before they write anything.
 - **What each number means:**
   - **Major:** a team made by the earlier version must be upgraded before it starts (the format of the team folder changed), or a command or option was removed or changed its meaning.
@@ -142,7 +143,7 @@ $T version                                        # the version of the skill tha
 
 ### One agent at a time
 
-Every agent folder holds `start.sh`, written by `create` and refreshed by `upgrade`. It starts that one agent and no other, through `team.sh`, so the check, the wall and the launcher are the same. In a terminal it asks that agent's provider, model and reasoning effort, as the team command does; Enter keeps the saved one.
+Every agent folder holds `start.sh`, written by `create` and refreshed by `upgrade`. It starts that one agent and no other, through `team.sh`, so the check, the sandbox settings and the launcher are the same. In a terminal it asks that agent's provider, model and reasoning effort, as the team command does; Enter keeps the saved one.
 
 ```sh
 cd ~/code/shop                                    # the project folder, as for the team command
@@ -153,7 +154,7 @@ cd ~/code/shop                                    # the project folder, as for t
 ~/.buzz-agents/shop-reviewer/reviewer/start.sh    # a reviewer is a team of its own
 ```
 
-- **Options, for one run:** `--yes` (ask nothing), `--model ID`, `--backend claude|codex`, `--effort LEVEL`, `--workspace DIR`, `--no-wall`, `--check` (check this agent, start nothing) and `--verbose`. An option that answers a question skips that question. An agent name, `--all` or another agent's option is refused: the command starts its own agent only. Without a terminal it asks nothing.
+- **Options, for one run:** `--yes` (ask nothing), `--model ID`, `--backend claude|codex`, `--effort LEVEL`, `--workspace DIR`, `--no-wall` (a supervisor on Claude: do not put the sandbox settings into the project folder), `--check` (check this agent, start nothing) and `--verbose`. An option that answers a question skips that question. An agent name, `--all` or another agent's option is refused: the command starts its own agent only. Without a terminal it asks nothing.
 - **Stop and status** stay with the team command: `team.sh stop supervisor`, `team.sh status`. Status prints each agent's start command.
 - **Each team is started on its own.** Starting the agents of `shop` does not start `shop-reviewer`, and the reverse.
 
@@ -172,15 +173,43 @@ cd ~/code/shop                                    # the project folder, as for t
   - A model given by option that the kept list does not offer is looked up the same way before it is refused, so a model newer than the kept list starts.
   - A start that asks nothing (`--yes`, or no terminal) and names no model retrieves nothing. `AGENT_TEAM_MODELS_TIMEOUT` shortens the wait; `AGENT_TEAM_PYTHON=none` never retrieves.
 - **`default` is not a Claude model here.** The Claude adapter's list has an entry `default`, but the launcher hands a model to Claude Code as a model name, and Claude Code then refuses every turn ("There's an issue with the selected model (default)"): the agent runs and stays silent. So the menu leaves it out, and `team.sh`, `start.sh`, `create`, `upgrade` and `settings` refuse it, as a choice and as a saved model. For the runtime default, save no model.
-- **The workspace wall:** every agent's files stop at the project folder.
+- **What holds each agent to the project folder:**
   - The discussion partner and the reviewer run a restricted runtime: they read only the project folder, and they cannot edit files or run commands.
-  - The supervisor is started behind `wall/` in the team folder (`claude-agent-acp`, `walled-claude`, `bin/buzz`, copied from the skill's `wall/`). Its file tools read and write only inside the project folder, symlinks resolved. Its shell commands run in Claude Code's sandbox: they cannot read your home folder outside the project folder, they write only inside the project folder and a temporary folder, and the agent cannot ask to run one outside the sandbox. `wall/walled-claude` says how each part is done.
-  - The session runs in the `dontAsk` permission mode with allow rules for its ordinary tools, because the harness answers every permission request with "allow"; whatever would ask is refused.
-  - Your own Claude settings (`~/.claude`) are not loaded for the supervisor, since they can name more folders. The project's own settings and `CLAUDE.md` are; a project settings file that names more folders (`permissions.additionalDirectories`) stops the start.
-  - The sandbox has no direct network, and the supervisor talks to Buzz with the `buzz` command. So a plain `buzz ...` command runs outside the sandbox and is refused a path outside the project folder; a compound command (a pipe, `&&` with another program, a redirection, `$(...)`) runs walled, where `wall/bin/buzz` says to run the command on its own. Message text is given as an argument, not through a here-document.
-  - What it does not cover: network access; tools of MCP servers the project configures; a supervisor on Codex, which has no wall (start refuses it unless you pass `--no-wall`).
-  - What it can break: tools installed under your home folder do not run in the supervisor's shell, and Git sees no global configuration. `team.conf` may name more readable folders, `wall_read=/abs/dir:/abs/dir`. `team.sh start --no-wall` starts the supervisor without the wall for one run and says so.
-  - `test-wall.py` drives the installed Claude adapter through the wall over ACP, as the harness does, with a local model that tries reads and writes inside and outside the project folder.
+  - The supervisor runs the stock adapter with nothing in front of it. A rule in its prompt tells it to stay inside the project folder, and sandbox settings back most of that rule:
+
+    | | Supervisor on Claude | Supervisor on Codex |
+    | --- | --- | --- |
+    | Where the settings are | `<project folder>/.claude/settings.json`, plain Claude Code settings | none written: the stock adapter sets Codex's workspace-write sandbox on every turn, over any Codex config file |
+    | File tools outside the project folder | refused | (Codex has no separate file tools) |
+    | A shell command writing outside | refused, except a temporary folder | refused, except temporary folders |
+    | A shell command reading outside | refused in user folders; system folders stay readable | allowed: workspace-write does not limit reads |
+    | Network in a shell command | no direct network; a plain `buzz` command runs outside the sandbox | none; a command that needs it asks to run outside the sandbox, and Codex's own reviewer decides |
+    | Left to the prompt rule | a command it runs again outside the sandbox; a `buzz` command given a file outside the project folder | what it reads; a command its reviewer lets run outside the sandbox |
+
+    The Claude column was measured with `test-workspace-settings.py`. The Codex column is read from the code of the stock adapter (`@agentclientprotocol/codex-acp` 1.13.1) and Codex's documentation; no Codex session was run to confirm it.
+
+  - **The Claude settings**, kept in place by `workspace-settings.py` (`workspace-settings.py show` prints them):
+
+    ```json
+    {
+      "permissions": {
+        "blockReadsOutsideWorkingDirectories": true,
+        "blockWritesOutsideWorkingDirectories": true
+      },
+      "sandbox": {
+        "enabled": true,
+        "autoAllowBashIfSandboxed": true,
+        "excludedCommands": ["buzz *"]
+      }
+    }
+    ```
+
+  - **When they are written:** by `create`, before anything else in the project folder; by `team.sh` before a start, so a project folder the team is new to gets them first; and by `upgrade`. An existing `.claude/settings.json` keeps everything else it holds, and the earlier file is kept beside it as `settings.json.bak-<UTC time>`. A file that is not valid JSON, or a `.claude` that is a symbolic link, stops the start with the reason and is left alone. `team.sh check` only reports.
+  - **They apply to every Claude Code session started in that folder, your own included.** To run a supervisor in a folder without them, start it with `team.sh start --no-wall`: nothing is written, and only the prompt rule holds it. Settings already in a folder stay and apply until you edit the file.
+  - **What widens them:** folders your own Claude settings add as working folders (`permissions.additionalDirectories` in `~/.claude/settings.json`) count as inside the project folder.
+  - **What they can break:** a tool installed under your home folder does not run inside the Claude sandbox. The supervisor's prompt lets it run such a tool outside the sandbox.
+  - **Why no Codex file:** the stock Codex adapter sends its mode's sandbox with every turn, so `sandbox_mode` in a `.codex/config.toml` would not change what the supervisor's turns run under. `team.sh` pins the adapter's workspace-write mode (`INITIAL_AGENT_MODE=agent`) whatever your shell exports.
+  - `test-workspace-settings.py` drives the installed Claude adapter over ACP as the harness does (bypassPermissions, every permission request allowed), with a local model that tries reads and writes inside and outside the project folder. It asserts what the settings hold and prints what they leave to the prompt rule.
 - **Reasoning effort:** how hard the model thinks on each turn; a higher level costs more of your allowance and takes longer.
   - On Claude the levels are `low`, `medium`, `high`, `xhigh` and `max`. The agent gets its level as `CLAUDE_CODE_EFFORT_LEVEL`, which Claude Code takes over your own saved level.
   - On Codex the level is part of the model name, `model[level]`, which the adapter sends as the model and its reasoning effort. The levels on offer are the ones the retrieved list has for that model, and a level needs a model.
@@ -245,7 +274,7 @@ For each agent, `create` makes a folder `~/.buzz-agents/<workspace name>/<agent 
 | `agent.log`, `agent.pid` | Written when the agent starts; `agent.pid` also names the backend, and with `team.sh` the model, the agent runs on. |
 | `start.sh` | That agent's own start command (mode 700), a copy of `templates/agent-start.sh`. It holds no setting and no secret. |
 
-Beside the agent folders, the team folder holds `team.conf` (the project folder, channel, community and owner), `team.sh` (the team's own command), `acp-models.py` (asks an adapter for its model list, for the model menu), `wall/`, `VERSION` (the version of the skill that created or last upgraded the folder, mode 600) and, when you gave one, `brief.md`.
+Beside the agent folders, the team folder holds `team.conf` (the project folder, channel, community and owner), `team.sh` (the team's own command), `acp-models.py` (asks an adapter for its model list, for the model menu), `workspace-settings.py` (puts the supervisor's sandbox settings into the project folder), `VERSION` (the version of the skill that created or last upgraded the folder, mode 600) and, when you gave one, `brief.md`.
 
 The partner's rules take no turn for its own team's agents, and none for other local agents of its channel unless they mention it (an author filter, written from public keys). When another team joins the same channel, `create` says which earlier partner to refresh with `upgrade`.
 
@@ -284,7 +313,7 @@ AGENT_TEAM_REAL_BUZZ=/path/to/buzz/target/release/buzz \
 
 `test-team-sh.sh` covers the team's own command with the same three variables (the real launcher is optional and runs with `--check` only): what `create` and `upgrade` install, the version a team folder records (a new team, a team made before versions, another version of the skill, a skill folder without a valid one), the check, the questions, the options, start, stop and status, each agent's own `start.sh`, the model list retrieved at start (a list, a sign-in error, an adapter that does not answer, no credential passed on), the refusal of `default` as a Claude model, and a team folder copied to another path.
 
-It needs `python3` and `node` on `PATH`. `python3 test-partner-runtime.py` exercises the Claude partner's tool policy, its sign-in passthrough and its model with the installed Claude ACP adapter, a loopback model, a simulated Buzz CLI and a disposable home. `python3 test-codex-partner.py` does the same for the Codex partner with its private engine.
+It needs `python3` and `node` on `PATH`. `python3 test-workspace-settings.py` runs two supervisor sessions under the sandbox settings with the installed Claude ACP adapter and a loopback model (`--also-without` adds one without the settings, which must leak; `--verbose` prints every action). `python3 test-partner-runtime.py` exercises the Claude partner's tool policy, its sign-in passthrough and its model with the installed Claude ACP adapter, a loopback model, a simulated Buzz CLI and a disposable home. `python3 test-codex-partner.py` does the same for the Codex partner with its private engine.
 
 - **What they use:** throwaway keys, stand-ins for `buzz`, the harness and the adapters' sign-in, a loopback model endpoint. `HOME` and the agents' root point into the test folder.
 - **What they never do:** sign in, read a credential, contact a community or a real model.

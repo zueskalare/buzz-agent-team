@@ -16,7 +16,9 @@
 # finds everything from its own location, so a team folder runs and moves without this skill.
 # VERSION there is the version of this skill that created or last upgraded the folder.
 # Each agent runs on claude or codex and signs in only through the user's subscription.
-# The shared PROJECT.md is initialized in the workspace if absent. The root must be outside every Git work tree.
+# The shared PROJECT.md is initialized in the workspace if absent, and for a supervisor on Claude the
+# workspace first gets its sandbox settings, .claude/settings.json (scripts/workspace-settings.py).
+# The root must be outside every Git work tree.
 # The root also holds settings.conf (mode 600): public defaults only, written by "settings".
 # This script lives in scripts/ of the buzz-agent-team skill folder; templates/ is beside scripts/.
 # The skill's version is the one line of VERSION in that folder ("agent-team.sh version").
@@ -705,8 +707,9 @@ publish_file() {
 # Files every team folder holds beside its agents, copied from this skill:
 #   team.sh    the team's own command: check, start, stop and status for that folder's agents. It finds
 #              everything from its own location, so a team folder runs, and moves, without this skill.
-#   wall/      the workspace wall for an agent on the stock Claude adapter (the supervisor): its file
-#              tools and its shell stop at the project folder (wall/walled-claude says how).
+#   workspace-settings.py   keeps the sandbox settings of an agent on the stock Claude adapter (the
+#              supervisor) in its project folder (scripts/workspace-settings.py says which): team.sh
+#              runs it before a start, so a project folder the team is new to gets them first.
 #   acp-models.py   asks an adapter for the models it offers (scripts/acp-models.py): team.sh runs it
 #              before a model menu, so the menu shows what the provider offers at that moment.
 #   VERSION    the version of the skill that created or last upgraded this folder: create writes it
@@ -716,7 +719,7 @@ publish_file() {
 # and, in each agent folder:
 #   start.sh   that agent's own start command (templates/agent-start.sh): it starts this agent only,
 #              through team.sh; in a terminal it asks that agent's provider, model and effort.
-TEAM_FILES='team.sh acp-models.py wall/claude-agent-acp wall/walled-claude wall/bin/buzz'
+TEAM_FILES='team.sh acp-models.py workspace-settings.py'
 team_files() { # every such file of this team: TEAM_FILES, one start.sh per agent, then VERSION
     local id
     # shellcheck disable=SC2086
@@ -733,8 +736,8 @@ team_file_source() { # REL
     if [ -n "$name" ]; then
         f=$(template_dir)/$name
         [ -f "$f" ] || f=$(skill_dir)/templates/$name
-    elif [ "$1" = acp-models.py ]; then
-        f=$(script_dir)/acp-models.py
+    elif [ "$1" = acp-models.py ] || [ "$1" = workspace-settings.py ]; then
+        f=$(script_dir)/$1
     else
         f=$(skill_dir)/$1
     fi
@@ -760,9 +763,26 @@ install_team_file() { # REL [STAMP]: write or replace it; a replaced one is kept
     fi
     mv -f -- "$tmp" "$dest"
 }
-# An agent on the stock Claude adapter is started behind the wall; one on the restricted runtime is
-# held by that runtime; the stock Codex adapter has no wall.
-wall_file() { printf '%s/wall/claude-agent-acp' "$T_DIR"; }
+# What holds an agent to its project folder:
+#   - on the restricted runtime (the discussion partner, the reviewer): that runtime;
+#   - on the stock Claude adapter (the supervisor): plain Claude Code settings in the project folder,
+#     PROJECT/.claude/settings.json, which Claude Code reads itself. workspace-settings.py writes and
+#     checks them; create puts them there first, and team.sh before every start;
+#   - on the stock Codex adapter: the adapter runs every turn in Codex's workspace-write sandbox and
+#     replaces what a config file says, so no file is written; start pins that mode (INITIAL_AGENT_MODE);
+#   - and the rule in its prompt, for what no setting holds.
+on_stock_claude() { ! uses_partner_runtime "$1" && [ "$2" = claude ]; }   # ID BACKEND
+on_stock_codex() { ! uses_partner_runtime "$1" && [ "$2" = codex ]; }     # ID BACKEND
+# workspace_settings apply|check DIR: prints the helper's one line. Status: the helper's (0 written or
+# in place; 3 absent; 4 incomplete; 2 the file cannot be used), or 5 when python3 is not available.
+workspace_settings() {
+    local py=${AGENT_TEAM_PYTHON:-python3}
+    if [ "$py" = none ] || ! command -v "$py" >/dev/null 2>&1; then
+        printf 'python3 is needed to write the settings file, and it is not on PATH'
+        return 5
+    fi
+    "$py" -I "$(script_dir)/workspace-settings.py" "$1" "$2" 2>&1
+}
 
 # Generate a key pair into DIR/identity.key (secret) and DIR/.pubkey. The generator's output goes
 # through a pipe straight into the key file: the secret is never printed, logged or put in arguments.
@@ -988,7 +1008,10 @@ Usage: agent-team.sh <command> [options]
            URL with credentials is refused. NAME is one of keygen, launcher, community,
            owner, model, base_url (base_url is no longer used; --unset removes it).
   create   Make the agents for one workspace and one channel: a new key, an env file
-           and a prompt per agent. Safe to repeat: existing files are kept.
+           and a prompt per agent. Safe to repeat: existing files are kept. For a
+           supervisor on Claude it first puts the sandbox settings into the project
+           folder, as .claude/settings.json (workspace-settings.py in this skill says
+           which, and what they hold); an existing file keeps everything else it holds.
              --workspace DIR      the project folder the agents work in (required)
              --channel UUID       the Buzz channel (required)
              --backend NAME       claude (default) or codex, for both new agents
@@ -1048,8 +1071,11 @@ Usage: agent-team.sh <command> [options]
            the model options set the model of the new backend (checked as create
            checks them). A format-1 agent's single model is not carried. --dry-run
            prints the plan. The team's own files (team.sh, each start.sh, acp-models.py,
-           wall/) are refreshed the same way, and VERSION in the team folder is set to
-           this skill's version.
+           workspace-settings.py) are refreshed the same way. The wall programs of a
+           team made before 2.0.0 (wall/) are removed, and the sandbox settings of a
+           supervisor on Claude are put into the project folder
+           (.claude/settings.json; an existing file keeps everything else it holds).
+           VERSION in the team folder is set to this skill's version, last.
   models   [NAME] [--backend claude|codex] [--role assistant|supervisor]
            (--role reviewer for a reviewer)
            List the models your own sign-in offers for that backend and role, without
@@ -1493,10 +1519,20 @@ EOF
         done
     fi
 
+    # The first thing a set of agents gets in its project folder: the sandbox settings of an agent
+    # on the stock Claude adapter. A file that cannot be completed is reported; team.sh, which
+    # writes the settings before every start, then refuses to start that agent until it is fixed.
+    for id in $(team_agents); do
+        on_stock_claude "$id" "$(agent_backend "$id")" || continue
+        v=0
+        f=$(workspace_settings apply "$C_WS_PATH") || v=$?
+        if [ "$v" = 0 ]; then say "Project folder settings: $f"
+        else warn "the settings of the $id were not written into the project folder: $f. $T_DIR/team.sh writes them before a start."; fi
+        break
+    done
     ensure_project_record
     say "Shared project record: $C_WS_PATH/PROJECT.md"
-    # The team's own command and the wall. An existing file is kept, as every existing file is;
-    # upgrade refreshes it.
+    # The team's own files. An existing file is kept, as every existing file is; upgrade refreshes it.
     for f in $(team_files); do
         [ "$f" != VERSION ] || continue
         v=$(team_file_state "$f")
@@ -1762,7 +1798,7 @@ require_current() { # ID...: stop unless each agent has the current record forma
 
 cmd_start() {
     local requested='' check_only=no role_args=() choice saved b runtime run_model='' m list
-    local id home log pid launcher protocol wait_s max_bytes size i started='' alive agents eff am walled
+    local id home log pid launcher protocol wait_s max_bytes size i started='' alive agents eff am walled am_out
     [ "$#" -ge 1 ] || die 'start: usage: agent-team.sh start NAME [AGENT...] [--backend claude|codex] [--check]'
     load_team "$1"
     shift
@@ -1856,24 +1892,20 @@ cmd_start() {
             am=${am%\[*\]}
             if [ -n "$am" ]; then am="$am[$eff]"; fi
         fi
-        # An agent on the stock Claude adapter is started behind the workspace wall, as team.sh starts it.
-        walled=no
-        if ! uses_partner_runtime "$id"; then
-            if [ "$b" = claude ]; then
-                [ -x "$(wall_file)" ] || die "$id: this team folder has no wall files yet; add them with: $PROG upgrade $T_NAME. Nothing more was started."
-                walled=yes
-            else
-                say "$id: WARNING: on Codex there is no workspace wall; this agent can read and write outside $T_WORKSPACE"
-            fi
+        # An agent on the stock Claude adapter gets its settings in the project folder first, as team.sh does.
+        if on_stock_claude "$id" "$b"; then
+            walled=0
+            am_out=$(workspace_settings apply "$T_WORKSPACE") || walled=$?
+            [ "$walled" = 0 ] || die "$id: its settings could not be put into the project folder: $am_out. Nothing more was started."
+            case $am_out in 'in place:'*) ;; *) say "$id: project folder settings: $am_out" ;; esac
         fi
         printf '\n=== %s: agent-team.sh start (%s, backend %s) ===\n' "$(now_utc)" "$launcher" "$b" >> "$log"
         (
             scrub_env
             export CLAUDE_AGENT_ACP_PROTOCOL=$protocol
             if [ "$b" = claude ] && [ -n "$eff" ]; then export CLAUDE_CODE_EFFORT_LEVEL=$eff; fi
-            if [ "$walled" = yes ]; then
-                export BUZZ_ACP_AGENT_COMMAND="$(wall_file)" BUZZ_WALL_PROJECT="$T_WORKSPACE" BUZZ_ACP_PERMISSION_MODE=default
-            fi
+            # The stock Codex adapter's workspace-write mode, whatever the calling shell exports.
+            if on_stock_codex "$id" "$b"; then export INITIAL_AGENT_MODE=agent; fi
             trap '' HUP
             cd -- "$home" && exec "$launcher" --run --backend "$b" ${am:+--model "$am"}
         ) >> "$log" 2>&1 < /dev/null &
@@ -2490,6 +2522,7 @@ build_agent_files() { # ID HOME STAGE BACKEND MODEL_CLAUDE MODEL_CODEX: every ge
 cmd_upgrade() {
     local dry=no b_all='' b_a='' b_s='' b_r='' model_set=no opt_model='' team='' id home fmt old_b new_b st m old_m
     local gen rel f changed added removed any=no stamp prev ws peers dropped k old_keys new_keys tmp list keep pass m_a='' m_s='' m_r='' mc mx e old_e ec ex e_all='' e_a='' e_s='' e_r=''
+    local v ws_claude=no
     while [ "$#" -gt 0 ]; do
         case $1 in
             --dry-run) dry=yes ;;
@@ -2556,6 +2589,7 @@ cmd_upgrade() {
             old_b=$(agent_backend "$id")
             case $id in assistant) new_b=${b_a:-${b_all:-$old_b}} ;; reviewer) new_b=${b_r:-${b_all:-$old_b}} ;; *) new_b=${b_s:-${b_all:-$old_b}} ;; esac
             check_backend "$new_b"
+            if on_stock_claude "$id" "$new_b"; then ws_claude=yes; fi
             # One model per backend: the chosen one for the new backend, else the saved one; the
             # other backend's saved model stays. A format-1 agent's single model is not carried.
             old_m='' mc='' mx=''
@@ -2667,13 +2701,29 @@ cmd_upgrade() {
         fi
         if [ "$pass" = plan ]; then
             for f in $(team_files); do
-                case $f:$(team_file_state "$f") in
-                    *:current) ;;
-                    VERSION:*) any=yes; say "  VERSION: $(team_version || printf 'not recorded') -> $SKILL_VERSION" ;;
-                    *:missing) any=yes; say "  $f: add" ;;
-                    *) any=yes; say "  $f: replace (kept as $f.bak-$stamp)" ;;
+                [ "$f" != VERSION ] || continue
+                case $(team_file_state "$f") in
+                    missing) any=yes; say "  $f: add" ;;
+                    differs) any=yes; say "  $f: replace (kept as $f.bak-$stamp)" ;;
                 esac
             done
+            # A team made before 2.0.0 holds the wall programs; the settings in the project folder replace them.
+            if [ -e "$T_DIR/wall" ]; then any=yes; say "  wall/: remove (kept as wall.bak-$stamp); the settings in the project folder replace it"; fi
+            if [ "$ws_claude" = yes ]; then
+                v=0
+                f=$(workspace_settings check "$C_WS_PATH") || v=$?
+                case $v in
+                    0) ;;
+                    3) any=yes; say "  $C_WS_PATH/.claude/settings.json: add (the supervisor's sandbox settings)" ;;
+                    4) any=yes; say "  $C_WS_PATH/.claude/settings.json: complete (${f#*json }; the earlier file is kept beside it)" ;;
+                    5) say "  $C_WS_PATH/.claude/settings.json: not checked ($f)" ;;
+                    *) die "the settings file in the project folder cannot be used: $f" ;;
+                esac
+            fi
+            if [ "$(team_file_state VERSION)" != current ]; then
+                any=yes
+                say "  VERSION: $(team_version || printf 'not recorded') -> $SKILL_VERSION"
+            fi
         fi
     done
     if [ "$dry" = no ] && [ "$any" = yes ]; then
@@ -2684,6 +2734,16 @@ cmd_upgrade() {
                 differs) install_team_file "$f" "$stamp"; say "  $f: replaced" ;;
             esac
         done
+        if [ -e "$T_DIR/wall" ]; then
+            mv -- "$T_DIR/wall" "$T_DIR/wall.bak-$stamp"
+            say "  wall/: removed (kept as wall.bak-$stamp)"
+        fi
+        if [ "$ws_claude" = yes ]; then
+            v=0
+            f=$(workspace_settings apply "$C_WS_PATH") || v=$?
+            [ "$v" = 0 ] || die "the supervisor's settings could not be put into the project folder: $f. Fix that, then run $PROG upgrade $T_NAME again; the version is recorded only then."
+            case $f in 'in place:'*) ;; *) say "  $f" ;; esac
+        fi
     fi
     if [ "$dry" = no ] && [ "$any" = yes ] && [ "$(conf_get "$T_DIR/team.conf" format || true)" != 2 ]; then
         cp -p -- "$T_DIR/team.conf" "$T_DIR/team.conf.bak-$stamp"

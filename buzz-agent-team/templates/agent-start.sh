@@ -2,7 +2,7 @@
 # start.sh: start this one agent, and no other. Bash 3.2+.
 #
 # This file lives in the agent's own folder, beside its key and its settings. The team's command is
-# one folder up and does the work, so the check, the workspace wall and the launcher are the same:
+# one folder up and does the work, so the check, the sandbox settings and the launcher are the same:
 #   <team>/<agent>/start.sh        <team>/team.sh
 # Run it from the project folder, as the team's command is:
 #   cd ~/code/shop && ~/.buzz-agents/shop/supervisor/start.sh
@@ -34,7 +34,7 @@ saved one. Before the model menu, the provider's adapter is asked which models i
   --backend claude|codex    this provider, for this run (no provider question)
   --effort LEVEL            this reasoning effort, for this run; default sets none
   --workspace DIR           another project folder than the current one
-  --no-wall                 without the workspace wall (an agent on the stock adapter)
+  --no-wall                 do not put the sandbox settings into the project folder (a supervisor on Claude)
   --check                   check this agent and start nothing
   --verbose                 also print the launcher's own check
 
