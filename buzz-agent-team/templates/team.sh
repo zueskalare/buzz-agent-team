@@ -21,6 +21,7 @@
 #   team.sh check             check the environment and every agent's settings
 #   team.sh status            what runs, where, on which provider and model
 #   team.sh stop              stop the agents this command started
+#   team.sh version           the version of the skill that wrote this folder's files (VERSION here)
 #   team.sh help              every command and option
 #
 # Each agent folder also holds start.sh, which starts that one agent through this command:
@@ -44,6 +45,7 @@ Usage: team.sh [start] [AGENT...] [options]   start agents of this team folder
        team.sh status                         agents, saved choices and running state
        team.sh stop [AGENT...] [--force]      stop agents this command started
        team.sh workspace DIR                  save DIR as the team's project folder in team.conf
+       team.sh version                        the version of the skill that wrote this folder's files
 
 AGENT is assistant, supervisor or reviewer, whichever this team has. Without one, start asks in a
 terminal; elsewhere it means all.
@@ -118,6 +120,11 @@ Before anything starts, the check must pass:
   - the project folder exists and is not around the secret keys
   - every agent has its key, settings file, prompt and stored ownership proof
   - the launcher accepts each agent's settings, and its provider is signed in by subscription
+
+The version: VERSION in this folder is the version of the buzz-agent-team skill that created the
+folder or last upgraded it (agent-team.sh upgrade), and so the version this command, each
+start.sh, acp-models.py and wall/ come from. "team.sh version" prints it; status shows it too. A
+folder made before the skill had versions has none until it is upgraded.
 
 Moving the team: stop the agents, copy this whole folder (it holds the secret keys, so copy it
 privately), install the commands above on the new machine, sign in there, then go to the project
@@ -209,6 +216,20 @@ T_DIR=$(CDPATH='' cd -P -- "$(dirname -- "$0")" 2>/dev/null && pwd) || die 'cann
 # The folder this command was started from: the agents' project folder unless --workspace names one.
 CALL_DIR=$(pwd -P 2>/dev/null) || CALL_DIR=''
 
+# The version of the skill that created or last upgraded this folder: the one line of VERSION here,
+# MAJOR.MINOR.PATCH. It fails for a folder made before the skill had versions.
+team_version() {
+    local v='' re='^(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)$'
+    [ -f "$T_DIR/VERSION" ] || return 1
+    IFS= read -r v < "$T_DIR/VERSION" || [ -n "$v" ] || return 1
+    [[ $v =~ $re ]] || return 1
+    printf '%s' "$v"
+}
+version_line() {
+    local v
+    if v=$(team_version); then printf 'written by buzz-agent-team %s' "$v"
+    else printf 'have no skill version recorded (written before 1.0.0); agent-team.sh upgrade <team> records it'; fi
+}
 load_team() {
     [ -f "$T_DIR/team.conf" ] || die "$T_DIR has no team.conf; team.sh must stay in its team folder"
     T_NAME=$(conf_get "$T_DIR/team.conf" name) || T_NAME=$(basename -- "$T_DIR")
@@ -1008,6 +1029,7 @@ cmd_status() {
     say "  channel $T_CHANNEL on $T_COMMUNITY"
     launcher=$(launcher_path)
     say "  launcher ${launcher:-NOT FOUND: put run-buzz-acp.sh on PATH}"
+    say "  team files $(version_line)"
     if upgrade_interrupted; then say '  An upgrade was interrupted: finish it with the skill (agent-team.sh upgrade <team>).'; fi
     for id in $(team_agents); do
         home=$T_DIR/$id
@@ -1062,6 +1084,13 @@ cmd_workspace() {
     say 'the agents work in that folder, or in the one --workspace names.'
 }
 
+# ---------------------------------------------------------------- version
+cmd_version() {
+    [ "$#" -eq 0 ] || die 'usage: team.sh version'
+    load_team
+    say "Team \"$T_NAME\": team files $(version_line)"
+}
+
 # ---------------------------------------------------------------- main
 cmd=${1:-start}
 if [ "$#" -eq 0 ]; then set -- start; fi
@@ -1071,6 +1100,7 @@ case $cmd in
     stop) shift; cmd_stop "$@" ;;
     status) shift; cmd_status ;;
     workspace) shift; cmd_workspace "$@" ;;
+    version | --version) shift; cmd_version "$@" ;;
     help | -h | --help) usage ;;
     -* | assistant | supervisor) cmd_start start "$@" ;;
     *) die "unknown command: $cmd (see team.sh help)" ;;

@@ -8,10 +8,11 @@
 #   install.sh --uninstall     remove the copies this installer made
 #   --claude-dir DIR, --codex-dir DIR   use another skills folder (for example ~/.agents/skills)
 #
-# It copies the buzz-agent-team folder that sits beside this script. Each copy is built beside its
-# target and renamed into place, so an interrupted run leaves the previous copy or nothing. It only
-# touches <skills folder>/buzz-agent-team and its own temporary names there, and refuses a target
-# it did not make. It never touches ~/.buzz-agents.
+# It copies the buzz-agent-team folder that sits beside this script, and prints the skill's version
+# (the VERSION file in that folder) beside the version of the copy it replaces. Each copy is built
+# beside its target and renamed into place, so an interrupted run leaves the previous copy or
+# nothing. It only touches <skills folder>/buzz-agent-team and its own temporary names there, and
+# refuses a target it did not make. It never touches ~/.buzz-agents.
 
 set -euo pipefail
 umask 022
@@ -58,9 +59,20 @@ done
 [ -n "${HOME:-}" ] || die 'HOME is not set'
 case $HOME in /*) ;; *) die "HOME must be an absolute path (got: $HOME)" ;; esac
 
+# The version a skill folder holds: the one line of its VERSION file, MAJOR.MINOR.PATCH.
+version_of() { # DIR
+    local v=''
+    [ -f "$1/VERSION" ] || return 1
+    IFS= read -r v < "$1/VERSION" || [ -n "$v" ] || return 1
+    printf '%s\n' "$v" | grep -Eqx '(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)' || return 1
+    printf '%s' "$v"
+}
+
 # The source must be a complete skill folder before anything is changed.
+VERSION=''
 if [ "$mode" = install ]; then
     [ -f "$SRC/SKILL.md" ] || die "the skill folder is missing or incomplete: $SRC/SKILL.md not found"
+    VERSION=$(version_of "$SRC") || die "the skill folder has no valid VERSION file: $SRC/VERSION"
     [ "$(sed -n '1p' "$SRC/SKILL.md")" = '---' ] && grep -qx "name: $NAME" "$SRC/SKILL.md" ||
         die "$SRC/SKILL.md does not declare name: $NAME"
     [ -f "$SRC/scripts/agent-team.sh" ] || die "missing $SRC/scripts/agent-team.sh"
@@ -116,6 +128,8 @@ install_one() { # TOOL SKILLS_DIR
         return 1
     fi
     if [ -d "$dir" ]; then clean_leftovers "$dir"; fi
+    if [ -d "$target" ]; then say "  version $VERSION (installed: $(version_of "$target" || printf 'no version recorded'))"
+    else say "  version $VERSION"; fi
     if [ -d "$target" ] && [ "$(manifest "$target")" = "$(manifest "$SRC")" ]; then
         say "  up to date; nothing changed"
         return 0
@@ -130,7 +144,7 @@ install_one() { # TOOL SKILLS_DIR
     chmod 755 "$STAGE" "$STAGE/scripts" "$STAGE/scripts/agent-team.sh"
     chmod 755 "$STAGE/runtime" "$STAGE/runtime/"*
     chmod 755 "$STAGE/wall" "$STAGE/wall/claude-agent-acp" "$STAGE/wall/walled-claude" "$STAGE/wall/bin" "$STAGE/wall/bin/buzz"
-    { printf 'installer=%s\nformat=1\nsource=%s\ninstalled=%s\n' "$NAME" "$SRC" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"; manifest "$SRC"; } > "$STAGE/$MARKER"
+    { printf 'installer=%s\nformat=1\nversion=%s\nsource=%s\ninstalled=%s\n' "$NAME" "$VERSION" "$SRC" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"; manifest "$SRC"; } > "$STAGE/$MARKER"
     [ "$(manifest "$STAGE")" = "$(manifest "$SRC")" ] && [ -x "$STAGE/scripts/agent-team.sh" ] ||
         { say "  failed: the copy does not match the source; nothing was changed"; return 1; }
     [ "${AGENT_TEAM_INSTALL_FAULT:-}" != after-stage ] || { say '  failed: test fault after staging'; return 1; }

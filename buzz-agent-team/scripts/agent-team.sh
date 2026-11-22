@@ -14,10 +14,12 @@
 # and, beside the agent folders, brief.md: the user's optional note about the workspace, and
 # team.sh: that team's own command (check, start, stop, status), a copy of templates/team.sh. It
 # finds everything from its own location, so a team folder runs and moves without this skill.
+# VERSION there is the version of this skill that created or last upgraded the folder.
 # Each agent runs on claude or codex and signs in only through the user's subscription.
 # The shared PROJECT.md is initialized in the workspace if absent. The root must be outside every Git work tree.
 # The root also holds settings.conf (mode 600): public defaults only, written by "settings".
 # This script lives in scripts/ of the buzz-agent-team skill folder; templates/ is beside scripts/.
+# The skill's version is the one line of VERSION in that folder ("agent-team.sh version").
 #
 # Typical flow:
 #   agent-team.sh preflight                 # what is missing, with one fix line per item
@@ -486,6 +488,26 @@ script_dir() {
 skill_dir() { (cd -P -- "$(script_dir)/.." && pwd); }
 template_dir() { printf '%s' "${AGENT_TEAM_TEMPLATES:-$(skill_dir)/templates}"; }
 
+# This skill's version: the one line of VERSION in the skill folder, MAJOR.MINOR.PATCH. create
+# copies the file into a new team folder and upgrade replaces it there, so a team folder says
+# which version of the skill wrote its files.
+VERSION_RE='^(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)$'
+version_in() { # FILE: print the version it holds; fail when there is none or it is malformed
+    local v=''
+    [ -f "$1" ] || return 1
+    IFS= read -r v < "$1" || [ -n "$v" ] || return 1
+    [[ $v =~ $VERSION_RE ]] || return 1
+    printf '%s' "$v"
+}
+SKILL_VERSION=''
+need_skill_version() { # sets SKILL_VERSION, or stops: nothing is written by a skill without one
+    [ -z "$SKILL_VERSION" ] || return 0
+    SKILL_VERSION=$(version_in "$(skill_dir)/VERSION") ||
+        die "this skill folder has no valid VERSION file ($(skill_dir)/VERSION); install the skill again"
+}
+# The version recorded in the loaded team folder; fails for a team made before versions.
+team_version() { version_in "$T_DIR/VERSION"; }
+
 # Placeholder values for render_prompt.
 P_AGENT_NAME='' P_WORKSPACE='' P_CHANNEL='' P_OWNER='' P_SUPERVISORS='' P_ASSISTANT=''
 fill_line() {
@@ -687,15 +709,20 @@ publish_file() {
 #              tools and its shell stop at the project folder (wall/walled-claude says how).
 #   acp-models.py   asks an adapter for the models it offers (scripts/acp-models.py): team.sh runs it
 #              before a model menu, so the menu shows what the provider offers at that moment.
+#   VERSION    the version of the skill that created or last upgraded this folder: create writes it
+#              into a new team folder only, upgrade replaces it. It is data (mode 600, no backup),
+#              and the last file an upgrade writes, so an interrupted upgrade leaves the earlier
+#              version there and the next run finishes it.
 # and, in each agent folder:
 #   start.sh   that agent's own start command (templates/agent-start.sh): it starts this agent only,
 #              through team.sh; in a terminal it asks that agent's provider, model and effort.
 TEAM_FILES='team.sh acp-models.py wall/claude-agent-acp wall/walled-claude wall/bin/buzz'
-team_files() { # every such file of this team: TEAM_FILES, then one start.sh per agent
+team_files() { # every such file of this team: TEAM_FILES, one start.sh per agent, then VERSION
     local id
     # shellcheck disable=SC2086
     printf '%s\n' $TEAM_FILES
     for id in $(team_agents); do printf '%s/start.sh\n' "$id"; done
+    printf 'VERSION\n'
 }
 team_file_source() { # REL
     local f name=''
@@ -716,7 +743,7 @@ team_file_source() { # REL
 }
 team_file_state() { # REL: current | missing | differs
     if [ ! -e "$T_DIR/$1" ]; then printf 'missing'
-    elif cmp -s -- "$(team_file_source "$1")" "$T_DIR/$1" && [ -x "$T_DIR/$1" ]; then printf 'current'
+    elif cmp -s -- "$(team_file_source "$1")" "$T_DIR/$1" && { [ "$1" = VERSION ] || [ -x "$T_DIR/$1" ]; }; then printf 'current'
     else printf 'differs'; fi
 }
 install_team_file() { # REL [STAMP]: write or replace it; a replaced one is kept beside it
@@ -726,8 +753,8 @@ install_team_file() { # REL [STAMP]: write or replace it; a replaced one is kept
     tmp=$(mktemp "$(dirname -- "$dest")/.new-file.XXXXXX")
     TMP_PATHS+=("$tmp")
     cp -- "$(team_file_source "$1")" "$tmp"
-    chmod 700 "$tmp"
-    if [ -e "$dest" ] && [ -n "${2:-}" ]; then
+    if [ "$1" = VERSION ]; then chmod 600 "$tmp"; else chmod 700 "$tmp"; fi
+    if [ -e "$dest" ] && [ -n "${2:-}" ] && [ "$1" != VERSION ]; then
         cp -p -- "$dest" "$dest.bak-$2"
         chmod 600 "$dest.bak-$2"
     fi
@@ -1020,7 +1047,9 @@ Usage: agent-team.sh <command> [options]
            a second run changes nothing. Each agent keeps its saved model per backend;
            the model options set the model of the new backend (checked as create
            checks them). A format-1 agent's single model is not carried. --dry-run
-           prints the plan.
+           prints the plan. The team's own files (team.sh, each start.sh, acp-models.py,
+           wall/) are refreshed the same way, and VERSION in the team folder is set to
+           this skill's version.
   models   [NAME] [--backend claude|codex] [--role assistant|supervisor]
            (--role reviewer for a reviewer)
            List the models your own sign-in offers for that backend and role, without
@@ -1067,7 +1096,11 @@ Usage: agent-team.sh <command> [options]
            (acp-models.py in the team folder); --yes asks nothing and keeps the saved ones.
   stop     NAME [AGENT...] [--force]
            stop agents this tool started (SIGTERM, then wait; --force: SIGKILL after)
-  status   [NAME]            show agents, backends, sign-in, proofs and running state
+  status   [NAME]            show agents, backends, sign-in, proofs and running state,
+           and the version of the skill that wrote each team's files
+  version  Print this skill's version: the one line of VERSION in the skill folder.
+           create records it in a new team folder (<root>/NAME/VERSION) and upgrade
+           replaces it there; "status NAME" and "<root>/NAME/team.sh version" show it.
 
 Environment:
   AGENT_TEAM_ROOT        root folder (default ~/.buzz-agents); outside any Git work tree
@@ -1142,6 +1175,7 @@ cmd_create() {
         shift
     done
     REQ_assistant=${b_a:-$b_all} REQ_supervisor=${b_s:-$b_all} REQ_reviewer=${b_r:-$b_all}
+    need_skill_version
 
     [ -n "$ws_arg" ] || die 'create: --workspace DIR is required'
     [ -d "$ws_arg" ] || die "create: workspace folder not found: $ws_arg"
@@ -1338,6 +1372,9 @@ EOF
         write_team_conf "$tmp_home"
         chmod 600 "$tmp_home"
         publish_file "$tmp_home" "$T_DIR/team.conf"
+        # Only a new team folder records this skill's version. A folder that exists keeps its
+        # files, so it keeps the version that wrote them until upgrade refreshes both.
+        install_team_file VERSION
         say "Workspace \"$C_NAME\": $T_DIR"
     fi
 
@@ -1461,6 +1498,7 @@ EOF
     # The team's own command and the wall. An existing file is kept, as every existing file is;
     # upgrade refreshes it.
     for f in $(team_files); do
+        [ "$f" != VERSION ] || continue
         v=$(team_file_state "$f")
         [ "$v" != missing ] || install_team_file "$f"
         [ "$f" = team.sh ] || continue
@@ -1909,19 +1947,24 @@ cmd_stop() {
 }
 
 cmd_status() {
-    local id home size proof run d fmt b mode m e
+    local id home size proof run d fmt b mode m e sv tv
+    sv=$(version_in "$(skill_dir)/VERSION") || sv='(no valid VERSION file)'
     if [ "$#" -eq 0 ]; then
         resolve_root
         say "Root: $ROOT"
+        say "Skill: buzz-agent-team $sv"
         for d in "$ROOT"/*/; do
             [ -f "$d/team.conf" ] || continue
-            say "  $(basename -- "$d")  $(conf_get "$d/team.conf" workspace)  channel $(conf_get "$d/team.conf" channel)  format $(conf_get "$d/team.conf" format || printf '1')"
+            say "  $(basename -- "$d")  $(conf_get "$d/team.conf" workspace)  channel $(conf_get "$d/team.conf" channel)  format $(conf_get "$d/team.conf" format || printf '1')  skill $(version_in "$d/VERSION" || printf 'not recorded')"
         done
         return
     fi
     load_team "$1"
     say "Workspace \"$T_NAME\": $T_WORKSPACE"
     say "Channel $T_CHANNEL on $T_COMMUNITY; owner $T_OWNER"
+    if ! tv=$(team_version); then say "Team files: no skill version recorded (written before 1.0.0); this skill is $sv: $PROG upgrade $T_NAME --dry-run shows what it would change"
+    elif [ "$tv" = "$sv" ]; then say "Team files: written by buzz-agent-team $tv, this skill's version"
+    else say "Team files: written by buzz-agent-team $tv; this skill is $sv: $PROG upgrade $T_NAME --dry-run shows what it would change"; fi
     d=$(launcher_path)
     say "Launcher for start: ${d:-not found (agent-team.sh settings --launcher /path/to/run-buzz-acp.sh)}"
     [ -z "$T_EXT_ASSISTANT" ] || say "Channel assistant (not in this folder): $T_EXT_ASSISTANT"
@@ -2469,6 +2512,7 @@ cmd_upgrade() {
         shift
     done
     [ -n "$team" ] || die 'upgrade: usage: agent-team.sh upgrade NAME [--dry-run] [--backend B] [--assistant-backend B] [--supervisor-backend B] [--model ID]'
+    need_skill_version
     load_team "$team"
     [ -n "$(team_agents)" ] || die "workspace \"$team\" has no agent folders to upgrade"
     C_NAME=$T_NAME C_WS_PATH=$T_WORKSPACE C_CHANNEL=$T_CHANNEL C_COMMUNITY=$T_COMMUNITY C_OWNER=$T_OWNER C_EXT_ASSISTANT=$T_EXT_ASSISTANT
@@ -2623,15 +2667,18 @@ cmd_upgrade() {
         fi
         if [ "$pass" = plan ]; then
             for f in $(team_files); do
-                case $(team_file_state "$f") in
-                    missing) any=yes; say "  $f: add" ;;
-                    differs) any=yes; say "  $f: replace (kept as $f.bak-$stamp)" ;;
+                case $f:$(team_file_state "$f") in
+                    *:current) ;;
+                    VERSION:*) any=yes; say "  VERSION: $(team_version || printf 'not recorded') -> $SKILL_VERSION" ;;
+                    *:missing) any=yes; say "  $f: add" ;;
+                    *) any=yes; say "  $f: replace (kept as $f.bak-$stamp)" ;;
                 esac
             done
         fi
     done
     if [ "$dry" = no ] && [ "$any" = yes ]; then
         for f in $(team_files); do
+            [ "$f" != VERSION ] || continue
             case $(team_file_state "$f") in
                 missing) install_team_file "$f"; say "  $f: added" ;;
                 differs) install_team_file "$f" "$stamp"; say "  $f: replaced" ;;
@@ -2651,9 +2698,23 @@ cmd_upgrade() {
     if [ -f "$C_WS_PATH/PROJECT.md" ]; then say "  $C_WS_PATH/PROJECT.md: kept unchanged"
     elif [ "$dry" = yes ]; then say "  $C_WS_PATH/PROJECT.md: would be created from the template"
     else ensure_project_record; say "  $C_WS_PATH/PROJECT.md: created from the template"; fi
+    # The version is recorded last: until every other file is this skill's, the folder keeps the
+    # version it had, and the next upgrade finishes what an interrupted one left.
+    if [ "$dry" = no ] && [ "$any" = yes ] && [ "$(team_file_state VERSION)" != current ]; then
+        [ "${AGENT_TEAM_UPGRADE_FAULT:-}" != before-version ] || kill -9 $$
+        install_team_file VERSION
+        say "  VERSION: $SKILL_VERSION"
+    fi
     if [ "$any" = no ]; then say "Workspace \"$T_NAME\" is up to date; nothing was changed."; return; fi
     if [ "$dry" = yes ]; then say "Run it: $PROG upgrade $T_NAME$( [ -z "$b_all" ] || printf ' --backend %s' "$b_all")$( [ -z "$b_a" ] || printf ' --assistant-backend %s' "$b_a")$( [ -z "$b_s" ] || printf ' --supervisor-backend %s' "$b_s")$( [ -z "$b_r" ] || printf ' --reviewer-backend %s' "$b_r")$( [ "$model_set" = no ] || printf ' --model %s' "$(shquote "$opt_model")")$( [ -z "$m_a" ] || printf ' --assistant-model %s' "$(shquote "$m_a")")$( [ -z "$m_s" ] || printf ' --supervisor-model %s' "$(shquote "$m_s")")$( [ -z "$m_r" ] || printf ' --reviewer-model %s' "$(shquote "$m_r")")$( [ -z "$e_all" ] || printf ' --effort %s' "$e_all")$( [ -z "$e_a" ] || printf ' --assistant-effort %s' "$e_a")$( [ -z "$e_s" ] || printf ' --supervisor-effort %s' "$e_s")$( [ -z "$e_r" ] || printf ' --reviewer-effort %s' "$e_r")"
     else say "Upgraded. Next, with the team's own command, from the project folder: cd $(shquote "$T_WORKSPACE") && $T_DIR/team.sh check, then $T_DIR/team.sh"; fi
+}
+
+# ---------------------------------------------------------------- version
+cmd_version() {
+    [ "$#" -eq 0 ] || die 'version takes no argument (a team'"'"'s recorded version: agent-team.sh status NAME)'
+    need_skill_version
+    say "buzz-agent-team $SKILL_VERSION"
 }
 
 # ---------------------------------------------------------------- main
@@ -2672,6 +2733,7 @@ case $cmd in
     status) cmd_status "$@" ;;
     preflight) cmd_preflight "$@" ;;
     settings) cmd_settings "$@" ;;
+    version | --version | -V) cmd_version "$@" ;;
     help | -h | --help) usage ;;
     *) die "unknown command: $cmd (see agent-team.sh help)" ;;
 esac

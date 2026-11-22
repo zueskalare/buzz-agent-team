@@ -1,6 +1,8 @@
 ---
 name: buzz-agent-team
 description: Create, upgrade or operate a Buzz agent team for a project. Use for setting up a project-named discussion partner and a workspace supervisor, each on Claude or Codex signed in through the user's own subscription, choosing each agent's model from the list the sign-in offers, upgrading a team made before 20 November, and starting, checking or stopping the agents. Guides workspace and channel setup, ownership proofs and channel membership.
+metadata:
+  version: "1.0.0"
 ---
 
 # Buzz agent team setup
@@ -26,6 +28,8 @@ Everything goes through `scripts/agent-team.sh` in this skill's folder (the fold
 - **Codex:** the skills list gives this file's path, ending in `buzz-agent-team/SKILL.md`. The script is `scripts/agent-team.sh` in that same folder.
 
 Below, `agent-team.sh` stands for that full path. `agent-team.sh help` lists every command and option. If running it says "permission denied", the folder was copied without its file modes: ask the user to run `chmod +x` on the script, or to install the skill again.
+
+`agent-team.sh version` prints this skill's version, the one line of `VERSION` in this folder. A team folder keeps the version of the skill that created it or last upgraded it, in its own `VERSION` file: `agent-team.sh status <name>` shows it beside this skill's version, and `team.sh version` prints it. When the two differ, or a team made before version 1.0.0 has none, the dry run of step 13 shows what an upgrade would change.
 
 ## The team's own command
 
@@ -133,7 +137,7 @@ Tell the user this right after the first preflight, before any command writes un
     - The supervisor's wall can stop a tool it needs: a tool installed under the user's home folder does not run in its shell, and it sees no global Git configuration. If the user reports that, add the tool's folder to the team's `team.conf` as `wall_read=/abs/dir:/abs/dir`; `team.sh start --no-wall` starts the supervisor without the wall for one run, and the user decides that.
     - Run `team.sh` yourself only if the user asks. Do not use `agent-team.sh start` for this: it still exists and shares the same `agent.pid` and `agent.log`, but the team's own command is the one to give the user.
     - For a smoke test, have a channel member ask an ordinary question; a useful reply or silence is valid. Ask the owner to mention the supervisor for a catch-up.
-13. **Upgrade an existing team** (a team marked format 1, or to change a saved backend or model). Agents must be stopped. Run `agent-team.sh upgrade <name> --dry-run [--backend <b> | --assistant-backend <b> --supervisor-backend <b>] [--assistant-model <id>] [--supervisor-model <id>]` and show the plan: which files it replaces (each kept beside itself as `<file>.bak-<time>`), which settings are not carried over (names only), and that keys, proofs and `PROJECT.md` stay unchanged. On the user's yes, run the same command without `--dry-run`. A second run says "up to date". Upgrade also adds `team.sh` to a team folder that lacks it and refreshes one that differs from this skill's copy, keeping the earlier one as `team.sh.bak-<time>`; it does the same for each agent's `start.sh` and for the team folder's `acp-models.py`. Then continue with step 12.
+13. **Upgrade an existing team** (a team marked format 1, or to change a saved backend or model). Agents must be stopped. Run `agent-team.sh upgrade <name> --dry-run [--backend <b> | --assistant-backend <b> --supervisor-backend <b>] [--assistant-model <id>] [--supervisor-model <id>]` and show the plan: which files it replaces (each kept beside itself as `<file>.bak-<time>`), which settings are not carried over (names only), and that keys, proofs and `PROJECT.md` stay unchanged. On the user's yes, run the same command without `--dry-run`. A second run says "up to date". Upgrade also adds `team.sh` to a team folder that lacks it and refreshes one that differs from this skill's copy, keeping the earlier one as `team.sh.bak-<time>`; it does the same for each agent's `start.sh` and for the team folder's `acp-models.py`. It sets the team folder's `VERSION` to this skill's version; the plan shows that as `VERSION: <recorded> -> <this skill's>`. Then continue with step 12.
 14. **An independent reviewer** (optional). It is a one-agent team of its own, for the same project folder and channel as an existing team or on its own.
     - Ask for its backend and its model as in steps 1 and 2: `agent-team.sh preflight --roles reviewer --reviewer-backend <b>`, then `agent-team.sh models --backend <b> --role reviewer`. Say that a reviewer on another provider than the supervisor gives a more independent read.
     - Run `agent-team.sh create --workspace <folder> --channel <uuid> --name <name>-reviewer --roles reviewer [--reviewer-name "<name>"] [--reviewer-backend <b>] [--reviewer-model <id>]`. The default display name is "<Folder> Reviewer".

@@ -1154,6 +1154,9 @@ d1() { local name=$1; shift; RC=0; env AGENT_TEAM_ROOT="$RD" "$CS" "$@" > "$OUT/
 d1 d1-create create --workspace "$TD/ws/web" --channel 3e4f5061-7283-94a5-b6c7-d8e9f0a1b2c3 --community "$COMMUNITY" --owner "$OWNER"
 check 'create from the copied folder (exit 0)' rc_is 0
 check 'the prompts came from the copied folder'"'"'s templates' has "$RD/web/supervisor/prompt.md" 'template of the copied folder'
+d1 d1-version version
+check 'version from the copied folder prints the one line of its VERSION file' eval 'rc_is 0 && [ "$(cat "$OUT/d1-version.out")" = "buzz-agent-team $(sed -n 1p "$EL/buzz-agent-team/VERSION")" ]'
+check 'the new team folder records that version' cmp -s "$EL/buzz-agent-team/VERSION" "$RD/web/VERSION"
 check 'no placeholder left' eval 'hasnt "$RD/web/assistant/prompt.md" "{{" && hasnt "$RD/web/supervisor/prompt.md" "{{"'
 D1A=$(grep '^pubkey=' "$RD/web/assistant/agent.conf" | cut -d= -f2)
 D1S=$(grep '^pubkey=' "$RD/web/supervisor/agent.conf" | cut -d= -f2)
@@ -1205,6 +1208,8 @@ check 'install for both tools: exit 0, "installed" twice' eval 'rc_is 0 && [ "$(
 check 'each copy matches the source file for file' eval '[ "$(srcman "$CT")" = "$(srcman "$IS/buzz-agent-team")" ] && [ "$(srcman "$XT")" = "$(srcman "$IS/buzz-agent-team")" ]'
 check 'each copy'"'"'s script is executable' eval '[ -x "$CT/scripts/agent-team.sh" ] && [ -x "$XT/scripts/agent-team.sh" ]'
 check 'each copy carries the installer'"'"'s marker' eval '[ -f "$CT/.buzz-agent-team-install" ] && [ -f "$XT/.buzz-agent-team-install" ]'
+SKILL_V=$(sed -n '1p' "$SKILL_DIR/VERSION")
+check 'the marker records the skill version, and the installer prints it' eval 'grep -qx "version=$SKILL_V" "$CT/.buzz-agent-team-install" && grep -qx "version=$SKILL_V" "$XT/.buzz-agent-team-install" && [ "$(grep -cx "  version $SKILL_V" "$OUT/inst-1.out")" = 2 ]'
 check 'the other skills are untouched' eval '[ "$(sha "$HI/.claude/skills/other-skill/SKILL.md")" = "$OTHER_C" ] && [ "$(sha "$HI/.codex/skills/other-skill/SKILL.md")" = "$OTHER_X" ] && [ "$(ls -A "$HI/.claude/skills" | tr "\n" " ")" = "buzz-agent-team other-skill " ]'
 check 'it prints how to invoke the skill in each tool' eval 'has "$OUT/inst-1.out" "Claude Code: type /buzz-agent-team" && has "$OUT/inst-1.out" "Codex: type \$buzz-agent-team"'
 check 'nothing under ~/.buzz-agents' eval '[ ! -e "$HI/.buzz-agents" ]'
@@ -1215,8 +1220,10 @@ SNAP1=$(snap "$HI")
 inst inst-2 "$HI" --
 check 'running it again: up to date, nothing changed' eval 'rc_is 0 && [ "$(grep -c "up to date" "$OUT/inst-2.out")" = 2 ] && [ "$(snap "$HI")" = "$SNAP1" ]'
 printf '\nAn edit made after the first install.\n' >> "$IS/buzz-agent-team/SKILL.md"
+printf '9.9.9\n' > "$IS/buzz-agent-team/VERSION"
 inst inst-3 "$HI" --
 check 'after a change in the source: "updated" twice' eval 'rc_is 0 && [ "$(grep -c "^  updated$" "$OUT/inst-3.out")" = 2 ]'
+check 'an update prints the new version beside the installed one, and the marker follows' eval '[ "$(grep -cx "  version 9.9.9 (installed: $SKILL_V)" "$OUT/inst-3.out")" = 2 ] && grep -qx "version=9.9.9" "$CT/.buzz-agent-team-install" && [ "$(sed -n 1p "$XT/VERSION")" = 9.9.9 ]'
 check 'the copies now match the new source' eval 'has "$CT/SKILL.md" "An edit made after the first install." && [ "$(srcman "$XT")" = "$(srcman "$IS/buzz-agent-team")" ]'
 check 'no temporary or old copies are left' eval '[ -z "$(ls -A "$HI/.claude/skills" "$HI/.codex/skills" | grep "^\.buzz-agent-team")" ]'
 
@@ -1255,6 +1262,14 @@ check 'a symbolic link at the target: exit 1, clear message, untouched' eval 'rc
 inst inst-wrong-uninstall "$HW" -- --uninstall --codex
 check 'uninstall refuses a skill it did not make' eval 'rc_is 1 && has "$OUT/inst-wrong-uninstall.out" "was not made by this installer"'
 check 'every wrong target is byte-identical afterwards' eval '[ "$(snap "$HW")" = "$SNAPW" ]'
+SNAPJ=$(snap "$HJ")
+mv "$IS/buzz-agent-team/VERSION" "$TD/VERSION.away"
+inst inst-noversion "$HJ" -- --claude
+check 'a skill folder without a VERSION file is not installed: exit 1, nothing changed' eval 'rc_is 1 && has "$OUT/inst-noversion.out" "has no valid VERSION file" && [ "$(snap "$HJ")" = "$SNAPJ" ]'
+printf 'next\n' > "$IS/buzz-agent-team/VERSION"
+inst inst-badversion "$HJ" -- --claude
+check 'nor one whose VERSION is not MAJOR.MINOR.PATCH' eval 'rc_is 1 && has "$OUT/inst-badversion.out" "has no valid VERSION file" && [ "$(snap "$HJ")" = "$SNAPJ" ]'
+mv -f "$TD/VERSION.away" "$IS/buzz-agent-team/VERSION"
 
 scenario 'Installer: an interrupted install leaves the previous copy or nothing; uninstall (D2, rule 5)'
 OLDMAN=$(srcman "$CT")
@@ -1283,7 +1298,14 @@ scenario 'SKILL.md: both tools, guided flow, only real commands and options (D4)
 SK=$SKILL_DIR/SKILL.md
 FM=$(awk 'NR == 1 && $0 == "---" { inside = 1; next } inside && $0 == "---" { exit } inside { print }' "$SK")
 check 'front matter opens on line 1 and is closed' eval '[ "$(head -n 1 "$SK")" = "---" ] && [ "$(grep -c "^---$" "$SK")" -ge 2 ]'
-check 'front matter has exactly name and description (fields both tools document)' eval '[ "$(printf "%s\n" "$FM" | cut -d: -f1 | sort | tr "\n" " ")" = "description name " ]'
+# name and description are the fields both tools document. metadata is the open standard's map for
+# a client's own values (agentskills.io/specification), which Claude Code documents and does not act on.
+check 'front matter has exactly name, description and metadata with one key, version' eval '[ "$(printf "%s\n" "$FM" | cut -d: -f1 | LC_ALL=C sort | tr "\n" " ")" = "  version description metadata name " ] && [ "$(printf "%s\n" "$FM" | sed -n "/^metadata:\$/{n;p;}" | cut -d: -f1)" = "  version" ]'
+VFILE=$(cat "$SKILL_DIR/VERSION")
+check "VERSION is one line, MAJOR.MINOR.PATCH ($VFILE)" eval '[ "$(wc -l < "$SKILL_DIR/VERSION" | tr -d " ")" = 1 ] && printf "%s\n" "$VFILE" | grep -Eqx "(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)"'
+check 'SKILL.md metadata.version is that version, quoted' eval 'printf "%s\n" "$FM" | grep -qx "  version: \"$VFILE\""'
+check 'the newest entry of CHANGELOG.md is that version' eval '[ "$(grep -m 1 "^## " "$HERE/CHANGELOG.md" | cut -d" " -f2)" = "$VFILE" ]'
+check 'agent-team.sh version prints it, and so do --version and -V' eval '[ "$("$SCRIPT" version)" = "buzz-agent-team $VFILE" ] && [ "$("$SCRIPT" --version)" = "buzz-agent-team $VFILE" ] && [ "$("$SCRIPT" -V)" = "buzz-agent-team $VFILE" ]'
 check 'name equals the folder name' eval 'printf "%s\n" "$FM" | grep -qx "name: $(basename "$SKILL_DIR")"'
 DESC=$(printf '%s\n' "$FM" | sed -n 's/^description: //p')
 check "description is 1-1024 characters (${#DESC})" eval '[ ${#DESC} -ge 1 ] && [ ${#DESC} -le 1024 ]'
@@ -1313,6 +1335,8 @@ for tool in 'Claude Code' 'Codex'; do
     check "$tool section: every statement carries a source or says not checked" \
         eval '[ -z "$(printf "%s\n" "$sec" | grep "^- " | grep -vE "Source: https://|not checked|codex --help")" ]'
 done
+check 'README covers versions: the file, the two commands, the changelog and the tag' \
+    eval 'has "$HERE/README.md" "buzz-agent-team/VERSION" && has "$HERE/README.md" "agent-team.sh version" && has "$HERE/README.md" "team.sh version" && has "$HERE/README.md" "CHANGELOG.md" && has "$HERE/README.md" "git tag"'
 check 'README covers the installer, update, uninstall and the refused-proof path' \
     eval 'has "$HERE/README.md" "install.sh" && has "$HERE/README.md" "--uninstall" && has "$HERE/README.md" ".codex/skills" && has "$HERE/README.md" ".claude/skills" && has "$HERE/README.md" "--no-signature-check"'
 

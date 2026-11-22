@@ -3,6 +3,7 @@
 One skill, for Claude Code and for Codex, that sets up a set of Buzz agents for one workspace and one channel in chat. You install it once. Then you ask your assistant for a new set of agents, and it walks you through every step: it checks what is missing, asks one question at a time, lists the models your sign-in offers, runs the steps, shows the public keys, takes the proofs you copy from Buzz Desktop, and tells you how to start the agents.
 
 - `buzz-agent-team/`: the skill folder, complete on its own. Copying it into a tool's skills folder gives a working skill.
+  - `VERSION`: the skill's version, one line (see [Versions](#versions)).
   - `SKILL.md`: the guided flow, for both tools.
   - `scripts/agent-team.sh`: the script that does every step (Bash 3.2 or later, mode 755). `agent-team.sh help` lists every command and option.
   - `scripts/acp-models.py`: lists the models an ACP adapter offers, without a model turn (used by `agent-team.sh models`; `create` and `upgrade` also copy it into each team folder, where `team.sh` runs it before a model menu).
@@ -11,6 +12,7 @@ One skill, for Claude Code and for Codex, that sets up a set of Buzz agents for 
   - `templates/agent-start.sh`: one agent's own start command. `create` and `upgrade` copy it into each agent folder as `start.sh` (see One agent at a time).
   - `runtime/` contains the discussion partner's restricted Claude and Codex runtimes and its typed Buzz tools, installed into each partner's folder.
 - `install.sh`: copies the skill folder into Claude Code's and Codex's skills folders.
+- `CHANGELOG.md`: what changed in each version.
 - `test-agent-team.sh`, `test-team-sh.sh`, `test-wall.py`, `test-partner-runtime.py`, `test-codex-partner.py`: offline tests (see Test).
 
 ## Install, update, remove
@@ -35,6 +37,7 @@ diff -rq "$src" "$dst"                                  # what will change
 rsync -a --delete --dry-run --itemize-changes "$src/" "$dst/"   # the same, as rsync sees it
 rsync -a --delete "$src/" "$dst/"                       # update: only that folder changes
 diff -rq "$src" "$dst" && echo "up to date"
+"$dst/scripts/agent-team.sh" version                    # the installed version
 ```
 
 The launcher on `PATH` is updated the same way, keeping the old one beside it:
@@ -44,6 +47,41 @@ cp -p ~/.local/bin/run-buzz-acp.sh ~/.local/bin/run-buzz-acp.sh.bak-$(date -u +%
 install -m 700 /path/to/buzz/local/buzz-acp/run-buzz-acp.sh ~/.local/bin/run-buzz-acp.sh
 cmp /path/to/buzz/local/buzz-acp/run-buzz-acp.sh ~/.local/bin/run-buzz-acp.sh && echo "launcher up to date"
 ```
+
+## Versions
+
+The skill has one version number, `MAJOR.MINOR.PATCH`. It is the one line of `buzz-agent-team/VERSION`; `SKILL.md` repeats it as `metadata.version`, and `CHANGELOG.md` says what each version changed.
+
+```sh
+agent-team.sh version                             # this skill folder's version
+agent-team.sh status                              # the same, and the version recorded in each team folder
+agent-team.sh status shop                         # one team's recorded version beside this skill's
+~/.buzz-agents/shop/team.sh version               # the same from the team folder, without the skill
+```
+
+- **Three copies, one number each.** The source here, the installed skill folder and every team folder each hold a `VERSION` file, so you can see which copy is behind. `install.sh` prints the source's version beside the installed one and records it in its marker.
+- **A team folder's `VERSION`** is the version of the skill that created the folder or last upgraded it, and so the version its `team.sh`, each `start.sh`, `acp-models.py`, `wall/` and the agents' generated files come from. `create` writes it for a new team folder only. `upgrade` replaces it as its last step, so an upgrade that is cut short leaves the earlier version there, and shows the change in its plan as `VERSION: <recorded> -> <this skill's>`; when that is the plan's only line, nothing else in the team differs. A team made before 1.0.0 has none until it is upgraded.
+- **A skill folder without a valid `VERSION`** is refused by `install.sh`, and its `create` and `upgrade` stop before they write anything.
+- **What each number means:**
+  - **Major:** a team made by the earlier version must be upgraded before it starts (the format of the team folder changed), or a command or option was removed or changed its meaning.
+  - **Minor:** something new: a command, an option, a role, a file in the team folder. A team made earlier still starts as it is, and `upgrade` gives it the new files.
+  - **Patch:** a fix or a change of wording.
+
+### This folder is a Git repository
+
+`local/agent-team/setup/` is a repository of its own, inside a folder the Buzz checkout ignores, so nothing here reaches the Buzz repository. Its remote, `origin`, is a repository on GitHub (`git remote -v` shows it); pushing needs `--follow-tags` or `git push origin v<version>` for a new version's tag to go with it.
+
+- **`main`** holds released versions only: every commit that changes the version is tagged `v<version>`, and what you install comes from a tag.
+- **Unfinished work** lives on a branch until its tests pass, then is merged into `main` with a new version.
+
+To release a version:
+
+1. Edit `buzz-agent-team/VERSION` and `metadata.version` in `buzz-agent-team/SKILL.md`, and add the entry at the top of `CHANGELOG.md`. A test fails when the three disagree.
+2. Run the tests (see [Test](#test)).
+3. Commit, then `git tag -a v<version> -m "buzz-agent-team <version>"`.
+4. Install it (above), then run `agent-team.sh upgrade <team> --dry-run` for each team, with its agents stopped, and the same without `--dry-run`.
+
+`git status --short` printing nothing and `git describe --tags` printing a bare tag such as `v1.0.0` mean the folder is exactly that version.
 
 ## Use
 
@@ -99,6 +137,7 @@ $T start --assistant-effort low --supervisor-effort xhigh   # a reasoning effort
 $T start --workspace ~/code/other                 # another project folder for this run
 $T status
 $T stop
+$T version                                        # the version of the skill that wrote this folder's files
 ```
 
 ### One agent at a time
@@ -186,7 +225,7 @@ agent-team.sh upgrade shop --supervisor-model claude-opus-5-5
 agent-team.sh upgrade shop                # a second run says "up to date"
 ```
 
-It writes subscription-only env files for the chosen backends (`--backend`, `--assistant-backend`, `--supervisor-backend`), the current prompts, the partner's runtime and its subscription rules. `identity.key`, the stored proof and the workspace's `PROJECT.md` stay byte-identical. Every replaced or removed file is kept beside itself as `<file>.bak-<UTC time>`. It refuses while an agent runs. Each agent folder is rebuilt beside itself and swapped in; an interrupted run is finished or undone by the next one. The same command changes the saved backend or model of a current team.
+It writes subscription-only env files for the chosen backends (`--backend`, `--assistant-backend`, `--supervisor-backend`), the current prompts, the partner's runtime and its subscription rules, refreshes the team's own files, and sets the team folder's `VERSION` to the skill's version. `identity.key`, the stored proof and the workspace's `PROJECT.md` stay byte-identical. Every replaced or removed file is kept beside itself as `<file>.bak-<UTC time>`. It refuses while an agent runs. Each agent folder is rebuilt beside itself and swapped in; an interrupted run is finished or undone by the next one. The same command changes the saved backend or model of a current team.
 
 ### Settings
 
@@ -206,7 +245,7 @@ For each agent, `create` makes a folder `~/.buzz-agents/<workspace name>/<agent 
 | `agent.log`, `agent.pid` | Written when the agent starts; `agent.pid` also names the backend, and with `team.sh` the model, the agent runs on. |
 | `start.sh` | That agent's own start command (mode 700), a copy of `templates/agent-start.sh`. It holds no setting and no secret. |
 
-Beside the agent folders, the team folder holds `team.conf` (the project folder, channel, community and owner), `team.sh` (the team's own command), `acp-models.py` (asks an adapter for its model list, for the model menu), `wall/` and, when you gave one, `brief.md`.
+Beside the agent folders, the team folder holds `team.conf` (the project folder, channel, community and owner), `team.sh` (the team's own command), `acp-models.py` (asks an adapter for its model list, for the model menu), `wall/`, `VERSION` (the version of the skill that created or last upgraded the folder, mode 600) and, when you gave one, `brief.md`.
 
 The partner's rules take no turn for its own team's agents, and none for other local agents of its channel unless they mention it (an author filter, written from public keys). When another team joins the same channel, `create` says which earlier partner to refresh with `upgrade`.
 
@@ -243,7 +282,7 @@ AGENT_TEAM_REAL_BUZZ=/path/to/buzz/target/release/buzz \
   /bin/bash test-agent-team.sh
 ```
 
-`test-team-sh.sh` covers the team's own command with the same three variables (the real launcher is optional and runs with `--check` only): what `create` and `upgrade` install, the check, the questions, the options, start, stop and status, each agent's own `start.sh`, the model list retrieved at start (a list, a sign-in error, an adapter that does not answer, no credential passed on), the refusal of `default` as a Claude model, and a team folder copied to another path.
+`test-team-sh.sh` covers the team's own command with the same three variables (the real launcher is optional and runs with `--check` only): what `create` and `upgrade` install, the version a team folder records (a new team, a team made before versions, another version of the skill, a skill folder without a valid one), the check, the questions, the options, start, stop and status, each agent's own `start.sh`, the model list retrieved at start (a list, a sign-in error, an adapter that does not answer, no credential passed on), the refusal of `default` as a Claude model, and a team folder copied to another path.
 
 It needs `python3` and `node` on `PATH`. `python3 test-partner-runtime.py` exercises the Claude partner's tool policy, its sign-in passthrough and its model with the installed Claude ACP adapter, a loopback model, a simulated Buzz CLI and a disposable home. `python3 test-codex-partner.py` does the same for the Codex partner with its private engine.
 

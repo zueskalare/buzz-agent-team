@@ -239,6 +239,7 @@ check 'the command names no skill folder' test $? = 0
 run_skill create2 -- create --workspace "$TD/ws/shop" --channel "$CHANNEL"
 check 'a second create keeps it' has "$OUT/create2.out" "Team command: $T/team.sh"
 check 'and leaves it unchanged' cmp -s "$TEMPLATE" "$T/team.sh"
+check 'the new team folder records the skill'"'"'s version, the skill'"'"'s file byte for byte, mode 600' test "$(cmp -s "$SKILL_DIR/VERSION" "$T/VERSION"; echo $?)$(mode_of "$T/VERSION")" = 0600
 check 'the model list helper is in the team folder, the skill'"'"'s byte for byte, mode 700' test "$(cmp -s "$SKILL_DIR/scripts/acp-models.py" "$T/acp-models.py"; echo $?)$(mode_of "$T/acp-models.py")" = 0700
 check 'each agent folder has its own start command, the template byte for byte' test "$(cmp -s "$START_TEMPLATE" "$T/assistant/start.sh"; echo $?)$(cmp -s "$START_TEMPLATE" "$T/supervisor/start.sh"; echo $?)" = 00
 check 'its mode is 700' test "$(mode_of "$T/assistant/start.sh")$(mode_of "$T/supervisor/start.sh")" = 700700
@@ -645,7 +646,7 @@ check 'a model the list does not offer is refused' has "$OUT/rv-bad.out" 'gpt-no
 check 'and no reviewer folder is left' test ! -e "$R/reviewer"
 run_skill rv -- create --workspace "$TD/ws/shop" --channel "$CHANNEL" --name shop-reviewer --roles reviewer --reviewer-name 'Shop Reviewer' --reviewer-backend codex --reviewer-model gpt-example-astra
 check 'create succeeds' rc_is 0
-check 'the team has one agent folder, reviewer' test "$(ls "$R" | tr '\n' ' ')" = 'acp-models.py reviewer team.conf team.sh wall '
+check 'the team has one agent folder, reviewer' test "$(LC_ALL=C ls "$R" | tr '\n' ' ')" = 'VERSION acp-models.py reviewer team.conf team.sh wall '
 check 'it has a key, a settings file and a prompt' test -s "$R/reviewer/identity.key" -a -s "$R/reviewer/.env.buzz-acp.local" -a -s "$R/reviewer/prompt.md"
 check 'the key is private' test "$(mode_of "$R/reviewer/identity.key")" = 600
 check 'its record names the role, backend and model' test "$(grep -c -x -e 'role=reviewer' -e 'backend=codex' -e 'model_codex=gpt-example-astra' -e 'name=Shop Reviewer' "$R/reviewer/agent.conf")" = 4
@@ -914,10 +915,73 @@ check 'both are the template again, mode 700' test "$(cmp -s "$START_TEMPLATE" "
 check 'the edited one is kept beside it' test "$(ls "$T/assistant" | grep -c '^start.sh.bak-')" = 1
 run_skill up-start2 -- upgrade shop
 check 'a second upgrade changes nothing' has "$OUT/up-start2.out" 'up to date; nothing was changed'
+# The recorded version: the team folder says which version of the skill wrote its files.
+V=$(sed -n '1p' "$SKILL_DIR/VERSION")
+run_team ver "$T" -- version
+check 'team.sh version prints the recorded version' test "$RC$(grep -c "team files written by buzz-agent-team $V\$" "$OUT/ver.out")" = 01
+run_team ver-status "$T" -- status
+check 'team.sh status shows it' has "$OUT/ver-status.out" "team files written by buzz-agent-team $V"
+run_skill ver-skill -- status shop
+check 'the skill'"'"'s status says the team is at its own version' has "$OUT/ver-skill.out" "Team files: written by buzz-agent-team $V, this skill's version"
+run_skill ver-list -- status
+check 'the list of teams shows the skill version and each team'"'"'s' test "$(grep -c -e "^Skill: buzz-agent-team $V\$" -e "^  shop .* skill $V\$" "$OUT/ver-list.out")" = 2
+# A team made before the skill had versions has no VERSION file.
+rm -f "$T/VERSION"
+run_team ver-none "$T" -- version
+check 'a folder without one says so and names the fix' test "$RC$(grep -c 'no skill version recorded (written before 1.0.0); agent-team.sh upgrade <team> records it' "$OUT/ver-none.out")" = 01
+run_skill ver-none-skill -- status shop
+check 'the skill'"'"'s status says so too' has "$OUT/ver-none-skill.out" 'Team files: no skill version recorded'
+run_skill ver-create -- create --workspace "$TD/ws/shop" --channel "$CHANNEL"
+check 'a repeated create does not record a version for a folder it did not write' test "$RC$([ -e "$T/VERSION" ] && echo there)" = 0
+run_skill ver-dry -- upgrade shop --dry-run
+check 'the upgrade plan names it' has "$OUT/ver-dry.out" "  VERSION: not recorded -> $V"
+check 'a dry run records nothing' test ! -e "$T/VERSION"
+run_skill ver-up -- upgrade shop
+check 'upgrade records it, mode 600' test "$(grep -cx "  VERSION: $V" "$OUT/ver-up.out")$(cmp -s "$SKILL_DIR/VERSION" "$T/VERSION"; echo $?)$(mode_of "$T/VERSION")" = 10600
+run_skill ver-up2 -- upgrade shop
+check 'a second upgrade changes nothing' has "$OUT/ver-up2.out" 'up to date; nothing was changed'
+# Another version of the skill: the same folder with another VERSION file.
+NEXT=$TD/skill-next
+cp -Rp "$SKILL_DIR" "$NEXT"
+printf '9.9.9\n' > "$NEXT/VERSION"
+run_next() { local name=$1; shift 2; RC=0; /bin/bash "$NEXT/scripts/agent-team.sh" "$@" > "$OUT/$name.out" 2>&1 < /dev/null || RC=$?; }
+run_next next-version -- version
+check 'a skill folder prints its own version' test "$RC$(cat "$OUT/next-version.out")" = '0buzz-agent-team 9.9.9'
+run_next next-status -- status shop
+check 'its status names both versions and the dry run' has "$OUT/next-status.out" "Team files: written by buzz-agent-team $V; this skill is 9.9.9: agent-team.sh upgrade shop --dry-run"
+run_next next-dry -- upgrade shop --dry-run
+check 'its upgrade plan shows the version change and no other team file' test "$(grep -c "^  VERSION: $V -> 9.9.9\$" "$OUT/next-dry.out")$(grep -c -e ': add$' -e ': replace' "$OUT/next-dry.out")" = 10
+check 'a dry run leaves the recorded version' cmp -s "$SKILL_DIR/VERSION" "$T/VERSION"
+# The version is the last thing an upgrade writes: one that is cut short leaves the earlier version.
+printf '\n# edited by hand\n' >> "$T/team.sh"
+RC=0
+AGENT_TEAM_UPGRADE_FAULT=before-version /bin/bash "$NEXT/scripts/agent-team.sh" upgrade shop > "$OUT/next-cut.out" 2>&1 < /dev/null || RC=$?
+check 'an upgrade killed before its last write refreshed the team command and did not report success' test "$([ "$RC" != 0 ] && echo killed)$(cmp -s "$TEMPLATE" "$T/team.sh"; echo $?)$(grep -c '^Upgraded' "$OUT/next-cut.out")" = killed00
+check 'and the folder still records the earlier version' cmp -s "$SKILL_DIR/VERSION" "$T/VERSION"
+run_next next-up -- upgrade shop
+check 'its upgrade records the new version and keeps no copy of the old file' test "$RC$(sed -n '1p' "$T/VERSION")$(ls "$T" | grep -c '^VERSION.bak-')" = 09.9.90
+run_team next-team "$T" -- version
+check 'team.sh version follows' has "$OUT/next-team.out" 'team files written by buzz-agent-team 9.9.9'
+run_skill back-dry -- upgrade shop --dry-run
+check 'an older skill'"'"'s plan shows that it would take the folder back' has "$OUT/back-dry.out" "  VERSION: 9.9.9 -> $V"
+run_skill back -- upgrade shop
+check 'and its upgrade does' cmp -s "$SKILL_DIR/VERSION" "$T/VERSION"
+# A skill folder without a valid version writes nothing.
+BEFORE=$(cd "$T" && find . -type f ! -name 'agent.log*' | LC_ALL=C sort | xargs shasum -a 256 | shasum -a 256)
+for bad in '1.0' 'v1.0.0' '01.0.0' ''; do
+    if [ -n "$bad" ]; then printf '%s\n' "$bad" > "$NEXT/VERSION"; else rm -f "$NEXT/VERSION"; fi
+    run_next bad-version -- version
+    run_next bad-upgrade -- upgrade shop
+    run_next bad-create -- create --workspace "$TD/ws/shop" --channel "$CHANNEL" --name shop-unversioned
+    check "a skill folder whose VERSION is \"${bad:-missing}\" prints no version, upgrades nothing and creates nothing" \
+        test "$(grep -c 'has no valid VERSION file' "$OUT/bad-version.out")$(grep -c 'has no valid VERSION file' "$OUT/bad-upgrade.out")$(grep -c 'has no valid VERSION file' "$OUT/bad-create.out")$([ -e "$ROOT/shop-unversioned" ] && echo made)" = 111
+done
+check 'the team folder is byte-identical after them' test "$(cd "$T" && find . -type f ! -name 'agent.log*' | LC_ALL=C sort | xargs shasum -a 256 | shasum -a 256)" = "$BEFORE"
 
 scenario 'help and unknown commands'
 run_team help "$T" -- help
 check 'help lists the commands' has "$OUT/help.out" 'team.sh check [AGENT...]'
+check 'and the version command' has "$OUT/help.out" 'team.sh version'
 run_team unknown "$T" -- restart
 check 'an unknown command is refused' has "$OUT/unknown.out" 'unknown command: restart'
 
