@@ -1,0 +1,19 @@
+#!/bin/sh
+# buzz, as a walled agent's shell finds it first. A plain "buzz ..." command runs outside the
+# sandbox, and this hands it to the real Buzz CLI. Inside the sandbox there is no network, so the
+# real CLI could only fail; this says what to do instead.
+self_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
+if ! ls "$HOME" >/dev/null 2>&1; then
+    echo 'buzz: this workspace is walled, and a walled shell command has no network. Run the buzz command on its own line: no pipe, no &&, no ;, no redirection and no $(...). Its whole output comes back to you.' >&2
+    exit 2
+fi
+old_ifs=$IFS
+IFS=:
+for d in $PATH; do
+    IFS=$old_ifs
+    [ -n "$d" ] || continue
+    [ "$d" -ef "$self_dir" ] && continue
+    if [ -x "$d/buzz" ] && [ ! "$d/buzz" -ef "$0" ]; then exec "$d/buzz" "$@"; fi
+done
+echo 'buzz: the Buzz CLI is not on PATH' >&2
+exit 127

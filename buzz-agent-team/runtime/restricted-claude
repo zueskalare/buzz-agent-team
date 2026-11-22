@@ -1,0 +1,58 @@
+#!/usr/bin/env python3
+"""Launch the adapter's Claude CLI with the discussion partner's fixed, read-only tool surface."""
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+root = Path(__file__).resolve().parent
+adapter = os.environ["PROJECT_BUZZ_ADAPTER"]
+os.environ.pop("CLAUDE_CODE_EXECUTABLE", None)
+if sys.argv[1:] == ["--check-runtime"]:
+    try:
+        help_text = subprocess.check_output([adapter, "--cli", "--help"], stdin=subprocess.DEVNULL,
+                                            text=True, timeout=15)
+        required = ("--restricted", "--tools", "--strict-mcp-config", "--disable-slash-commands")
+        if any(flag not in help_text for flag in required):
+            sys.exit("The discussion partner requires a Claude CLI with restricted mode and tool selection.")
+        subprocess.run([root / "buzz-tools", "--check-runtime"], check=True, timeout=10)
+    except (subprocess.SubprocessError, OSError) as exc:
+        sys.exit(f"Discussion partner runtime check failed: {exc}")
+    sys.exit(0)
+if sys.argv[1:] in (["--version"], ["-v"], ["--help"]) or sys.argv[1:3] == ["auth", "status"]:
+    # The sign-in lookup (keychain entry or .credentials.json under CLAUDE_CONFIG_DIR) is the
+    # CLI's own; this wrapper passes HOME and CLAUDE_CONFIG_DIR through and adds no policy here.
+    os.execv(adapter, [adapter, "--cli", *sys.argv[1:]])
+
+# The SDK also sets some of these options. Emit each policy option exactly once.
+lists = {"--allowedTools", "--allowed-tools", "--disallowedTools", "--disallowed-tools",
+         "--tools", "--mcp-config", "--plugin-dir", "--add-dir"}
+values = {"--permission-mode", "--setting-sources", "--settings", "--agents", "--agent"}
+flags = {"--allow-dangerously-skip-permissions", "--dangerously-skip-permissions",
+         "--restricted", "--strict-mcp-config", "--disable-slash-commands"}
+args = sys.argv[1:]
+kept = []
+i = 0
+while i < len(args):
+    arg = args[i]
+    name, equals, _ = arg.partition("=")
+    i += 1
+    if name in lists:
+        if not equals:
+            while i < len(args) and not args[i].startswith("-"):
+                i += 1
+    elif name in values:
+        if not equals:
+            i += 1
+    elif name not in flags:
+        kept.append(arg)
+
+mcp = {"mcpServers": {"buzz": {
+    "command": str(root / "buzz-tools"),
+    "env": {key: os.environ[key] for key in ("PROJECT_BUZZ_ADAPTER", "PROJECT_BUZZ_CLI", "PROJECT_BUZZ_AGENT_DIR") if key in os.environ}
+}}}
+policy = ["--restricted", "--tools", "Read,Glob,Grep", "--disable-slash-commands",
+          "--strict-mcp-config", "--mcp-config", json.dumps(mcp), "--permission-mode", "dontAsk",
+          "--allowedTools", "Read", "Glob", "Grep", "mcp__buzz"]
+os.execv(adapter, [adapter, "--cli", *kept, *policy])

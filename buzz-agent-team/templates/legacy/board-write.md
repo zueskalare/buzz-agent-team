@@ -1,0 +1,3 @@
+- Create an item with `buzz issues create --title "…" --content -`, with the body on standard input: the owning supervisor and its workspace, the completion condition, the thread link (`buzz://message?channel={{CHANNEL_ID}}&id=<event id>`) and, once given, the link to the user's approval. In a project home add `--channel {{CHANNEL_ID}}`; otherwise pass `--repo-owner` and `--repo-id`.
+- Record the owner with `buzz issues assign`, using the supervisor's public key.
+- Set the state with `buzz issues status`: `draft` while proposed, `open` once the user approves, `resolved` when done, `closed` when dropped. Give the reason in `--content`: in progress, blocked on what, or how completion was checked.

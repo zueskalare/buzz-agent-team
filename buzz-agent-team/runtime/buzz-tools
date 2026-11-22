@@ -1,0 +1,115 @@
+#!/usr/bin/env node
+// Read project context, discuss proposals, and keep the agent's private memory. Each tool supplies a fixed argv to the installed CLI.
+const { createRequire } = require("node:module");
+const { spawnSync } = require("node:child_process");
+const fs = require("node:fs");
+const path = require("node:path");
+const os = require("node:os");
+const deps = createRequire(fs.realpathSync(process.env.PROJECT_BUZZ_ADAPTER));
+const { McpServer } = deps("@modelcontextprotocol/sdk/server/mcp.js");
+const { StdioServerTransport } = deps("@modelcontextprotocol/sdk/server/stdio.js");
+const { z } = deps("zod");
+if (process.argv[2] === "--check-runtime") process.exit(0);
+const server = new McpServer({ name: "buzz", version: "1.0.0" });
+const agentDir = process.env.PROJECT_BUZZ_AGENT_DIR || path.resolve(__dirname, "..");
+const cli = process.env.PROJECT_BUZZ_CLI;
+
+function credential(name) {
+  const lines = fs.readFileSync(path.join(agentDir, ".env.buzz-acp.local"), "utf8").split(/\r?\n/);
+  const pattern = new RegExp("^\\s*(?:export\\s+)?" + name + "\\s*=\\s*(.*?)\\s*$");
+  const matches = lines.map(line => line.match(pattern)).filter(Boolean);
+  if (matches.length !== 1) throw new Error("The agent’s local Buzz configuration is incomplete");
+  const value = matches[0][1];
+  if (!/^['"]/.test(value)) return value;
+  if (value.length < 2 || value.at(-1) !== value[0]) throw new Error("Invalid quoted Buzz setting");
+  return value.slice(1, -1);
+}
+
+function buzz(args, input) {
+  const env = {
+    HOME: os.homedir(), PATH: process.env.PATH,
+    BUZZ_RELAY_URL: credential("BUZZ_RELAY_URL"), BUZZ_AUTH_TAG: credential("BUZZ_AUTH_TAG"),
+    BUZZ_PRIVATE_KEY: fs.readFileSync(path.join(agentDir, "identity.key"), "utf8").trim()
+  };
+  const result = spawnSync(cli, ["--format", "agent", ...args], {
+    env, input, encoding: "utf8", maxBuffer: 1024 * 1024, timeout: 20000
+  });
+  if (result.error) throw new Error("Buzz command failed: " + (result.error.code || "execution error"));
+  if (result.status !== 0) throw new Error("Buzz rejected the request (exit " + result.status + ")");
+  return result.stdout;
+}
+
+const channel = z.string().uuid();
+const event = z.string().regex(/^[0-9a-f]{64}$/);
+const slug = z.string().max(256).regex(/^(?:core|(?:mem\/)?[a-z0-9][a-z0-9_./-]*)$/);
+const limit = z.number().int().min(1).max(50).default(20);
+const message = z.string().min(1).max(32000);
+function tool(name, description, inputSchema, run) {
+  server.registerTool(name, {description, inputSchema}, async args => ({
+    content: [{ type: "text", text: run(args) || "(empty)" }]
+  }));
+}
+
+// Codex receives project reads through this server. Resolve symlinks before
+// checking containment and bound both the directory result and each file read.
+if (process.env.PROJECT_BUZZ_WORKSPACE) {
+  const root = fs.realpathSync(process.env.PROJECT_BUZZ_WORKSPACE);
+  function projectPath(relative) {
+    const target = fs.realpathSync(path.resolve(root, relative));
+    const within = path.relative(root, target);
+    if (within === ".." || within.startsWith(".." + path.sep) || path.isAbsolute(within)) {
+      throw new Error("Path is outside the project");
+    }
+    return target;
+  }
+  tool("list_project", "List up to 200 entries in a project directory.",
+    {path: z.string().max(2048).default(".")}, a => {
+      const dir = fs.opendirSync(projectPath(a.path));
+      const entries = [];
+      try {
+        for (let entry; entries.length < 200 && (entry = dir.readSync()); ) {
+          entries.push(entry.name + (entry.isDirectory() ? "/" : ""));
+        }
+      } finally { dir.closeSync(); }
+      return entries.join("\n");
+    });
+  tool("read_project", "Read up to 64 KiB of a project text file at a byte offset.",
+    {path: z.string().min(1).max(2048), offset: z.number().int().nonnegative().default(0)}, a => {
+      const target = projectPath(a.path);
+      const fd = fs.openSync(target, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+      try {
+        if (!fs.fstatSync(fd).isFile()) throw new Error("Select a regular file");
+        const buffer = Buffer.alloc(65536);
+        const count = fs.readSync(fd, buffer, 0, buffer.length, a.offset);
+        return buffer.toString("utf8", 0, count);
+      } finally { fs.closeSync(fd); }
+    });
+}
+
+tool("read_channel", "Read recent messages in a joined Buzz channel.", {channel, limit},
+  a => buzz(["messages", "get", "--channel", a.channel, "--limit", String(a.limit)]));
+tool("read_thread", "Read the thread containing a message.", {channel, event, limit},
+  a => buzz(["messages", "thread", "--channel", a.channel, "--event", a.event, "--limit", String(a.limit)]));
+tool("search_messages", "Find prior discussions visible to this agent.", {query: z.string().min(1).max(300), limit},
+  a => buzz(["messages", "search", "--query="+a.query, "--limit", String(a.limit)]));
+tool("read_canvas", "Read the channel canvas.", {channel},
+  a => buzz(["canvas", "get", "--channel", a.channel]));
+tool("read_issue", "Read a Buzz issue by its event ID.", {event},
+  a => buzz(["issues", "get", "--event", a.event]));
+tool("list_issues", "Read issues on a Buzz repository board.", {
+  repo_owner: event, repo_id: z.string().min(1).max(255), limit
+}, a => buzz(["issues", "list", "--repo-owner", a.repo_owner, "--repo-id="+a.repo_id, "--limit", String(a.limit)]));
+tool("post_message", "Publish a Buzz message or a proposed todo. Use the supplied thread destination for replies.", {
+  channel, text: message, reply_to: event.optional(), mentions: z.array(event).max(8).default([])
+}, a => {
+  const args = ["messages", "send", "--channel", a.channel, "--content", "-"];
+  if (a.reply_to) args.push("--reply-to", a.reply_to);
+  for (const key of a.mentions) args.push("--mention", key);
+  return buzz(args, a.text);
+});
+tool("list_memory", "List the agent’s personal Buzz memory.", {}, () => buzz(["mem", "ls", "--json"]));
+tool("read_memory", "Retrieve one of the agent’s saved notes.", {slug}, a => buzz(["mem", "get", a.slug]));
+tool("save_memory", "Save a personal Buzz note. Read an existing note before replacing it.", {
+  slug, text: z.string().min(1).max(64000)
+}, a => buzz(["mem", "set", a.slug, "-"], a.text));
+server.connect(new StdioServerTransport()).catch(error => { console.error(error.message); process.exitCode = 1; });

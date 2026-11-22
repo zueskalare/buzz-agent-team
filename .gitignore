@@ -1,0 +1,9 @@
+# macOS folder metadata
+.DS_Store
+# Python byte code from the test scripts and the runtime helpers
+__pycache__/
+*.pyc
+# Editor and merge leftovers
+*.swp
+*.orig
+*~

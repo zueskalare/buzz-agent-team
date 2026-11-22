@@ -1,0 +1,149 @@
+---
+name: buzz-agent-team
+description: Create, upgrade or operate a Buzz agent team for a project. Use for setting up a project-named discussion partner and a workspace supervisor, each on Claude or Codex signed in through the user's own subscription, choosing each agent's model from the list the sign-in offers, upgrading a team made before 20 November, and starting, checking or stopping the agents. Guides workspace and channel setup, ownership proofs and channel membership.
+---
+
+# Buzz agent team setup
+
+You guide the user through the whole setup in chat. A bundled script does every step: you run it, show what it printed, and ask the user for what it needs, **one question per message**.
+
+## The team you create
+
+- **Discussion partner** takes the project’s display name. It considers each ordinary message in the setup channel, including messages from other members, and decides whether a reply would help. It takes no turn for its own team's agents, or for other local agents of its channel unless they mention it. In other channels it joins, mentions can start a turn. It can read project files, discuss ideas in Buzz, post proposed todos in the thread, and save its own memory. Its harness supplies a limited set of tools. File edits, shell access, delegation and direct tracker updates belong to the delivery workflow.
+- **Workspace supervisor** owns delivery. The owner can accept a proposal in Buzz and the supervisor can promote it into the selected tracker. The supervisor dispatches bounded work to subagents on owner authorization, reviews their evidence, and records the result. Keep the tracker choice specific to the project.
+- **Each agent runs on Claude or Codex, with its own model,** and signs in only through the user's subscription: the Claude sign-in or the ChatGPT sign-in. No API key, token or gateway address is ever used; the launcher removes them and refuses to start an agent that would use one.
+- **Independent reviewer** (optional, a one-agent team of its own; step 14). It reads the project folder and the Buzz threads and posts its review. Its runtime gives it no file edits, no commands and no web, as for the discussion partner. It takes a turn when anyone in its channels mentions it.
+- **Every agent's files stop at the project folder.** The discussion partner and the reviewer are held by their restricted runtime. The supervisor keeps its tools and is started behind a wall: its file tools read and write only inside the project folder, and its shell commands run in a sandbox that cannot read the user's home folder outside the project folder. The user's own Claude settings are not loaded for it. Network access is not limited. A supervisor on Codex has no wall, so the team command refuses to start one unless the user passes `--no-wall`.
+- Both agents consult the workspace’s `PROJECT.md` and the relevant Buzz threads and worker reports. Each agent has its own relay-backed memory under its identity across joined channels. Share decisions through the project record and respect each conversation’s audience.
+- Keep channel IDs, owner keys and local paths in the harness configuration. Use role names and responsibilities in prompts. The setup command calls the discussion partner `assistant` for identity management.
+- **Cost:** every running agent uses the user's own subscription allowance. The discussion partner takes a model turn on every ordinary message in its channel, even when it then stays silent. Say this before the user starts the agents.
+
+## The script
+
+Everything goes through `scripts/agent-team.sh` in this skill's folder (the folder that holds this `SKILL.md`). Always call it by its full path, in double quotes:
+
+- **Claude Code:** the folder is `${CLAUDE_SKILL_DIR}`, so the script is `"${CLAUDE_SKILL_DIR}/scripts/agent-team.sh"`. Claude Code replaces `${CLAUDE_SKILL_DIR}` with this skill's folder.
+- **Codex:** the skills list gives this file's path, ending in `buzz-agent-team/SKILL.md`. The script is `scripts/agent-team.sh` in that same folder.
+
+Below, `agent-team.sh` stands for that full path. `agent-team.sh help` lists every command and option. If running it says "permission denied", the folder was copied without its file modes: ask the user to run `chmod +x` on the script, or to install the skill again.
+
+## The team's own command
+
+Each team folder (`~/.buzz-agents/<name>/`) holds `team.sh`, a copy of this skill's `templates/team.sh`. It checks, starts, stops and reports that folder's agents, and it is what the user runs from then on:
+
+- `team.sh check` verifies the environment and starts nothing: the launcher, `buzz-acp` and `buzz` on `PATH`, each agent's adapter, the project folder, each agent's key, settings file, prompt and proof, and the launcher's own check of each agent with its subscription sign-in.
+- **The project folder the agents work in is the folder `team.sh` is run from**, or the one `--workspace <dir>` names. It is never the team folder or a folder around it, because the secret keys are there: run from the team folder, the command uses the project folder saved in `team.conf`.
+- `team.sh` (or `team.sh start`) runs that check, then starts. In a terminal it asks which agents to start, then the provider (Claude or Codex), the model and the reasoning effort of each one. Enter keeps the saved choice; a choice lasts for that run.
+- `team.sh status` and `team.sh stop` report and stop them. `team.sh help` lists the options.
+- **Each agent folder also holds its own start command, `start.sh`** (`~/.buzz-agents/<name>/<agent>/start.sh`, a copy of this skill's `templates/agent-start.sh`). It starts that one agent and no other, through `team.sh`. In a terminal it asks that agent's provider, model and reasoning effort; Enter keeps the saved one. `--yes` asks nothing; `--model`, `--backend`, `--effort`, `--workspace` and `--no-wall` set one run. Give it to the user when they want one agent at a time.
+- **The model menu shows what the provider offers at that moment.** Before an agent's model menu, `team.sh` asks that provider's adapter for its list with `acp-models.py` from the team folder: one session, no model turn, the user's subscription sign-in, at most 30 seconds. The list replaces the kept one in `models/`. When it cannot be retrieved, the command says why and offers the kept list with its date. A model given by option that the kept list lacks is looked up the same way before it is refused. A start that asks nothing retrieves nothing.
+- **A Claude agent is never started or saved with the model `default`.** The Claude adapter's list has that entry, but Claude Code takes it as a model name and refuses every turn, so the agent stays silent. The start menu leaves it out, and `team.sh`, `start.sh`, `create`, `upgrade` and `settings` refuse it. For the runtime default, save no model.
+
+It finds everything from its own location and names no skill, so a team folder runs without this skill and can be moved: it passes the folder's own paths to the launcher at every start. `team.sh workspace <dir>` changes the project folder saved in `team.conf`. This skill is needed to create or upgrade a team.
+
+## Rules
+
+- Ask one question per message and wait for the answer. Offer the default or the value you already have, so the user can answer "yes".
+- **Never read, print, copy, move or upload a key file** (`identity.key`) or anything else under the agents' root (default `~/.buzz-agents`). Never open, `cat`, `grep` or `head` an env file (`.env.buzz-acp.local`) or `settings.conf`. Use `agent-team.sh status` and `agent-team.sh settings` to see what exists.
+- **Never sign in or out, and never read a credential or a Claude or Codex settings file** (`~/.claude`, `~/.codex`). The user signs in in their own terminal; the script's checks ask the CLIs how they are signed in, and the adapters use the sign-in themselves.
+- Never run `buzz-admin generate-key` yourself, and never put a secret in a command line or a message. Public keys and ownership proofs are not secret; you may show them.
+- Use only the commands and options in this file. When a command fails, stop, show its message, and help the user fix the cause. Never work around a refusal.
+- `finish` without `--dry-run` contacts the community: run it only after the user has seen the dry run and said yes.
+- `proof --force` only replaces a proof already stored for that agent; it skips no check. `proof --no-signature-check` skips only the signature check; use it only as step 10 says, with the user's go-ahead.
+- **Agents are started with the team's own command, `team.sh` in the team folder, or with one agent's own `start.sh` in its agent folder, never with this skill's script.** `create` and `upgrade` put both there. Give the user that command for their own terminal; run it yourself only when they ask. Agents started with it keep running after this conversation.
+
+## What the tool will ask the user to approve
+
+Tell the user this right after the first preflight, before any command writes under `~/.buzz-agents`, in a sentence or two for the tool you are running in.
+
+### Claude Code
+
+- Each run of the script is a shell command. In the default permission mode, Claude Code asks before running shell commands other than a built-in read-only set; "Yes, and don't ask again" keeps that command allowed for this repository. Source: https://code.claude.com/docs/en/permissions ("Permission system").
+- **Writing under `~/.buzz-agents`**, outside the workspace (`settings`, `create`, `proof`, `upgrade`, `models`, and the team command `team.sh`): with Claude Code's Bash sandbox off, which is the default, the command approval is all that is asked. With the sandbox on, sandboxed commands may write only in the working directory, a temporary folder and added directories: add the root with `/add-dir ~/.buzz-agents`, or allow it with `sandbox.filesystem.allowWrite`. Source: https://code.claude.com/docs/en/sandboxing ("Writes", "Filesystem isolation").
+- **Network for `models` and `finish`**: `models` opens a session with the backend's adapter, which reaches the provider with the user's sign-in; `finish` contacts the community. With the sandbox on, Claude Code asks the first time a command needs a new domain. Source: https://code.claude.com/docs/en/sandboxing ("Network").
+- **Background processes for `team.sh`**: Claude Code documents only the commands it puts in the background itself. `team.sh` returns after starting the agents, and whether they keep running after Claude Code ends is not documented. That is why the user starts them in their own terminal. Source: https://code.claude.com/docs/en/tools-reference ("Background commands").
+
+### Codex
+
+- Codex runs commands in a sandbox. In the default `workspace-write` mode it may write only in the workspace (the current folder and temporary folders such as `/tmp`), and it has no network. With the `on-request` approval policy, it asks the user before writing outside the workspace or using the network. Source: https://learn.chatgpt.com/docs/agent-approvals-security ("Defaults and recommendations", "Network access").
+- **Writing under `~/.buzz-agents`** (`settings`, `create`, `proof`, `upgrade`, `models`, and the team command `team.sh`): Codex asks for approval, because the folder is outside the workspace. To avoid the question, the user can start Codex with `--add-dir ~/.buzz-agents` ("Additional directories that should be writable alongside the primary workspace", `codex --help`). Whether `--add-dir` accepts a folder that does not exist yet is not checked, so create it first with `mkdir -m 700 ~/.buzz-agents`.
+- **Network for `models` and `finish`**: Codex asks to run them with network access, because the adapter reaches the provider and `finish` reaches the community. A permanent alternative is `sandbox_workspace_write.network_access = true` in the Codex configuration. Source: https://learn.chatgpt.com/docs/agent-approvals-security ("Network access").
+- **Background processes for `team.sh`**: the agents need the network and must keep running. The Codex documentation does not say whether processes started by a command outlive the session; not checked. The user starts them in their own terminal.
+
+## Flow
+
+1. **Backends, then `agent-team.sh preflight`.** Ask: "Claude or Codex for the discussion partner and the supervisor: the same backend for both, or different?" Reuse a choice the user already gave. For an existing team, start with `status`; a team marked format 1 goes through step 13 first.
+   - **Sign-in, in the user's own terminal** (you never sign in): for Claude, `claude auth login`, choosing the Claude subscription (not Console), then `claude auth status --text`, which should say `Login method: Claude … account`. For Codex, `codex login`, choosing Sign in with ChatGPT, then `codex login status`, which should say `Logged in using ChatGPT`.
+   - Codex also needs the tested adapter, `npm install -g --prefix "$HOME/.local" @agentclientprotocol/codex-acp@1.13.1`, and the discussion partner's engine, `npm install --prefix "$HOME/.local/share/buzz-agent-team" --save-exact @openai/codex@0.171.0 @modelcontextprotocol/sdk@1.32.2 zod@4.6.7`. The user runs these in their own terminal.
+   - Run `agent-team.sh preflight --backend <claude|codex>`, or `agent-team.sh preflight --assistant-backend <b> --supervisor-backend <b>` for different backends. It checks each role's adapter, its runtime and its sign-in, and it fails when a Claude settings file or the Codex configuration would add an API key, token, helper or endpoint.
+   - For each line marked `MISSING` or `PROBLEM`, take one at a time: say what is missing and ask for what fixes it.
+     - Key generator: ask where `buzz-admin` is (in a Buzz checkout: `target/debug/buzz-admin`), then run `agent-team.sh settings --keygen <path>`.
+     - Launcher: ask where the accepted `run-buzz-acp.sh` is, then run `agent-team.sh settings --launcher <path>`.
+     - `buzz`, `buzz-acp`, `claude-agent-acp` or `codex-acp` not on `PATH`: the user adds the folder to `PATH` in their shell profile. If this session still does not see it, the user starts a new session from a new terminal.
+     - A sign-in or settings problem: the fix line says what the user does in their own terminal or which entry to remove; names are shown, never values.
+   - Run preflight again until it says "Preflight passed". Show the `Launcher:` line and ask the user to confirm it is the accepted launcher.
+2. **Models.** For each chosen backend and role, run `agent-team.sh models --backend <b> --role <assistant|supervisor>` and show the list. It opens one session with the adapter that role runs and makes no model turn. Ask: "Which model for the discussion partner, and which for the supervisor (or the same for both)? Enter keeps the runtime default." Offer `claude-opus-5-5` first for Claude only when the list shows it or shows Opus 5.5. Never offer `default` from a Claude list as a model: it is refused; no model at all means the runtime default. If the listing fails, show its reason and the documented list it printed instead.
+   - **Reasoning effort (optional).** Ask: "A reasoning effort for each agent, or leave that to your own settings?" Higher levels think longer on every turn and use more of the subscription allowance; the discussion partner takes a turn on every ordinary message, so say that a lower level suits it. On Claude the levels are `low`, `medium`, `high`, `xhigh` and `max`. On Codex they are the levels the model list shows for that model as `model[level]`, and a level needs a model. With none set, Claude Code uses the user's own saved level for that model, or the model's default, and Codex uses the default of the user's Codex configuration. Pass the answer to `create` or `upgrade` as `--assistant-effort <level>`, `--supervisor-effort <level>`, `--reviewer-effort <level>`, or `--effort <level>` for all; `default` clears a saved one.
+3. **Defaults.** Skip this step when preflight shows both `community` and `owner` as `ok`. Otherwise, one question per message:
+   1. Ask: "Do you have a working `.env.buzz-acp.local` from an agent you already run? I can copy your community address, your public key and the model from it; nothing secret is copied." If yes, ask for its path.
+   2. If there is no such file, ask for the community address (`wss://…`), then, in the next message, for the user's own public key (64 hex characters, not an npub).
+   3. Ask whether to remember these values for next time.
+      - Remember, from the file: run `agent-team.sh settings --from-env <file>`.
+      - Remember, typed values: run `agent-team.sh settings --community <url> --owner <hex>`.
+      - Do not remember: pass them to `create` in step 9, as `--from-env <file>` or as `--community <url> --owner <hex>`.
+   4. After `settings`, show the values it printed. If `community` or `owner` is still `(not set)`, ask for it and store it the same way.
+4. **Workspace.** Ask for the workspace folder (an absolute path).
+5. **Channel.** Ask for the channel ID, a UUID. A copied message link `buzz://message?channel=<uuid>&id=…` contains it.
+6. **Which agents.** Ask: "A project discussion partner and a supervisor, or a supervisor for a channel that already has a discussion partner?" For a supervisor only, use the existing discussion partner’s display name. An independent reviewer is a separate one-agent team: step 14.
+7. **Names.** Say the default display names ("<Workspace>", "<Workspace> Supervisor") and ask whether to keep them.
+8. **Brief.** Ask: "Anything the agents should know about this workspace? A few lines on what it is and what you want from them. You can leave it blank."
+   - **Blank:** leave `--brief` out in step 9. The agents then learn about the workspace from its files and from the user's messages.
+   - **With an answer:** add `--brief -` in step 9 and give the text on standard input, in a quoted here-document so it is taken literally:
+
+     ```
+     agent-team.sh create <the other options> --brief - <<'BRIEF'
+     <the user's text>
+     BRIEF
+     ```
+   - The brief goes at the end of each agent's prompt, marked as background and not as a task. It is kept in `brief.md` in the workspace's folder under the agents' root. At most 4000 characters; a key, a proof or a password never belongs in it.
+9. **Create.** Run:
+   `agent-team.sh create --workspace <folder> --channel <uuid> [--assistant-backend <b>] [--supervisor-backend <b>] [--assistant-model <id>] [--supervisor-model <id>] [--roles supervisor] [--assistant-name "<name>"] [--supervisor-name "<name>"] [--brief -] [--from-env <file> | --community <url> --owner <hex>]`
+   - Use `--backend <b>` instead of the two backend options when both roles use the same backend. A model the backend does not offer for that role is refused.
+   - If it says the workspace name is already used by another folder, ask for another name and run it again with `--name <name>`. For a new team, creation initializes `PROJECT.md` if the workspace lacks one. It preserves existing project records, role prompts and identities.
+   - Remember the workspace name it printed: later commands take it as `<name>`.
+10. **Proofs, one agent at a time.** `<agent>` is `assistant` or `supervisor`, as the create output lists them.
+    1. Show one agent's public key from the create output, and tell the user: in Buzz Desktop open Settings, then Security, then "Authorize external identity"; paste this public key and copy the proof it gives.
+    2. Ask the user to paste the proof here.
+    3. Run `printf '%s\n' '<proof>' | agent-team.sh proof <name> <agent> -` and show its check lines. Then do the next agent.
+    - **If it is refused with `signature: FAILED`:** ask the user to confirm they pasted exactly that agent's public key, and to copy the proof again. If the same proof is refused again, the offline check may be wrong. With the user's go-ahead, store it with `printf '%s\n' '<proof>' | agent-team.sh proof <name> <agent> - --no-signature-check`. Then tell the user that the agent's first start is the first real check: if its `agent.log` shows `BUZZ_AUTH_TAG verification failed` or a relay connection error, or the agent never comes online, they copy a new proof, and you store it with `--force`.
+    - **Any other refusal** (malformed, another owner, expired) means the user must copy a new proof. Neither option overrides it.
+11. **How the agents join the channel.** Ask which way:
+    - **`add`** (the default): the user adds them, signing through their Buzz desktop pairing. Ask whether they have paired the CLI with Buzz Desktop already. If not, they run `buzz --relay <community> auth desktop pair` in their own terminal and approve it in Buzz Desktop, then tell you it is done.
+    - **`join`**: for an open channel; each agent joins itself.
+    - **`skip`**: the user adds them in Buzz Desktop.
+
+    The agents get the channel role `bot` unless the user wants `member`. Then run `agent-team.sh finish <name> --dry-run [--channel-step add|join|skip] [--role bot|member]`, show the commands, ask the user to confirm that no other member of the channel already uses these display names, and on yes run it without `--dry-run`. If a step fails, stop and report it; `finish` is safe to run again after the fix.
+12. **Check and start, with the team's own command.** Give the user three commands for their own terminal, using the paths `create` or `upgrade` printed: `cd <workspace folder>`, then `~/.buzz-agents/<name>/team.sh check` (their terminal may differ from this session), then `~/.buzz-agents/<name>/team.sh`.
+    - The agents work in the folder the command is run from, so the `cd` matters. `--workspace <dir>` names another folder for one run.
+    - In a terminal, start asks which agents to start, then for each one its provider, its model and its reasoning effort. The model menu offers the list the provider's adapter gives at that moment, or the kept one when it cannot be reached. Enter keeps each saved choice, and a choice lasts for that run.
+    - The same without questions: `team.sh start supervisor --backend codex`, `team.sh start --assistant-model <id>`, `team.sh start --supervisor-effort high`, `team.sh start --yes` (every saved choice).
+    - One agent at a time: `~/.buzz-agents/<name>/<agent>/start.sh`, run from the project folder like the team command. It starts that agent only, asking its provider, model and effort in a terminal; `start.sh --yes` asks nothing and keeps the saved choices. A reviewer's team has its own: `~/.buzz-agents/<name>-reviewer/reviewer/start.sh`. Starting one team's agents starts no other team.
+    - Starting an agent that already runs on another provider stops with a message: stop it first with `team.sh stop <agent>`.
+    - Each agent writes `agent.log` in its folder. `team.sh status` shows each agent's saved provider and model and what runs now; `team.sh stop` stops them.
+    - The supervisor's wall can stop a tool it needs: a tool installed under the user's home folder does not run in its shell, and it sees no global Git configuration. If the user reports that, add the tool's folder to the team's `team.conf` as `wall_read=/abs/dir:/abs/dir`; `team.sh start --no-wall` starts the supervisor without the wall for one run, and the user decides that.
+    - Run `team.sh` yourself only if the user asks. Do not use `agent-team.sh start` for this: it still exists and shares the same `agent.pid` and `agent.log`, but the team's own command is the one to give the user.
+    - For a smoke test, have a channel member ask an ordinary question; a useful reply or silence is valid. Ask the owner to mention the supervisor for a catch-up.
+13. **Upgrade an existing team** (a team marked format 1, or to change a saved backend or model). Agents must be stopped. Run `agent-team.sh upgrade <name> --dry-run [--backend <b> | --assistant-backend <b> --supervisor-backend <b>] [--assistant-model <id>] [--supervisor-model <id>]` and show the plan: which files it replaces (each kept beside itself as `<file>.bak-<time>`), which settings are not carried over (names only), and that keys, proofs and `PROJECT.md` stay unchanged. On the user's yes, run the same command without `--dry-run`. A second run says "up to date". Upgrade also adds `team.sh` to a team folder that lacks it and refreshes one that differs from this skill's copy, keeping the earlier one as `team.sh.bak-<time>`; it does the same for each agent's `start.sh` and for the team folder's `acp-models.py`. Then continue with step 12.
+14. **An independent reviewer** (optional). It is a one-agent team of its own, for the same project folder and channel as an existing team or on its own.
+    - Ask for its backend and its model as in steps 1 and 2: `agent-team.sh preflight --roles reviewer --reviewer-backend <b>`, then `agent-team.sh models --backend <b> --role reviewer`. Say that a reviewer on another provider than the supervisor gives a more independent read.
+    - Run `agent-team.sh create --workspace <folder> --channel <uuid> --name <name>-reviewer --roles reviewer [--reviewer-name "<name>"] [--reviewer-backend <b>] [--reviewer-model <id>]`. The default display name is "<Folder> Reviewer".
+    - Continue with step 10 for its one proof, step 11 with `finish <name>-reviewer`, and step 12 with its own `team.sh`.
+    - If `create` says the partner of another team in this channel takes turns for the new agent, run `agent-team.sh upgrade <that team> --dry-run`, show the plan, and on the user's yes run it without `--dry-run`. It refreshes that partner's rules, so the partner takes no turn for the reviewer's ordinary messages.
+    - Say what it costs and what it cannot do: it takes a model turn only when mentioned; anyone in the channel can mention it, other agents included; it cannot edit files or run checks, so it reviews what it can read.
+
+## What stays with the user
+
+- Signing in to Claude or ChatGPT in their own terminal.
+- Authorizing each key in Buzz Desktop and pasting the proof.
+- Pairing the CLI with Buzz Desktop once, or adding the agents in Buzz Desktop.
+- Approving or editing the role prompts: `prompt.md` in each agent folder, from the templates in this skill's `templates/` folder, followed by the brief when there is one.
