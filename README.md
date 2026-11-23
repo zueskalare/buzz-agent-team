@@ -1,6 +1,6 @@
 # Buzz agent team setup
 
-One skill, for Claude Code and for Codex, that sets up a set of Buzz agents for one workspace and one channel in chat. You install it once. Then you ask your assistant for a new set of agents, and it walks you through every step: it checks what is missing, asks one question at a time, lists the models your sign-in offers, runs the steps, shows the public keys, takes the proofs you copy from Buzz Desktop, and tells you how to start the agents.
+One skill, for Claude Code and for Codex, that sets up a set of Buzz agents for one workspace and one channel in chat. You install it once. Then you ask Claude Code or Codex for a new set of agents, and the skill walks you through every step: it checks what is missing, asks one question at a time, lists the models your sign-in offers, runs the steps, shows the public keys, takes the proofs you copy from Buzz Desktop, and tells you how to start the agents.
 
 - `buzz-agent-team/`: the skill folder, complete on its own. Copying it into a tool's skills folder gives a working skill.
   - `VERSION`: the skill's version, one line (see [Versions](#versions)).
@@ -8,7 +8,7 @@ One skill, for Claude Code and for Codex, that sets up a set of Buzz agents for 
   - `scripts/agent-team.sh`: the script that does every step (Bash 3.2 or later, mode 755). `agent-team.sh help` lists every command and option.
   - `scripts/workspace-settings.py`: puts the sandbox settings of the workspace agent on Claude into its project folder, and checks them (see What holds each agent). `create` and `upgrade` also copy it into each team folder, where `team.sh` runs it before a start.
   - `scripts/acp-models.py`: lists the models an ACP adapter offers, without a model turn (used by `agent-team.sh models`; `create` and `upgrade` also copy it into each team folder, where `team.sh` runs it before a model menu).
-  - `templates/`: the role prompts. `assistant.md` holds the workspace agent's rules and `supervisor.md` the channel supervisor's (see [The two jobs](#the-two-jobs)). `project.md` seeds the shared project record and `subscriptions.toml` configures which messages reach the channel supervisor. `legacy/` holds the pre-20-November prompts; nothing uses them any more.
+  - `templates/`: the role prompts. `agent.md` holds the workspace agent's rules and `supervisor.md` the channel supervisor's (see [The two jobs](#the-two-jobs)). `project.md` seeds the shared project record and `subscriptions.toml` configures which messages reach the channel supervisor. `legacy/` holds the pre-20-November prompts; nothing uses them any more.
   - `templates/team.sh`: the team's own command. `create` and `upgrade` copy it into each team folder, where it checks, starts, stops and reports that folder's agents without this skill (see The team's own command).
   - `templates/agent-start.sh`: one agent's own start command. `create` and `upgrade` copy it into each agent folder as `start.sh` (see One agent at a time).
   - `runtime/` contains the restricted Claude and Codex runtimes and their typed Buzz tools, installed into the folder of each channel supervisor and each reviewer.
@@ -89,24 +89,29 @@ To release a version:
 - **Claude Code:** type `/buzz-agent-team`, or ask "set up a new set of Buzz agents for ~/code/shop".
 - **Codex:** type `$buzz-agent-team` (or pick it with `/skills`), or ask the same. Restart Codex if a newly installed skill does not appear.
 
-The assistant asks, in this order: the backend of each agent (the same for both, or different), then runs preflight and lists the models; the model of each agent; your community address and public key; the workspace; the channel; which agents; their names; an optional brief; each ownership proof; how the agents join the channel; and your go-ahead after the dry run. It gives you the `start` commands to run in your own terminal.
+The skill asks, in this order: the backend of each agent (the same for both, or different), then runs preflight and lists the models; the model of each agent; your community address and public key; the workspace; the channel; which agents; their names; an optional brief; each ownership proof; how the agents join the channel; and your go-ahead after the dry run. It gives you the `start` commands to run in your own terminal.
 
 ### The two jobs
 
-A team has two agents with two jobs. The commands, folders and options call them by their ids, `assistant` and `supervisor`; this README calls them by their jobs.
+A team has two agents with two jobs; this README calls them by their jobs. Options name their roles, `agent` and `supervisor` (`--agent-model`, `--supervisor-model`). Each has a folder in the team folder, and a command line names an agent by its folder:
 
-- **The workspace agent** (`assistant`, named after the project) is the project's agent in the workspace: a supervisor in subagent mode. It plans the work, dispatches bounded work to worker subagents, reviews their evidence, and keeps `PROJECT.md` and the tracker. It has every tool of its adapter. It takes a turn when you or its channel supervisor mention it. It starts workers or changes files only for a bounded run you accepted, and it checks that the accepting message is signed by you, also when the channel supervisor relays it.
+- **The workspace agent's folder is named after the team,** exactly as written: for a team called `shop`, `~/.buzz-agents/shop/shop/`, recorded in `team.conf` as `agent_folder=shop`. When the team's name is one a team folder uses for something else (`supervisor`, `reviewer`, `models`, `wall`, `team.sh`, `team.conf`, `acp-models.py`, `workspace-settings.py`, `VERSION`, `brief.md`, ignoring case, or a name starting with a dot), the folder is `agent/`, and `create` says so. `agent` also names the workspace agent on any command line: `team.sh start shop` and `team.sh start agent` are the same.
+- **The channel supervisor's folder is `supervisor/`.** A reviewer's own team has `reviewer/`.
+- **Menus, the check and `status` name an agent by its display name** (`Shop: provider?`); where a line shows the name to type, it is the folder name (`shop: Shop, the workspace agent`).
+
+
+- **The workspace agent** (named after the project) is the project's agent in the workspace: a supervisor in subagent mode. It plans the work, dispatches bounded work to worker subagents, reviews their evidence, and keeps `PROJECT.md` and the tracker. It has every tool of its adapter. It takes a turn when you or its channel supervisor mention it. It starts workers or changes files only for a bounded run you accepted, and it checks that the accepting message is signed by you, also when the channel supervisor relays it.
 - **The channel supervisor** (`supervisor`, "<Project> Supervisor") takes a turn on every ordinary message in its channel and talks with anyone there. It runs brainstorms to a decision, proposes todos, brings decisions to you, and hands work you accepted to the workspace agent by mentioning it and naming your accepting message. It reads the project folder and cannot edit files or run commands.
 - **Who starts whose turn.** The workspace agent's env file names the channel supervisor's public key (`BUZZ_ACP_RESPOND_TO=allowlist`, `BUZZ_ACP_RESPOND_TO_ALLOWLIST`); with no channel supervisor known on this machine, it says `owner-only`. The channel supervisor's rules take no turn for its own team's agents, so a mention starts a turn in one direction only, from the channel supervisor to the workspace agent. `status` and `team.sh check` say whom each agent answers.
 - **The harness adds same-owner agents.** In both modes the harness also lets through an agent whose Buzz profile carries a proof from the same owner (`is_owner_or_sibling` in `crates/buzz-acp/src/lib.rs`). So another of your agents, the reviewer included, can also start the workspace agent's turn by mentioning it.
 - **What that means.** What anyone writes in the channel can reach the agent that has every tool, through the channel supervisor. Starting work still needs your own accepting message. That is a rule in the workspace agent's prompt; the harness does not enforce it.
-- **Before 3.0.0** the jobs were the other way round: the assistant was the discussion partner and the supervisor the workspace supervisor. `upgrade` converts such a team (see [Upgrade a team](#upgrade-a-team)).
+- **Before 3.0.0** the jobs were the other way round: the agent in `assistant/` was the discussion partner and the supervisor the workspace supervisor. **Before 4.0.0** the workspace agent's folder was `assistant/` and its options were `--assistant-*`. `upgrade` converts such a team (see [Upgrade a team](#upgrade-a-team)).
 
 ### Backends, sign-in and models
 
-- **A backend per agent.** The workspace agent and the channel supervisor each run on Claude or on Codex: `create --backend B`, or `--assistant-backend B --supervisor-backend B`. The choice is saved per agent (`agent.conf` and the env file agree) and `status` shows it. `start <name> --backend B` changes it for one run, for all agents or a named one; in a terminal, `start` asks. Starting an agent that already runs on another backend stops with a message: stop it first. `upgrade` changes the saved choice.
+- **A backend per agent.** The workspace agent and the channel supervisor each run on Claude or on Codex: `create --backend B`, or `--agent-backend B --supervisor-backend B`. The choice is saved per agent (`agent.conf` and the env file agree) and `status` shows it. `start <name> --backend B` changes it for one run, for all agents or a named one; in a terminal, `start` asks. Starting an agent that already runs on another backend stops with a message: stop it first. `upgrade` changes the saved choice.
 - **Subscription sign-in only.** Each agent signs in through your own subscription: Claude through `claude auth login` (your Claude subscription, not Console) and Codex through `codex login` (Sign in with ChatGPT), both run by you in your own terminal. The env files say `BUZZ_SIGN_IN=subscription`, and the launcher then removes every API key, token, endpoint and provider variable Claude Code or Codex documents, refuses an env file that sets one, refuses a Claude settings file that adds one (or an `apiKeyHelper`) and a Codex configuration with another provider, and asks the CLI the agent will run how it is signed in: Claude must say `claude.ai`, Codex `Logged in using ChatGPT`. `preflight` does the same checks per role.
-- **A model per agent.** `create --assistant-model ID --supervisor-model ID` (or `--model ID` for both). Each agent keeps one model per backend (`model_claude=` and `model_codex=` in `agent.conf`), so a backend switch picks that backend's model and never sends a Claude model to Codex. `start --model ID` changes it for one run; `upgrade --assistant-model ID` changes the saved one. A Claude agent's model is passed to its adapter as `ANTHROPIC_MODEL`, which wins over a `model` in your Claude settings.
+- **A model per agent.** `create --agent-model ID --supervisor-model ID` (or `--model ID` for both). Each agent keeps one model per backend (`model_claude=` and `model_codex=` in `agent.conf`), so a backend switch picks that backend's model and never sends a Claude model to Codex. `start --model ID` changes it for one run; `upgrade --agent-model ID` changes the saved one. A Claude agent's model is passed to its adapter as `ANTHROPIC_MODEL`, which wins over a `model` in your Claude settings.
 - **The model list.** `agent-team.sh models --backend B --role R` opens one session with the adapter that role runs and lists the models it offers, without a model turn, in at most 30 seconds. The list is kept under `~/.buzz-agents/models/` and the model checks use it; without a list, the documented values apply (Claude Code's aliases and full model names; for Codex, the bundled catalog of the Codex CLI that role runs: the restricted runtime's private engine for the channel supervisor, or the CLI the stock `codex-acp` bundles for the workspace agent, which is older and offers fewer models). A model outside them is refused.
 - **Cost.** Every running agent uses your subscription allowance. The channel supervisor takes a model turn on every ordinary message in its channel, even when it stays silent, so a lower-cost model or a lower reasoning effort suits it.
 - **Codex needs:** `@agentclientprotocol/codex-acp@1.13.1` under your user npm prefix, and the restricted runtime's engine: `npm install --prefix "$HOME/.local/share/buzz-agent-team" --save-exact @openai/codex@0.171.0 @modelcontextprotocol/sdk@1.32.2 zod@4.6.7`.
@@ -122,9 +127,9 @@ A team has two agents with two jobs. The commands, folders and options call them
 ```sh
 agent-team.sh preflight --backend claude          # what is missing, with one fix line per item
 agent-team.sh models --backend claude             # the models your sign-in offers (no model turn)
-agent-team.sh create --workspace ~/code/shop --channel <channel uuid> --supervisor-backend codex --assistant-model claude-opus-5-5
+agent-team.sh create --workspace ~/code/shop --channel <channel uuid> --supervisor-backend codex --agent-model claude-opus-5-5
 # Buzz Desktop: Settings > Security > "Authorize external identity": paste each public key, copy the proof.
-agent-team.sh proof shop assistant                # paste the assistant's proof, then Enter
+agent-team.sh proof shop shop                     # the workspace agent, by its folder; paste its proof, then Enter
 agent-team.sh proof shop supervisor
 agent-team.sh finish shop --dry-run               # prints the community steps; runs nothing
 agent-team.sh finish shop                         # check, display names, channel membership
@@ -145,7 +150,8 @@ $T check                                          # is everything a start needs 
 $T                                                # in a terminal: which agents, then provider and model of each
 $T start supervisor --backend codex               # the same by option, for this run
 $T start --supervisor-model sonnet --yes          # --yes asks nothing: saved choices for the rest
-$T start --supervisor-effort low --assistant-effort xhigh   # a reasoning effort per agent, for this run
+$T start --supervisor-effort low --agent-effort xhigh   # a reasoning effort per agent, for this run
+$T start shop                                     # the workspace agent only, by its folder (or: agent)
 $T start --workspace ~/code/other                 # another project folder for this run
 $T status
 $T stop
@@ -158,10 +164,10 @@ Every agent folder holds `start.sh`, written by `create` and refreshed by `upgra
 
 ```sh
 cd ~/code/shop                                    # the project folder, as for the team command
-~/.buzz-agents/shop/assistant/start.sh            # the workspace agent only
+~/.buzz-agents/shop/shop/start.sh                 # the workspace agent only
 ~/.buzz-agents/shop/supervisor/start.sh           # the channel supervisor only
-~/.buzz-agents/shop/assistant/start.sh --yes      # no questions: its saved provider, model and effort
-~/.buzz-agents/shop/assistant/start.sh --model claude-opus-5-5   # this model, for this run
+~/.buzz-agents/shop/shop/start.sh --yes           # no questions: its saved provider, model and effort
+~/.buzz-agents/shop/shop/start.sh --model claude-opus-5-5   # this model, for this run
 ~/.buzz-agents/shop-reviewer/reviewer/start.sh    # a reviewer is a team of its own
 ```
 
@@ -225,7 +231,7 @@ cd ~/code/shop                                    # the project folder, as for t
   - On Claude the levels are `low`, `medium`, `high`, `xhigh` and `max`. The agent gets its level as `CLAUDE_CODE_EFFORT_LEVEL`, which Claude Code takes over your own saved level.
   - On Codex the level is part of the model name, `model[level]`, which the adapter sends as the model and its reasoning effort. The levels on offer are the ones the retrieved list has for that model, and a level needs a model.
   - With none set, Claude Code uses your own saved level for that model, or the model's default, and Codex uses the default of your Codex configuration. A level your shell exports as `CLAUDE_CODE_EFFORT_LEVEL` is then left as it is; the check says so.
-  - Saved per agent and provider in `agent.conf` (`effort_claude=`, `effort_codex=`) by `agent-team.sh create` or `upgrade` with `--effort`, `--assistant-effort`, `--supervisor-effort` or `--reviewer-effort`; `default` clears it, or sets none for one run of `team.sh`. Both starts apply it.
+  - Saved per agent and provider in `agent.conf` (`effort_claude=`, `effort_codex=`) by `agent-team.sh create` or `upgrade` with `--effort`, `--agent-effort`, `--supervisor-effort` or `--reviewer-effort`; `default` clears it, or sets none for one run of `team.sh`. Both starts apply it.
 - **Moving a team:** stop its agents, copy the whole folder privately (it holds the secret keys), install the commands above on the new machine and sign in there, then go to the project folder and run the team folder's `team.sh check`. The settings files keep the paths they were written with; `team.sh` passes the team folder's current paths and the project folder to the launcher at every start, and the launcher takes those over the file.
 - **With the skill's own commands:** `agent-team.sh start`, `stop` and `status` still exist and use the same `agent.pid` and `agent.log`, so both see the same running agents. They read the paths in the settings files, so use `team.sh` for a folder that was moved.
 
@@ -245,11 +251,11 @@ cd ~/code/shop && ~/.buzz-agents/shop-reviewer/team.sh
 
 | | Workspace agent | Channel supervisor | Reviewer |
 | --- | --- | --- | --- |
-| Folder | `<team>/assistant/` | `<team>/supervisor/` | `<team>/reviewer/` |
+| Folder | `<team>/<team>/` (or `<team>/agent/`) | `<team>/supervisor/` | `<team>/reviewer/` |
 | Takes a turn | when the owner or its channel supervisor mentions it | on every ordinary message in its channel, and when mentioned; never for its own team's agents | when anyone mentions it |
 | Tools | everything the adapter offers, worker subagents | reads the project folder, Buzz tools | reads the project folder, Buzz tools |
 | Edits, commands, web | all | none, enforced by its runtime | none, enforced by its runtime |
-| Prompt | `templates/assistant.md` | `templates/supervisor.md` | `templates/reviewer.md` |
+| Prompt | `templates/agent.md` | `templates/supervisor.md` | `templates/reviewer.md` |
 
 - The reviewer runs the same restricted runtime as the channel supervisor, copied into its own folder, on Claude or on Codex.
 - It answers anyone who mentions it, other agents included. Its prompt tells it to mention another agent only when asked, and the channel supervisor's refreshed rules take no turn for its ordinary messages; nothing else bounds an exchange of mentions between agents, so watch the first runs.
@@ -257,20 +263,21 @@ cd ~/code/shop && ~/.buzz-agents/shop-reviewer/team.sh
 
 ### Upgrade a team
 
-A team in an earlier team folder format is refused by `create` and `start`, `preflight NAME` marks it as a problem, and `team.sh` (of this version) does not start it: format 1 (made before 20 November) and format 2 (made by 1.0.0 or 2.0.0). `status` lists it and says what to do. Stop its agents, then:
+A team in an earlier team folder format is refused by `create` and `start`, `preflight NAME` marks it as a problem, and `team.sh` (of this version) does not start it: format 1 (made before 20 November), format 2 (made by 1.0.0 or 2.0.0) and format 3 (made by 3.0.0). `status` lists it and says what to do. Stop its agents, then:
 
 ```sh
 agent-team.sh upgrade shop --dry-run      # the plan: what is replaced, added, removed, not carried
-agent-team.sh upgrade shop --assistant-model claude-opus-5-5 --supervisor-model sonnet
+agent-team.sh upgrade shop --agent-model claude-opus-5-5 --supervisor-model sonnet
 agent-team.sh upgrade shop                # a second run says "up to date"
 ```
 
-- **From format 2 the two jobs swap.** The assistant becomes the workspace agent and the supervisor the channel supervisor (see [The two jobs](#the-two-jobs)). Each agent keeps its folder, `identity.key`, stored proof, display name, saved backend, saved models and saved effort, and gets the other job's files: its env file, its prompt, and `runtime/` and `subscriptions.toml` added (the supervisor) or removed (the assistant).
-- **The plan says, per agent,** the job it had, the job it has from now on, and the saved model it keeps. That model was chosen for the earlier job: the cheaper one usually sat on the agent that took a turn on every message, which now has the tools. `--assistant-model` and `--supervisor-model` (and the backend and effort options) set new ones in the same run.
+- **From format 3 the workspace agent's folder moves.** `assistant/` becomes `<team>/` (or `agent/`, as above), by one rename; then its env file's paths, `agent.conf` and `start.sh` are rewritten there, and `team.conf` gets `format=4` and `agent_folder=`. Keys, proofs, display names, backends, models, efforts, the allowlist and the rules stay as they are. The plan says which folder it becomes and what the agent's start command is from now on. An upgrade cut short after the move, or between the two renames of a folder, is finished by the next run. A team in format 2 or 1 gets the same move in the same run.
+- **From format 2 the two jobs swap as well.** The agent in `assistant/` becomes the workspace agent and the supervisor the channel supervisor (see [The two jobs](#the-two-jobs)). Each agent keeps its folder, `identity.key`, stored proof, display name, saved backend, saved models and saved effort, and gets the other job's files: its env file, its prompt, and `runtime/` and `subscriptions.toml` added (the supervisor) or removed (the workspace agent).
+- **The plan says, per agent,** the job it had, the job it has from now on, and the saved model it keeps. That model was chosen for the earlier job: the cheaper one usually sat on the agent that took a turn on every message, which now has the tools. `--agent-model` and `--supervisor-model` (and the backend and effort options) set new ones in the same run.
 - **Buzz profiles:** each agent's description in `agent.conf` follows its new job; Buzz shows the earlier one until `finish` runs again.
-- **A team with a supervisor only** (made with `--roles supervisor`, which 3.0.0 no longer makes) keeps it: it becomes a channel supervisor, and the plan says so. For a workspace agent in a channel that has a channel supervisor, make a team with `--roles assistant`.
+- **A team with a supervisor only** (made with `--roles supervisor`, which 3.0.0 no longer makes) keeps it: it becomes a channel supervisor, and the plan says so. For a workspace agent in a channel that has a channel supervisor, make a team with `--roles agent`.
 
-It writes subscription-only env files for the chosen backends (`--backend`, `--assistant-backend`, `--supervisor-backend`), the current prompts, the channel supervisor's runtime and its subscription rules, refreshes the team's own files, and sets the team folder's `VERSION` to the skill's version. `identity.key`, the stored proof and the workspace's `PROJECT.md` stay byte-identical. Every replaced or removed file is kept beside itself as `<file>.bak-<UTC time>`. It refuses while an agent runs. Each agent folder is rebuilt beside itself and swapped in; an interrupted run is finished or undone by the next one. The same command changes the saved backend or model of a current team.
+It writes subscription-only env files for the chosen backends (`--backend`, `--agent-backend`, `--supervisor-backend`), the current prompts, the channel supervisor's runtime and its subscription rules, refreshes the team's own files, and sets the team folder's `VERSION` to the skill's version. `identity.key`, the stored proof and the workspace's `PROJECT.md` stay byte-identical. Every replaced or removed file is kept beside itself as `<file>.bak-<UTC time>`. It refuses while an agent runs. Each agent folder is rebuilt beside itself and swapped in; an interrupted run is finished or undone by the next one. The same command changes the saved backend or model of a current team.
 
 ### Settings
 
@@ -278,19 +285,19 @@ It writes subscription-only env files for the chosen backends (`--backend`, `--a
 
 ### Agent folders
 
-For each agent, `create` makes a folder `~/.buzz-agents/<workspace name>/<agent id>/` (mode 700):
+For each agent, `create` makes a folder (mode 700) in `~/.buzz-agents/<workspace name>/`: the workspace agent's is named after the workspace (`agent_folder=` in `team.conf`; `agent/` when that name is taken, see [The two jobs](#the-two-jobs)), the channel supervisor's is `supervisor/`, a reviewer's `reviewer/`. Each holds:
 
 | File | Holds |
 | --- | --- |
 | `identity.key` | The agent's new secret key (mode 600). Nothing else holds it. |
 | `.env.buzz-acp.local` | Settings for `run-buzz-acp.sh` (mode 600): community, your public key, key file, proof, `BUZZ_SIGN_IN=subscription`, one model per backend, workspace, prompt file, routing (for the workspace agent: whom it answers, by public key). No secret key, API key or gateway. |
 | `prompt.md` | The core role instructions used by the harness. |
-| `agent.conf` | Public facts: role, display name, public key, backend, one model per backend. |
+| `agent.conf` | Public facts: role (`agent`, `supervisor` or `reviewer`), display name, public key, backend, one model per backend. |
 | `runtime/`, `subscriptions.toml` | The channel supervisor only: its restricted runtimes and the rules that decide which messages start a turn. A reviewer has `runtime/` too. |
 | `agent.log`, `agent.pid` | Written when the agent starts; `agent.pid` also names the backend, and with `team.sh` the model, the agent runs on. |
-| `start.sh` | That agent's own start command (mode 700), a copy of `templates/agent-start.sh`. It holds no setting and no secret. |
+| `start.sh` | That agent's own start command (mode 700), a copy of `templates/agent-start.sh`. It holds no setting and no secret, and finds its agent from the name of its folder. |
 
-Beside the agent folders, the team folder holds `team.conf` (the project folder, channel, community and owner), `team.sh` (the team's own command), `acp-models.py` (asks an adapter for its model list, for the model menu), `workspace-settings.py` (puts the workspace agent's sandbox settings into the project folder), `VERSION` (the version of the skill that created or last upgraded the folder, mode 600) and, when you gave one, `brief.md`.
+Beside the agent folders, the team folder holds `team.conf` (the project folder, channel, community, owner and the workspace agent's folder), `team.sh` (the team's own command), `acp-models.py` (asks an adapter for its model list, for the model menu), `workspace-settings.py` (puts the workspace agent's sandbox settings into the project folder), `VERSION` (the version of the skill that created or last upgraded the folder, mode 600) and, when you gave one, `brief.md`.
 
 The channel supervisor's rules take no turn for its own team's agents, and none for other local agents of its channel unless they mention it (an author filter, written from public keys). When another team joins the same channel, `create` says which earlier channel supervisor to refresh with `upgrade`.
 

@@ -2,7 +2,8 @@
 # team.sh: check, start and stop the Buzz agents of this team folder. Bash 3.2+.
 #
 # This file lives in the team folder, beside team.conf and one folder per agent:
-#   <team>/team.sh   team.conf   assistant/   supervisor/      (or, for a reviewer's own team: reviewer/)
+#   <team>/team.sh   team.conf   <team>/   supervisor/      (or, for a reviewer's own team: reviewer/)
+# The workspace agent's folder is named after the team; team.conf records it (agent_folder=).
 # It finds everything from its own location and passes those paths to the launcher at every start,
 # so the folder can be copied or moved as a whole. Nothing here names the skill that created it:
 # the buzz-agent-team skill is needed to create or upgrade a team, not to run one.
@@ -14,8 +15,9 @@
 # put the sandbox settings of the workspace agent on Claude into the project folder (workspace-settings.py
 # here).
 #
-# THE TWO JOBS of a team (their ids are assistant and supervisor; since format 3):
-#   assistant    the workspace agent: the stock adapter with all its tools and worker subagents. It
+# THE TWO JOBS of a team (their roles are agent and supervisor; since format 4):
+#   agent        the workspace agent, in the folder named after the team: the stock adapter with all
+#                its tools and worker subagents. It
 #                answers the owner and its channel supervisor, and starts work only on the owner's
 #                own acceptance.
 #   supervisor   the channel supervisor: the restricted runtime. It takes a turn on every ordinary
@@ -37,14 +39,14 @@
 #   team.sh help              every command and option
 #
 # Each agent folder also holds start.sh, which starts that one agent through this command:
-#   cd ~/code/shop && ~/.buzz-agents/shop/supervisor/start.sh
+#   cd ~/code/shop && ~/.buzz-agents/shop/shop/start.sh
 
 set -uo pipefail
 umask 077
 
 PROG=team.sh
 ENV_NAME=.env.buzz-acp.local
-ALL_ROLES='assistant supervisor reviewer'
+ALL_ROLES='agent supervisor reviewer'
 
 die() { printf '%s: %s\n' "$PROG" "$*" >&2; exit 1; }
 say() { printf '%s\n' "$*"; }
@@ -59,8 +61,9 @@ Usage: team.sh [start] [AGENT...] [options]   start agents of this team folder
        team.sh workspace DIR                  save DIR as the team's project folder in team.conf
        team.sh version                        the version of the skill that wrote this folder's files
 
-AGENT is assistant, supervisor or reviewer, whichever this team has. Without one, start asks in a
-terminal; elsewhere it means all.
+AGENT is an agent's folder name: the workspace agent's (named after the team; agent works too),
+supervisor or reviewer, whichever this team has. Without one, start asks in a terminal; elsewhere
+it means all.
 
 The project folder the agents work in, for start and check:
   --workspace DIR           this folder
@@ -74,11 +77,11 @@ start and check:
   --all                     every agent of the team, without the question
   --backend claude|codex    provider for every selected agent, for this run
   --model ID                model for every selected agent, for this run
-  --assistant-backend B, --supervisor-backend B, --reviewer-backend B
-  --assistant-model ID, --supervisor-model ID, --reviewer-model ID
+  --agent-backend B, --supervisor-backend B, --reviewer-backend B
+  --agent-model ID, --supervisor-model ID, --reviewer-model ID
                             the same for one agent; these win over --backend and --model
   --effort LEVEL            reasoning effort for every selected agent, for this run
-  --assistant-effort LEVEL, --supervisor-effort LEVEL, --reviewer-effort LEVEL
+  --agent-effort LEVEL, --supervisor-effort LEVEL, --reviewer-effort LEVEL
                             the same for one agent. On Claude: low, medium, high, xhigh or max.
                             On Codex: a level the model list offers for that model (low to
                             ultra). default sets none for this run, whatever is saved.
@@ -109,7 +112,7 @@ One agent at a time: each agent folder holds its own start command.
                                       provider, model and reasoning effort, as this command does;
                                       --yes asks nothing (start.sh --help)
 
-The jobs: the assistant is the workspace agent, with all the tools of its adapter and worker
+The jobs: the agent is the workspace agent, with all the tools of its adapter and worker
 subagents; it answers the owner and its channel supervisor. The supervisor is the channel supervisor:
 it takes a turn on every ordinary message in its channel and hands accepted work to the workspace
 agent. check and status say whom each agent answers.
@@ -196,7 +199,6 @@ trim() { local s=$1; s=${s#"${s%%[![:space:]]*}"}; s=${s%"${s##*[![:space:]]}"};
 check_backend() { case $1 in claude | codex) ;; *) die "choose claude or codex (got: $1)" ;; esac; }
 backend_command() { if [ "$1" = codex ]; then printf 'codex-acp'; else printf 'claude-agent-acp'; fi; }
 need_value() { [ "$#" -ge 2 ] && [ -n "$2" ] || die "$1 needs a value"; }
-is_role() { case " $ALL_ROLES " in *" $1 "*) return 0 ;; esac; return 1; }
 now_utc() { date -u '+%Y-%m-%dT%H:%M:%SZ'; }
 mode_of() { stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1" 2>/dev/null || printf '?'; }
 
@@ -263,19 +265,58 @@ load_team() {
     T_COMMUNITY=$(conf_get "$T_DIR/team.conf" community) || T_COMMUNITY='(not recorded)'
 }
 
-team_agents() { # agent ids present here, in role order
+lower() { printf '%s' "$1" | LC_ALL=C tr 'A-Z' 'a-z'; }
+# The folder of each agent. The supervisor's and the reviewer's are named after their role. The
+# workspace agent's is named after the team, as team.conf records it (agent_folder=), or "agent" when
+# the team's name is one a team folder uses for something else. A folder in the layout before format 4
+# (assistant/) is found too, so that this command can say it needs upgrading.
+RESERVED_NAMES='supervisor reviewer models wall team.sh team.conf acp-models.py workspace-settings.py version brief.md'
+agent_folder_for() { # TEAM_NAME
+    local n
+    n=$(lower "$1")
+    case $n in '' | .* | *.bak-* | */*) printf 'agent'; return 0 ;; esac
+    case " $RESERVED_NAMES " in *" $n "*) printf 'agent'; return 0 ;; esac
+    printf '%s' "$1"
+}
+agent_dir() { # the workspace agent's folder name, from team.conf
+    local v name
+    v=$(conf_get "$T_DIR/team.conf" agent_folder 2>/dev/null) || v=''
+    if [ -n "$v" ] && [ "$v" != agent ] && [ "$(agent_folder_for "$v")" != "$v" ]; then v=''; fi
+    if [ -z "$v" ]; then
+        name=$(conf_get "$T_DIR/team.conf" name 2>/dev/null) || name=$(basename -- "$T_DIR")
+        v=$(agent_folder_for "$name")
+    fi
+    if [ ! -d "$T_DIR/$v" ] && [ -d "$T_DIR/assistant" ]; then v=assistant; fi
+    printf '%s' "$v"
+}
+AGENT_DIR=agent   # set from team.conf before any command runs
+adir() { if [ "$1" = agent ]; then printf '%s' "$AGENT_DIR"; else printf '%s' "$1"; fi; } # ROLE: its folder, the name to type
+ahome() { printf '%s/%s' "$T_DIR" "$(adir "$1")"; } # ROLE
+# The role a name on the command line means: an agent's folder name, or agent for the workspace agent.
+role_of() { # NAME
+    case " $ALL_ROLES " in *" $1 "*) printf '%s' "$1"; return 0 ;; esac
+    if [ "$1" = "$AGENT_DIR" ]; then printf 'agent'; return 0; fi
+    return 1
+}
+handles() { local id out=''; for id in $(team_agents); do out="$out${out:+, }$(adir "$id")"; done; printf '%s' "$out"; }
+unknown_agent() { # NAME
+    if [ "$1" = assistant ]; then printf 'unknown agent: assistant. Since 4.0.0 the workspace agent is named after its folder, %s, or agent' "$AGENT_DIR"
+    else printf 'unknown agent: %s (agents here: %s; the workspace agent is also agent)' "$1" "$(handles)"; fi
+}
+team_agents() { # the roles present here, in role order
     local id
     for id in $ALL_ROLES; do
-        if [ -f "$T_DIR/$id/agent.conf" ]; then printf '%s\n' "$id"; fi
+        if [ -f "$(ahome "$id")/agent.conf" ]; then printf '%s\n' "$id"; fi
     done
 }
-afield() { conf_get "$T_DIR/$1/agent.conf" "$2" 2>/dev/null || true; } # ID KEY
-label() { local n; n=$(afield "$1" name); printf '%s (%s)' "${n:-$1}" "$1"; }
-# The record format this command starts. An earlier one is from a skill version that assigned the two
-# jobs the other way round (format 2) or from before 20 November (format 1): the skill upgrades it.
-FORMAT=3
-agent_format() { conf_get "$T_DIR/$1/agent.conf" format 2>/dev/null || printf '1'; }
-lower() { printf '%s' "$1" | LC_ALL=C tr 'A-Z' 'a-z'; }
+afield() { conf_get "$(ahome "$1")/agent.conf" "$2" 2>/dev/null || true; } # ROLE KEY
+label() { local n; n=$(afield "$1" name); printf '%s' "${n:-$(adir "$1")}"; } # ROLE: its display name
+job_words() { case $1 in agent) printf 'the workspace agent' ;; supervisor) printf 'the channel supervisor' ;; *) printf 'the independent reviewer' ;; esac; }
+# The record format this command starts. An earlier one is from an earlier version of the skill:
+# format 3 kept the workspace agent in assistant/, format 2 assigned the two jobs the other way round,
+# format 1 is from before 20 November. The skill upgrades it.
+FORMAT=4
+agent_format() { conf_get "$(ahome "$1")/agent.conf" format 2>/dev/null || printf '1'; }
 # An agent of this team folder, or of a team folder beside it, by public key; else the key itself.
 key_label() { # HEX
     local f k n
@@ -285,7 +326,7 @@ key_label() { # HEX
         [ "$(lower "$k")" = "$(lower "$1")" ] || continue
         n=$(conf_get "$f" name) || n=''
         f=${f%/agent.conf}
-        printf '%s (%s of %s)' "${n:-$1}" "${f##*/}" "$(basename -- "${f%/*}")"
+        printf '%s of %s' "${n:-$1}" "$(basename -- "${f%/*}")"
         return 0
     done
     printf 'an agent that is not beside this team folder (public key %s)' "$1"
@@ -293,7 +334,8 @@ key_label() { # HEX
 # Whom an agent answers, as its settings file says (public keys only; the harness always adds the
 # owner). Returns 1 for allowlist mode with no public key, which the harness refuses to start.
 answers() { # ID
-    local env=$T_DIR/$1/$ENV_NAME mode keys k names=''
+    local env mode keys k names=''
+    env=$(ahome "$1")/$ENV_NAME
     mode=$(env_get "$env" BUZZ_ACP_RESPOND_TO) || mode=owner-only
     case $mode in
         anyone)
@@ -313,7 +355,7 @@ saved_backend() {
     local b
     b=$(afield "$1" backend)
     if [ -z "$b" ]; then
-        b=$(env_get "$T_DIR/$1/$ENV_NAME" BUZZ_ACP_AGENT_COMMAND) || b=''
+        b=$(env_get "$(ahome "$1")/$ENV_NAME" BUZZ_ACP_AGENT_COMMAND) || b=''
         case ${b##*/} in codex-acp) b=codex ;; *) b=claude ;; esac
     fi
     printf '%s' "$b"
@@ -321,7 +363,7 @@ saved_backend() {
 saved_model() { afield "$1" "model_$2"; } # ID BACKEND
 upgrade_interrupted() {
     local p id
-    for id in $ALL_ROLES; do
+    for id in $ALL_ROLES assistant; do
         for p in "$T_DIR/.$id.upgrade."* "$T_DIR/.$id.prev."*; do
             if [ -e "$p" ]; then return 0; fi
         done
@@ -442,7 +484,7 @@ refresh_models() { # BACKEND ID: 0 when the list in place was retrieved in this 
         note "$(label "$id"): the $b model list is not retrieved now: python3 is not on PATH"
         return 1
     fi
-    if own_runtime "$id"; then cmd=$T_DIR/$id/runtime/$(backend_command "$b")
+    if own_runtime "$id"; then cmd=$(ahome "$id")/runtime/$(backend_command "$b")
     else cmd=$(command -v -- "$(backend_command "$b")" 2>/dev/null) || cmd=''; fi
     if [ -z "$cmd" ] || [ ! -x "$cmd" ]; then
         note "$(label "$id"): the $b model list is not retrieved now: $(backend_command "$b") is not here to ask"
@@ -514,17 +556,17 @@ require_model() { # BACKEND ROLE MODEL
     local list rc=0
     valid_model "$3" || die "not a model id: $3"
     if claude_default_model "$1" "$3"; then
-        die "\"default\" names no model: Claude Code would take it as a model name and refuse every turn of the $2. Keep the saved model (Enter, or no model option), or name one such as claude-opus-5-5; nothing was started"
+        die "\"default\" names no model: Claude Code would take it as a model name and refuse every turn of $(label "$2"). Keep the saved model (Enter, or no model option), or name one such as claude-opus-5-5; nothing was started"
     fi
     model_offered "$1" "$2" "$3" || rc=$?
     # The kept list may be older than the model: the provider is asked again, once, before a refusal.
     if [ "$rc" = 1 ] && refresh_models "$1" "$2"; then rc=0; model_offered "$1" "$2" "$3" || rc=$?; fi
     case $rc in
         0) ;;
-        2) note "note: no retrieved model list for $1 here; $3 is passed to the $2 as given" ;;
+        2) note "note: no retrieved model list for $1 here; $3 is passed to $(label "$2") as given" ;;
         *)
             if list=$(models_file "$1" "$2"); then
-                die "$3 is not a $1 model offered for the $2. The list retrieved $(sed -n '1s/^# retrieved //p' "$list" | cut -d' ' -f1) offers: $(grep -v '^#' "$list" | cut -f1 | tr '\n' ' ')"
+                die "$3 is not a $1 model offered for $(label "$2"). The list retrieved $(sed -n '1s/^# retrieved //p' "$list" | cut -d' ' -f1) offers: $(grep -v '^#' "$list" | cut -f1 | tr '\n' ' ')"
             fi
             die "$3 is not a Claude model: use an alias (opus, sonnet, haiku, fable) or a full name such as claude-opus-5-5" ;;
     esac
@@ -549,22 +591,22 @@ choose_agents() { # -> SELECTED, space-separated
     note '  [Enter] all'
     for id in "$@"; do
         state=''
-        if ours_alive "$T_DIR/$id"; then state="   running on ${PF_BACKEND:-an unrecorded provider}"; fi
+        if ours_alive "$(ahome "$id")"; then state="   running on ${PF_BACKEND:-an unrecorded provider}"; fi
         note "  [$n] $(label "$id")$state"
         n=$((n + 1))
     done
     ask '> '
     if [ -z "$REPLY" ]; then SELECTED=$all; return 0; fi
-    case $REPLY in *[!A-Za-z0-9,\ ]*) die 'answer with numbers or agent names; nothing was started' ;; esac
+    case $REPLY in *[!A-Za-z0-9._,\ -]*) die 'answer with numbers or agent names; nothing was started' ;; esac
     for tok in ${REPLY//,/ }; do
         case $tok in
             a | all | All | ALL) SELECTED=$all; return 0 ;;
-            *[!0-9]*) id=$tok ;;
+            *[!0-9]*) id=$(role_of "$tok") || die "$(unknown_agent "$tok"); nothing was started" ;;
             *)
                 [ "$tok" -ge 1 ] && [ "$tok" -le "$#" ] || die "choose a number from 1 to $#; nothing was started"
                 eval "id=\${$tok}" ;;
         esac
-        case " $all " in *" $id "*) ;; *) die "unknown agent: $id (agents here: $all); nothing was started" ;; esac
+        case " $all " in *" $id "*) ;; *) die "$(unknown_agent "$tok"); nothing was started" ;; esac
         case " $out " in *" $id "*) ;; *) out="$out $id" ;; esac
     done
     SELECTED=$(trim "$out")
@@ -572,9 +614,9 @@ choose_agents() { # -> SELECTED, space-separated
 
 # Options given on the command line; a per-agent option wins over the general one.
 OPT_BACKEND='' OPT_MODEL='' OPT_EFFORT=''
-OPT_EFFORT_assistant='' OPT_EFFORT_supervisor='' OPT_EFFORT_reviewer=''
-OPT_BACKEND_assistant='' OPT_BACKEND_supervisor='' OPT_BACKEND_reviewer=''
-OPT_MODEL_assistant='' OPT_MODEL_supervisor='' OPT_MODEL_reviewer=''
+OPT_EFFORT_agent='' OPT_EFFORT_supervisor='' OPT_EFFORT_reviewer=''
+OPT_BACKEND_agent='' OPT_BACKEND_supervisor='' OPT_BACKEND_reviewer=''
+OPT_MODEL_agent='' OPT_MODEL_supervisor='' OPT_MODEL_reviewer=''
 
 choose_backend() { # ID -> RUN_BACKEND_<id>, RUN_EXPLICIT_<id>
     local id=$1 saved b='' explicit=no
@@ -647,7 +689,7 @@ EOF
     if [ -n "$m" ]; then
         require_model "$b" "$id" "$m"
     elif claude_default_model "$b" "$saved"; then
-        die "the saved model of the $id is \"default\", which names no model: Claude Code would refuse every turn. Start it with a named model (--$id-model ID), and change the saved one with the skill (agent-team.sh upgrade <team> --$id-model ID); nothing was started"
+        die "the saved model of $(label "$id") is \"default\", which names no model: Claude Code would refuse every turn. Start it with a named model (--$id-model ID), and change the saved one with the skill (agent-team.sh upgrade <team> --$id-model ID); nothing was started"
     fi
     eval "RUN_MODEL_$id=\$m"
 }
@@ -710,11 +752,11 @@ choose_effort() { # ID -> RUN_EFFORT_<id>; on Codex the level also goes into RUN
     case $e in default | none) e='' ;; esac
     if [ -n "$e" ]; then
         if [ "$b" = codex ] && [ -z "$model" ]; then
-            die "on Codex the reasoning effort is part of the model name, so the $id needs a model too (--$id-model ID); nothing was started"
+            die "on Codex the reasoning effort is part of the model name, so $(label "$id") needs a model too (--$id-model ID); nothing was started"
         fi
         case " $levels " in
             *" $e "*) ;;
-            *) die "$e is not a reasoning effort offered for the $id on $b${model:+ with $(model_base "$model")} (offered: ${levels:-none}; default sets none); nothing was started" ;;
+            *) die "$e is not a reasoning effort offered for $(label "$id") on $b${model:+ with $(model_base "$model")} (offered: ${levels:-none}; default sets none); nothing was started" ;;
         esac
         if [ "$b" = codex ]; then
             newm="$(model_base "$model")[$e]"
@@ -737,7 +779,7 @@ NO_WALL=no
 WS_APPLY_ERROR=''   # why a start could not put the settings into the project folder
 own_runtime() { # ID: its settings name a runtime of its own folder
     local v
-    v=$(env_get "$T_DIR/$1/$ENV_NAME" BUZZ_ACP_AGENT_COMMAND) || v=''
+    v=$(env_get "$(ahome "$1")/$ENV_NAME" BUZZ_ACP_AGENT_COMMAND) || v=''
     case $v in */runtime/claude-agent-acp | */runtime/codex-acp) return 0 ;; esac
     return 1
 }
@@ -774,7 +816,8 @@ scrub_env() {
 # The launcher takes exported values over the settings file. The paths are exported from where this
 # folder is now, so the paths written into the settings file at creation do not have to match.
 agent_env() { # ID
-    local home=$T_DIR/$1 v b e
+    local home v b e
+    home=$(ahome "$1")
     # The chosen reasoning effort of a Claude agent. With none chosen, the variable is left as the
     # calling shell has it, as the user's own Claude Code settings are.
     eval "b=\$RUN_BACKEND_$1; e=\$RUN_EFFORT_$1"
@@ -836,7 +879,7 @@ run_checks() { # AGENT...: 0 when everything a start needs is in place
     fi
     if upgrade_interrupted; then line PROBLEM 'team folder' 'an upgrade was interrupted' 'finish it with the skill: agent-team.sh upgrade <team>'; fi
     for id in "$@"; do
-        home=$T_DIR/$id
+        home=$(ahome "$id")
         eval "b=\$RUN_BACKEND_$id; m=\$RUN_MODEL_$id; e=\$RUN_EFFORT_$id"
         shown=$m
         [ -n "$shown" ] || shown=$(saved_model "$id" "$b")
@@ -934,25 +977,26 @@ cmd_start() { # MODE(start|check) ARGS...
             --backend) need_value "$@"; check_backend "$2"; OPT_BACKEND=$2; shift ;;
             --model) need_value "$@"; OPT_MODEL=$2; shift ;;
             --workspace) need_value "$@"; OPT_WORKSPACE=$2; shift ;;
-            --assistant-backend | --supervisor-backend | --reviewer-backend)
+            --assistant-*) die "$1 is no longer an option: since 4.0.0 it is --agent-${1#--assistant-}" ;;
+            --agent-backend | --supervisor-backend | --reviewer-backend)
                 need_value "$@"; check_backend "$2"
                 id=${1#--}; id=${id%-backend}
                 eval "OPT_BACKEND_$id=\$2"; shift ;;
-            --assistant-model | --supervisor-model | --reviewer-model)
+            --agent-model | --supervisor-model | --reviewer-model)
                 need_value "$@"
                 id=${1#--}; id=${id%-model}
                 eval "OPT_MODEL_$id=\$2"; shift ;;
             --effort) need_value "$@"; OPT_EFFORT=$2; shift ;;
-            --assistant-effort | --supervisor-effort | --reviewer-effort)
+            --agent-effort | --supervisor-effort | --reviewer-effort)
                 need_value "$@"
                 id=${1#--}; id=${id%-effort}
                 eval "OPT_EFFORT_$id=\$2"; shift ;;
             -h | --help) usage; exit 0 ;;
             -*) die "$mode: unknown option: $1 (see team.sh help)" ;;
             *)
-                is_role "$1" || die "unknown agent: $1 (agents are: $ALL_ROLES)"
-                [ -f "$T_DIR/$1/agent.conf" ] || die "this team has no agent \"$1\""
-                case " $ids " in *" $1 "*) ;; *) ids="$ids $1" ;; esac ;;
+                id=$(role_of "$1") || die "$(unknown_agent "$1")"
+                [ -f "$(ahome "$id")/agent.conf" ] || die "this team has no agent \"$1\""
+                case " $ids " in *" $id "*) ;; *) ids="$ids $id" ;; esac ;;
         esac
         shift
     done
@@ -974,9 +1018,9 @@ cmd_start() { # MODE(start|check) ARGS...
     # A choice that would switch an agent that is already running stops here, before anything starts.
     for id in $SELECTED; do
         eval "b=\$RUN_BACKEND_$id; explicit=\$RUN_EXPLICIT_$id"
-        if [ "$mode" = start ] && ours_alive "$T_DIR/$id"; then
+        if [ "$mode" = start ] && ours_alive "$(ahome "$id")"; then
             if [ "$explicit" = yes ] && [ "${PF_BACKEND:-unrecorded}" != "$b" ]; then
-                die "$id is running as PID $PF_PID on ${PF_BACKEND:-an unrecorded provider}, not $b; nothing was started. Stop it first (team.sh stop $id), then start it again."
+                die "$(adir "$id") is running as PID $PF_PID on ${PF_BACKEND:-an unrecorded provider}, not $b; nothing was started. Stop it first (team.sh stop $(adir "$id")), then start it again."
             fi
         else
             todo="$todo $id"
@@ -989,13 +1033,13 @@ cmd_start() { # MODE(start|check) ARGS...
         return 0
     fi
     if [ -z "$todo" ]; then
-        for id in $SELECTED; do ours_alive "$T_DIR/$id" && say "$id: already running as PID $PF_PID on ${PF_BACKEND:-an unrecorded provider}${PF_WORKSPACE:+ in $PF_WORKSPACE}; not started again"; done
+        for id in $SELECTED; do ours_alive "$(ahome "$id")" && say "$(adir "$id"): already running as PID $PF_PID on ${PF_BACKEND:-an unrecorded provider}${PF_WORKSPACE:+ in $PF_WORKSPACE}; not started again"; done
         return 0
     fi
     # A team works in one project folder at a time: both agents consult the same project record.
     for id in $(team_agents); do
-        if ours_alive "$T_DIR/$id" && [ -n "$PF_WORKSPACE" ] && [ "$PF_WORKSPACE" != "$RUN_WORKSPACE" ]; then
-            die "$id is running in $PF_WORKSPACE, not in $RUN_WORKSPACE; nothing was started. Stop it first (team.sh stop), or start the others there (--workspace $PF_WORKSPACE)."
+        if ours_alive "$(ahome "$id")" && [ -n "$PF_WORKSPACE" ] && [ "$PF_WORKSPACE" != "$RUN_WORKSPACE" ]; then
+            die "$(adir "$id") is running in $PF_WORKSPACE, not in $RUN_WORKSPACE; nothing was started. Stop it first (team.sh stop), or start the others there (--workspace $PF_WORKSPACE)."
         fi
     done
     protocol=${CLAUDE_AGENT_ACP_PROTOCOL:-v1}
@@ -1025,8 +1069,8 @@ cmd_start() { # MODE(start|check) ARGS...
     say "Launcher: $LAUNCHER"
     say "Project folder: $RUN_WORKSPACE ($WORKSPACE_SOURCE)"
     for id in $SELECTED; do
-        home=$T_DIR/$id log=$home/agent.log
-        if ours_alive "$home"; then say "$id: already running as PID $PF_PID on ${PF_BACKEND:-an unrecorded provider}${PF_WORKSPACE:+ in $PF_WORKSPACE}; not started again"; continue; fi
+        home=$(ahome "$id") log=$home/agent.log
+        if ours_alive "$home"; then say "$(adir "$id"): already running as PID $PF_PID on ${PF_BACKEND:-an unrecorded provider}${PF_WORKSPACE:+ in $PF_WORKSPACE}; not started again"; continue; fi
         eval "b=\$RUN_BACKEND_$id; m=\$RUN_MODEL_$id; e=\$RUN_EFFORT_$id"
         if [ -f "$log" ]; then
             size=$(wc -c < "$log" | tr -d ' ')
@@ -1057,10 +1101,10 @@ cmd_start() { # MODE(start|check) ARGS...
             note "$PROG: $id exited right after starting. Last lines of $log:"
             tail -n 20 "$log" >&2 || true
             [ -z "$started" ] || note "Still running: $started"
-            die "$id did not start"
+            die "$(adir "$id") did not start"
         fi
-        say "$id: started as PID $pid on $b, model ${m:-the runtime default}${e:+, reasoning effort $e} (log $log)"
-        if [ "$w" = none ]; then say "$id: WARNING: started WITHOUT sandbox settings in its project folder; only the rule in its prompt holds it"; fi
+        say "$(adir "$id"): started as PID $pid on $b, model ${m:-the runtime default}${e:+, reasoning effort $e} (log $log)"
+        if [ "$w" = none ]; then say "$(adir "$id"): WARNING: started WITHOUT sandbox settings in its project folder; only the rule in its prompt holds it"; fi
         started="$started${started:+, }$id"
     done
     say "Stop them with: $T_DIR/team.sh stop      See them with: $T_DIR/team.sh status"
@@ -1068,11 +1112,12 @@ cmd_start() { # MODE(start|check) ARGS...
 
 # ---------------------------------------------------------------- stop and status
 stop_one() { # ID FORCE GRACE -> 0 stopped or not running, 1 still running
-    local id=$1 home=$T_DIR/$1 i
-    if ! read_pidfile "$home"; then say "$id: not started by this command; nothing to stop"; return 0; fi
-    if ! kill -0 "$PF_PID" 2>/dev/null; then say "$id: not running"; rm -f -- "$home/agent.pid"; return 0; fi
+    local id=$1 home i
+    home=$(ahome "$1")
+    if ! read_pidfile "$home"; then say "$(adir "$id"): not started by this command; nothing to stop"; return 0; fi
+    if ! kill -0 "$PF_PID" 2>/dev/null; then say "$(adir "$id"): not running"; rm -f -- "$home/agent.pid"; return 0; fi
     if [ "$(proc_start "$PF_PID")" != "$PF_START" ]; then
-        say "$id: PID $PF_PID now belongs to another process; it was not touched"
+        say "$(adir "$id"): PID $PF_PID now belongs to another process; it was not touched"
         rm -f -- "$home/agent.pid"
         return 0
     fi
@@ -1085,11 +1130,11 @@ stop_one() { # ID FORCE GRACE -> 0 stopped or not running, 1 still running
         while [ "$i" -lt 25 ] && kill -0 "$PF_PID" 2>/dev/null; do sleep 0.2; i=$((i + 1)); done
     fi
     if kill -0 "$PF_PID" 2>/dev/null; then
-        note "$id: still running as PID $PF_PID after ${3}s; run stop again, or stop --force"
+        note "$(adir "$id"): still running as PID $PF_PID after ${3}s; run stop again, or stop --force"
         return 1
     fi
     rm -f -- "$home/agent.pid"
-    say "$id: stopped (PID $PF_PID)"
+    say "$(adir "$id"): stopped (PID $PF_PID)"
 }
 
 cmd_stop() {
@@ -1101,9 +1146,9 @@ cmd_stop() {
             -h | --help) usage; exit 0 ;;
             -*) die "stop: unknown option: $1" ;;
             *)
-                is_role "$1" || die "unknown agent: $1 (agents are: $ALL_ROLES)"
-                [ -f "$T_DIR/$1/agent.conf" ] || die "this team has no agent \"$1\""
-                ids="$ids $1" ;;
+                id=$(role_of "$1") || die "$(unknown_agent "$1")"
+                [ -f "$(ahome "$id")/agent.conf" ] || die "this team has no agent \"$1\""
+                ids="$ids $id" ;;
         esac
         shift
     done
@@ -1128,7 +1173,7 @@ cmd_status() {
     say "  team files $(version_line)"
     if upgrade_interrupted; then say '  An upgrade was interrupted: finish it with the skill (agent-team.sh upgrade <team>).'; fi
     for id in $(team_agents); do
-        home=$T_DIR/$id
+        home=$(ahome "$id")
         b=$(saved_backend "$id")
         m=$(saved_model "$id" "$b")
         se=$(saved_effort "$id" "$b")
@@ -1144,7 +1189,7 @@ cmd_status() {
         else run='not running'; fi
         size=0
         if [ -f "$home/agent.log" ]; then size=$(wc -c < "$home/agent.log" | tr -d ' '); fi
-        say "  $(label "$id")"
+        say "  $(adir "$id"): $(label "$id"), $(job_words "$id")"
         if [ "$(agent_format "$id")" = "$FORMAT" ]; then
             say "    saved: $b, model ${m:-the runtime default}, reasoning effort ${se:-none set here}"
             say "    answers $(answers "$id" || true)"
@@ -1167,7 +1212,7 @@ cmd_workspace() {
     dir=$(CDPATH='' cd -P -- "$dir" && pwd) || die "cannot open $dir"
     if reason=$(unsafe_workspace "$dir"); then die "$dir cannot be the project folder: $reason. Nothing was changed."; fi
     for id in $(team_agents); do
-        if ours_alive "$T_DIR/$id"; then die "$id is running; stop it first (team.sh stop). Nothing was changed."; fi
+        if ours_alive "$(ahome "$id")"; then die "$(adir "$id") is running; stop it first (team.sh stop). Nothing was changed."; fi
     done
     if [ "$dir" = "$T_WORKSPACE" ]; then say "The project folder is already $dir; nothing was changed."; return 0; fi
     take_lock
@@ -1192,6 +1237,7 @@ cmd_version() {
 }
 
 # ---------------------------------------------------------------- main
+AGENT_DIR=$(agent_dir)
 cmd=${1:-start}
 if [ "$#" -eq 0 ]; then set -- start; fi
 case $cmd in
@@ -1202,6 +1248,9 @@ case $cmd in
     workspace) shift; cmd_workspace "$@" ;;
     version | --version) shift; cmd_version "$@" ;;
     help | -h | --help) usage ;;
-    -* | assistant | supervisor) cmd_start start "$@" ;;
-    *) die "unknown command: $cmd (see team.sh help)" ;;
+    -*) cmd_start start "$@" ;;
+    *)
+        # An agent's folder name (or agent) first: start those agents.
+        if role_of "$cmd" >/dev/null || [ "$cmd" = assistant ]; then cmd_start start "$@"; exit 0; fi
+        die "unknown command: $cmd (see team.sh help)" ;;
 esac

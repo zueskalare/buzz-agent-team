@@ -5,7 +5,8 @@
 # one folder up and does the work, so the check, the sandbox settings and the launcher are the same:
 #   <team>/<agent>/start.sh        <team>/team.sh
 # Run it from the project folder, as the team's command is:
-#   cd ~/code/shop && ~/.buzz-agents/shop/assistant/start.sh
+#   cd ~/code/shop && ~/.buzz-agents/shop/shop/start.sh
+# The agent is the one of this folder: its folder name is the name the team's command knows it by.
 # In a terminal it asks this agent's provider, model and reasoning effort; Enter keeps the saved
 # one. The model menu shows the list the provider's adapter offers at that moment. With --yes, or
 # without a terminal, it asks nothing and the agent starts on its saved choices. A choice lasts for
@@ -21,11 +22,14 @@ HERE=$(CDPATH='' cd -P -- "$(dirname -- "$0")" 2>/dev/null && pwd) || die 'canno
 AGENT=${HERE##*/}
 TEAM=${HERE%/*}/team.sh
 [ -f "$HERE/agent.conf" ] || die "$HERE has no agent.conf; start.sh must stay in its agent folder"
+# Its display name, for the messages below (agent.conf is public data: name=...).
+NAME=$(sed -n 's/^name=//p' "$HERE/agent.conf" | head -n 1)
+NAME=${NAME:-$AGENT}
 [ -x "$TEAM" ] || die "$TEAM is missing or cannot be run; start.sh needs the team's command one folder up"
 
 usage() {
     cat <<EOF
-Usage: start.sh [options]     start the $AGENT of this folder, and no other agent
+Usage: start.sh [options]     start $NAME, the agent of this folder, and no other
 
 In a terminal it asks this agent's provider, its model and its reasoning effort; Enter keeps the
 saved one. Before the model menu, the provider's adapter is asked which models it offers now.
@@ -51,7 +55,7 @@ while [ "$#" -gt 0 ]; do
             args+=("$1" "$2"); shift ;;
         --yes | -y | --no-wall | --check | --verbose | -v) args+=("$1") ;;
         help | -h | --help) usage; exit 0 ;;
-        *) die "unknown option: $1. This command starts the $AGENT only (see start.sh --help); each other agent has its own start.sh, and the team's command is $TEAM" ;;
+        *) die "unknown option: $1. This command starts $NAME only (see start.sh --help); each other agent has its own start.sh, and the team's command is $TEAM" ;;
     esac
     shift
 done

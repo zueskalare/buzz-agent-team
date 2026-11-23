@@ -76,7 +76,7 @@ if [ "$mode" = install ]; then
     [ "$(sed -n '1p' "$SRC/SKILL.md")" = '---' ] && grep -qx "name: $NAME" "$SRC/SKILL.md" ||
         die "$SRC/SKILL.md does not declare name: $NAME"
     [ -f "$SRC/scripts/agent-team.sh" ] || die "missing $SRC/scripts/agent-team.sh"
-    for t in assistant supervisor reviewer project; do
+    for t in agent supervisor reviewer project; do
         [ -f "$SRC/templates/$t.md" ] || die "missing $SRC/templates/$t.md"
     done
     [ -f "$SRC/templates/subscriptions.toml" ] || die "missing $SRC/templates/subscriptions.toml"

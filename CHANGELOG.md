@@ -2,6 +2,25 @@
 
 Versions of the buzz-agent-team skill, newest first. The version is the one line of `buzz-agent-team/VERSION`, and each one is the Git tag `v<version>` of this repository. What the three numbers mean is in the [README](README.md#versions).
 
+## 4.0.0 (2026-11-23)
+
+The workspace agent is no longer called "assistant". Its folder is named after the team, and its role is called `agent`. A team made by 3.0.0 does not start until it is upgraded (team folder format 4).
+
+What a 3.0.0 user sees change, after `agent-team.sh upgrade <team>`:
+
+- **The folder.** `~/.buzz-agents/shop/assistant/` becomes `~/.buzz-agents/shop/shop/`, named after the team as written. `team.conf` records it as `agent_folder=shop`. When the team's name is one a team folder uses for something else (`supervisor`, `reviewer`, `models`, `wall`, `team.sh`, `team.conf`, `acp-models.py`, `workspace-settings.py`, `VERSION`, `brief.md`, ignoring case, or a name starting with a dot), the folder is `agent/` instead, and `create` says so.
+- **The start command.** `~/.buzz-agents/shop/assistant/start.sh` becomes `~/.buzz-agents/shop/shop/start.sh`. The supervisor's stays `~/.buzz-agents/shop/supervisor/start.sh`.
+- **The name on a command line.** An agent is named by its folder: `team.sh start shop`, `team.sh stop supervisor`, `agent-team.sh proof shop shop`. `agent` works for the workspace agent too. `assistant` is refused, with the new name.
+- **The options.** `--assistant-backend`, `--assistant-model`, `--assistant-effort` and `--assistant-name` are now `--agent-backend`, `--agent-model`, `--agent-effort` and `--agent-name`; `--roles assistant,supervisor` and `--roles assistant` are now `--roles agent,supervisor` and `--roles agent`. The old spellings are refused with one line that names the new one. `--supervisor-*` and `--reviewer-*` are unchanged.
+- **The role word.** Menus, the check, `status` and messages name an agent by its display name, with no role word: `Shop: provider?`, `Shop Supervisor: provider?`. Where a line shows the name to type, it is the folder name: `shop: Shop, the workspace agent`. `agent.conf` says `id=agent` and `role=agent`, and the workspace agent's prompt template is `templates/agent.md`, with the same text.
+- **Kept model lists** are named `<backend>-agent.list`. A list kept by 3.0.0 as `<backend>-assistant.list` is no longer read: `agent-team.sh models --role agent` retrieves it again, and `team.sh` asks the provider before a model menu.
+- **Nothing else changed.** Who answers whom, the allowlist, the channel supervisor's rules, the prompts, what holds each agent to the project folder, and each agent's key, proof, display name, backend, models and effort stay as they were.
+
+How the upgrade does it:
+
+- One rename moves `assistant/` to its new name; then its env file (its paths), `agent.conf` and `start.sh` are rewritten there, each earlier file kept as `<file>.bak-<time>`. `team.conf` gets `format=4` and `agent_folder=` (and `external_assistant=` becomes `external_agent=`), then `VERSION` is written last.
+- The plan names the folder move and the new start command. An upgrade cut short after the move, or between the two renames of a folder, is finished by the next run. A team in format 2 or 1 goes straight to format 4.
+
 ## 3.0.0 (2026-11-22)
 
 The two agents of a team swap their jobs. The agent named after the project (id `assistant`) becomes the workspace agent, with all the tools. The agent named "<Project> Supervisor" (id `supervisor`) becomes the channel supervisor, which talks with everyone in the channel. A team made by 2.0.0 does not start until it is upgraded (team folder format 3).

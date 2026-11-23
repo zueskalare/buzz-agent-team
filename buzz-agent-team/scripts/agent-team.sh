@@ -3,7 +3,9 @@
 # Bash 3.2+ (macOS /bin/bash). Run "agent-team.sh help" for the full usage.
 #
 # For one workspace folder and one Buzz channel this makes one home folder per agent:
-#   ${AGENT_TEAM_ROOT:-~/.buzz-agents}/<workspace name>/<agent id>/
+#   ${AGENT_TEAM_ROOT:-~/.buzz-agents}/<workspace name>/<agent folder>/
+# The workspace agent's folder is named after the workspace (team.conf agent_folder=, "agent" when that
+# name is taken by something else in a team folder); the others are supervisor/ and reviewer/.
 #     identity.key         the agent's secret key (mode 600; nothing else holds it)
 #     .env.buzz-acp.local  settings for run-buzz-acp.sh (mode 600; no secret key)
 #     prompt.md            the agent's role instructions, then the workspace brief if there is one
@@ -29,7 +31,7 @@
 #   agent-team.sh settings --from-env <working env file>   # remember public defaults (optional)
 #   agent-team.sh create --workspace ~/code/shop --channel <channel uuid>
 #   (Buzz Desktop: Settings > Security > Authorize external identity, once per public key shown)
-#   agent-team.sh proof shop assistant      # paste the proof, then Enter
+#   agent-team.sh proof shop shop           # the workspace agent, by its folder (or: agent); paste the proof
 #   agent-team.sh proof shop supervisor
 #   agent-team.sh finish shop --dry-run     # shows the community steps; runs nothing
 #   agent-team.sh finish shop
@@ -44,16 +46,16 @@ umask 077
 
 PROG=agent-team.sh
 ENV_NAME=.env.buzz-acp.local
-ALL_ROLES='assistant supervisor reviewer'
-# The job of each role id. 3.0.0 swapped the jobs of the two agents of a team; their ids, folders,
-# option names and default display names stayed.
-#   assistant   the workspace agent: the stock adapter with all its tools, worker subagents and
+ALL_ROLES='agent supervisor reviewer'
+# The job of each role. 3.0.0 swapped the jobs of the two agents of a team; 4.0.0 named the workspace
+# agent's role "agent" (it was "assistant") and its folder after the team (see agent_folder_for).
+#   agent       the workspace agent: the stock adapter with all its tools, worker subagents and
 #               bypass-permissions; it answers the owner and its channel supervisor
 #   supervisor  the channel supervisor: the restricted runtime; it takes a turn on every ordinary
 #               message in its channel and talks with anyone there
 #   reviewer    the independent reviewer: the restricted runtime; it takes a turn when mentioned
 # Every place where the role decides behaviour asks one of these.
-is_workspace_role() { [ "$1" = assistant ]; }
+is_workspace_role() { [ "$1" = agent ]; }
 is_channel_role() { [ "$1" = supervisor ]; }
 # Roles that run the restricted runtime copied into the agent's own folder: file reads inside the
 # project folder and the Buzz tools; no edits, no shell, no web. The workspace agent runs the stock adapter.
@@ -63,8 +65,9 @@ uses_partner_runtime() { is_channel_role "$1" || [ "$1" = reviewer ]; }
 #   1   made before 20 November 2026
 #   2   made by 1.0.0 or 2.0.0: the assistant was the discussion partner, the supervisor the workspace
 #       supervisor
-#   3   made by 3.0.0 or later: the assistant is the workspace agent, the supervisor the channel supervisor
-FORMAT=3
+#   3   made by 3.0.0: the jobs as now, the workspace agent's role named assistant, in assistant/
+#   4   made by 4.0.0 or later: the workspace agent's role is agent, its folder named after the team
+FORMAT=4
 
 die() { printf '%s: %s\n' "$PROG" "$*" >&2; exit 1; }
 warn() { printf '%s: warning: %s\n' "$PROG" "$*" >&2; }
@@ -129,13 +132,13 @@ need_value() { [ "$#" -ge 2 ] && [ -n "$2" ] || die "$1 needs a value"; }
 # ---------------------------------------------------------------- backends and sign-in
 # Each agent runs on claude or codex (saved per agent) and signs in only through the user's
 # subscription: Claude sign-in or ChatGPT sign-in. run-buzz-acp.sh enforces it at every start.
-agent_format() { conf_get "$T_DIR/$1/agent.conf" format 2>/dev/null || printf '1'; }
+agent_format() { conf_get "$(ahome "$1")/agent.conf" format 2>/dev/null || printf '1'; }
 # The saved backend of agent ID: agent.conf's backend=, else the env file's adapter, else claude.
 agent_backend() {
     local b=''
-    b=$(conf_get "$T_DIR/$1/agent.conf" backend 2>/dev/null) || b=''
+    b=$(conf_get "$(ahome "$1")/agent.conf" backend 2>/dev/null) || b=''
     if [ -z "$b" ]; then
-        if [ -f "$T_DIR/$1/$ENV_NAME" ]; then b=$(env_get "$T_DIR/$1/$ENV_NAME" BUZZ_ACP_AGENT_COMMAND) || b=''; fi
+        if [ -f "$(ahome "$1")/$ENV_NAME" ]; then b=$(env_get "$(ahome "$1")/$ENV_NAME" BUZZ_ACP_AGENT_COMMAND) || b=''; fi
         case ${b##*/} in codex-acp) b=codex ;; *) b=claude ;; esac
     fi
     printf '%s' "$b"
@@ -200,7 +203,7 @@ sha256_text() { if command -v shasum >/dev/null 2>&1; then shasum -a 256 | cut -
 # A model is accepted when the last list retrieved with "agent-team.sh models" for that backend and
 # role offers it; without a retrieved list, when the backend documents it (Claude Code's aliases and
 # full model names, model-config; Codex: the bundled catalog of the Codex CLI that role runs).
-agent_model() { conf_get "$T_DIR/$1/agent.conf" "model_$2" 2>/dev/null || true; } # ID BACKEND
+agent_model() { conf_get "$(ahome "$1")/agent.conf" "model_$2" 2>/dev/null || true; } # ID BACKEND
 # Each agent may also keep one reasoning effort per backend (agent.conf effort_claude= / effort_codex=).
 # Empty = none set here: Claude Code then uses the user's own level for the model, Codex its own default.
 # Claude takes the level as CLAUDE_CODE_EFFORT_LEVEL; Codex takes it in the model name, model[level],
@@ -208,24 +211,24 @@ agent_model() { conf_get "$T_DIR/$1/agent.conf" "model_$2" 2>/dev/null || true; 
 CLAUDE_EFFORTS='low medium high xhigh max'
 CODEX_EFFORTS='low medium high xhigh max ultra'
 W_EFFORT_CLAUDE='' W_EFFORT_CODEX=''
-agent_effort() { conf_get "$T_DIR/$1/agent.conf" "effort_$2" 2>/dev/null || true; } # ID BACKEND
+agent_effort() { conf_get "$(ahome "$1")/agent.conf" "effort_$2" 2>/dev/null || true; } # ID BACKEND
 require_effort() { # BACKEND ROLE MODEL LEVEL: refuse a reasoning effort the backend does not offer for MODEL
     local list base levels
     [ -n "$4" ] || return 0
     if [ "$1" = claude ]; then
         case " $CLAUDE_EFFORTS " in *" $4 "*) return 0 ;; esac
-        die "$4 is not a Claude reasoning effort for the $2: choose one of $CLAUDE_EFFORTS (or default for none)"
+        die "$4 is not a Claude reasoning effort for $(job_words "$2"): choose one of $CLAUDE_EFFORTS (or default for none)"
     fi
     base=${3%\[*\]}
-    [ -n "$base" ] || die "on Codex a reasoning effort is part of the model name, so the $2 needs a model too: --$2-model ID"
+    [ -n "$base" ] || die "on Codex a reasoning effort is part of the model name, so $(job_words "$2") needs a model too: --$2-model ID"
     list=$(models_cache codex "$2")
     if [ -s "$list" ]; then
         if grep -v '^#' "$list" | cut -f1 | grep -Fxq -- "$base[$4]"; then return 0; fi
         levels=$(grep -v '^#' "$list" | cut -f1 | awk -v b="$base" 'index($0, b "[") == 1 { s = substr($0, length(b) + 2); sub(/\]$/, "", s); printf "%s ", s }')
-        die "$4 is not a reasoning effort the retrieved list offers for $base on the $2 (it offers: ${levels:-none})"
+        die "$4 is not a reasoning effort that the list retrieved for $(job_words "$2") offers for $base (it offers: ${levels:-none})"
     fi
     case " $CODEX_EFFORTS " in *" $4 "*) return 0 ;; esac
-    die "$4 is not a Codex reasoning effort for the $2: choose one of $CODEX_EFFORTS (or default for none)"
+    die "$4 is not a Codex reasoning effort for $(job_words "$2"): choose one of $CODEX_EFFORTS (or default for none)"
 }
 # "default" is left out: the launcher hands a model to Claude Code as a model name, and Claude Code
 # refuses every turn of an agent whose model is named default. No model saved = the runtime default.
@@ -259,7 +262,7 @@ codex_cli_of() { # ROLE: the Codex CLI that role's runtime runs
 }
 codex_bundled_models() { # ROLE: the slugs that role's Codex CLI lists in its bundled catalog, offline
     local cli py=${AGENT_TEAM_PYTHON:-python3}
-    cli=$(codex_cli_of "${1:-assistant}")
+    cli=$(codex_cli_of "${1:-agent}")
     [ -n "$cli" ] && [ -x "$cli" ] && [ "$py" != none ] && command -v -- "$py" >/dev/null 2>&1 || return 0
     "$cli" debug models --bundled 2>/dev/null | "$py" -I -c 'import json,sys
 t=sys.stdin.read(); i=t.find("{")
@@ -288,14 +291,14 @@ require_model() { # BACKEND ROLE MODEL: refuse a model the backend does not offe
     [ -n "$3" ] || return 0
     refuse_secret model "$3"
     if [ "$1" = claude ] && [ "$3" = default ]; then
-        die "\"default\" names no model: Claude Code would take it as a model name and refuse every turn of the $2. Leave the model out for the runtime default, or name one such as claude-opus-5-5"
+        die "\"default\" names no model: Claude Code would take it as a model name and refuse every turn of $(job_words "$2"). Leave the model out for the runtime default, or name one such as claude-opus-5-5"
     fi
     model_offered "$1" "$2" "$3" && return 0
     list=$(models_cache "$1" "$2")
     if [ -s "$list" ]; then offered="retrieved list: $(grep -v '^#' "$list" | cut -f1 | tr '\n' ' ')"
     elif [ "$1" = claude ]; then offered='documented: the Claude Code aliases and full claude-* model names'
     else offered="documented: $(codex_bundled_models "$2" | tr '\n' ' ')"; fi
-    die "$3 is not a $1 model offered for the $2 (${offered% }). List them with: $PROG models --backend $1 --role $2"
+    die "$3 is not a $1 model offered for $(job_words "$2") (${offered% }). List them with: $PROG models --backend $1 --role $2"
 }
 is_hex64() { [[ $1 =~ ^[0-9a-fA-F]{64}$ ]]; }
 is_uuid() { [[ $1 =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; }
@@ -439,10 +442,54 @@ resolve_root() { # [git]: also refuse a root inside a Git work tree
     fi
 }
 
-# Load a workspace record: T_NAME T_DIR T_WORKSPACE T_CHANNEL T_COMMUNITY T_OWNER T_EXT_ASSISTANT
-# T_EXT_SUPERVISOR. A team that has only one of the two jobs names the agent with the other job, in
-# another team of its channel: external_supervisor (a workspace agent made with --roles assistant), or
-# external_assistant (a team that had a supervisor only when it was upgraded from format 2).
+# The folder of each agent inside its team folder. The supervisor's and the reviewer's are named after
+# their role. The workspace agent's is named after the team, exactly as written, and team.conf records it
+# (agent_folder=). When the team's name would collide, ignoring case, with something else that lives in
+# a team folder, the folder is "agent". A team made before format 4 keeps it in "assistant/" until
+# upgrade moves it. Every path to an agent goes through ahome (this team) or role_dir_in (any team).
+LEGACY_AGENT_DIR=assistant
+RESERVED_NAMES='supervisor reviewer models wall team.sh team.conf acp-models.py workspace-settings.py version brief.md'
+agent_folder_for() { # TEAM_NAME: the folder its workspace agent gets
+    local n
+    n=$(lower "$1")
+    case $n in '' | .* | *.bak-*) printf 'agent'; return 0 ;; esac
+    case " $RESERVED_NAMES " in *" $n "*) printf 'agent'; return 0 ;; esac
+    printf '%s' "$1"
+}
+valid_agent_folder() { [ "$1" = agent ] || { valid_ws_name "$1" && [ "$(agent_folder_for "$1")" = "$1" ]; }; }
+agent_target_in() { # TEAM_DIR: the folder format 4 keeps the workspace agent in
+    local v name
+    v=$(conf_get "$1/team.conf" agent_folder 2>/dev/null) || v=''
+    if [ -n "$v" ] && valid_agent_folder "$v"; then printf '%s' "$v"; return 0; fi
+    name=$(conf_get "$1/team.conf" name 2>/dev/null) || name=$(basename -- "$1")
+    agent_folder_for "$name"
+}
+agent_dir_in() { # TEAM_DIR: the folder the workspace agent is in now (assistant/ before format 4)
+    local v
+    v=$(agent_target_in "$1")
+    if [ ! -d "$1/$v" ] && [ -d "$1/$LEGACY_AGENT_DIR" ]; then v=$LEGACY_AGENT_DIR; fi
+    printf '%s' "$v"
+}
+role_dir_in() { # TEAM_DIR ROLE: the folder of that role in that team
+    if is_workspace_role "$2"; then agent_dir_in "$1"; else printf '%s' "$2"; fi
+}
+# The loaded team's: T_AGENT_DIR, where its workspace agent is now; T_AGENT_TARGET, where format 4 keeps it.
+T_AGENT_DIR=agent T_AGENT_TARGET=agent
+set_agent_dirs() { T_AGENT_TARGET=$(agent_target_in "$T_DIR"); T_AGENT_DIR=$(agent_dir_in "$T_DIR"); }
+adir() { if is_workspace_role "$1"; then printf '%s' "$T_AGENT_DIR"; else printf '%s' "$1"; fi; } # ROLE: its folder name, the name to type
+ahome() { printf '%s/%s' "$T_DIR" "$(adir "$1")"; } # ROLE: its folder
+# The role a name on the command line means: a role, or the folder name of the workspace agent.
+role_of() { # NAME
+    case " $ALL_ROLES " in *" $1 "*) printf '%s' "$1"; return 0 ;; esac
+    if [ "$1" = "$T_AGENT_DIR" ] || [ "$1" = "$T_AGENT_TARGET" ]; then printf 'agent'; return 0; fi
+    return 1
+}
+
+# Load a workspace record: T_NAME T_DIR T_WORKSPACE T_CHANNEL T_COMMUNITY T_OWNER T_EXT_AGENT
+# T_EXT_SUPERVISOR T_AGENT_DIR T_AGENT_TARGET. A team that has only one of the two jobs names the agent
+# with the other job, in another team of its channel: external_supervisor (a workspace agent made with
+# --roles agent), or external_agent (a team that had a supervisor only when it was upgraded from
+# format 2; format 3 called it external_assistant).
 load_team() {
     T_NAME=$1
     valid_ws_name "$T_NAME" || die "not a workspace name: $T_NAME (see agent-team.sh status)"
@@ -453,35 +500,44 @@ load_team() {
     T_CHANNEL=$(conf_get "$T_DIR/team.conf" channel) || die "$T_DIR/team.conf has no channel"
     T_COMMUNITY=$(conf_get "$T_DIR/team.conf" community) || die "$T_DIR/team.conf has no community"
     T_OWNER=$(conf_get "$T_DIR/team.conf" owner) || die "$T_DIR/team.conf has no owner"
-    T_EXT_ASSISTANT=$(conf_get "$T_DIR/team.conf" external_assistant) || T_EXT_ASSISTANT=''
+    T_EXT_AGENT=$(conf_get "$T_DIR/team.conf" external_agent) || T_EXT_AGENT=$(conf_get "$T_DIR/team.conf" external_assistant) || T_EXT_AGENT=''
     T_EXT_SUPERVISOR=$(conf_get "$T_DIR/team.conf" external_supervisor) || T_EXT_SUPERVISOR=''
+    set_agent_dirs
 }
 team_format() { conf_get "$T_DIR/team.conf" format 2>/dev/null || printf '1'; }
-
-team_agents() { # agent ids present in T_DIR, in role order
-    local id
-    for id in $ALL_ROLES; do
-        if [ -f "$T_DIR/$id/agent.conf" ]; then printf '%s\n' "$id"; fi
-    done
+team_conf_behind() { # team.conf is not yet as format 4 writes it
+    [ "$(team_format)" != "$FORMAT" ] || [ "$(conf_get "$T_DIR/team.conf" agent_folder 2>/dev/null || true)" != "$T_AGENT_TARGET" ] ||
+        conf_get "$T_DIR/team.conf" external_assistant >/dev/null 2>&1
 }
 
-select_agents() { # IDS...: validated ids, or all present ones when none given
-    local id out=''
+team_agents() { # the roles present in T_DIR, in role order
+    local id
+    for id in $ALL_ROLES; do
+        if [ -f "$(ahome "$id")/agent.conf" ]; then printf '%s\n' "$id"; fi
+    done
+}
+team_handles() { local id out=''; for id in $(team_agents); do out="$out${out:+, }$(adir "$id")"; done; printf '%s' "$out"; }
+
+select_agents() { # NAMES...: their roles, validated, or all present ones when none given
+    local id name out=''
     if [ "$#" -eq 0 ]; then
         out=$(team_agents)
         [ -n "$out" ] || die "workspace \"$T_NAME\" has no complete agent folders"
         printf '%s\n' "$out"
         return
     fi
-    for id in "$@"; do
-        case " $ALL_ROLES " in *" $id "*) ;; *) die "unknown agent: $id (agents are: $ALL_ROLES)" ;; esac
-        [ -f "$T_DIR/$id/agent.conf" ] || die "workspace \"$T_NAME\" has no agent \"$id\""
+    for name in "$@"; do
+        if ! id=$(role_of "$name"); then
+            [ "$name" != assistant ] || die "unknown agent: assistant. Since 4.0.0 the workspace agent is named after its folder, $T_AGENT_TARGET, or agent"
+            die "unknown agent: $name (agents are: $(team_handles); the workspace agent is also agent)"
+        fi
+        [ -f "$(ahome "$id")/agent.conf" ] || die "workspace \"$T_NAME\" has no agent \"$name\""
         printf '%s\n' "$id"
     done
 }
 
-agent_field() { conf_get "$T_DIR/$1/agent.conf" "$2" || die "$T_DIR/$1/agent.conf has no $2"; }
-proof_of() { env_get "$T_DIR/$1/$ENV_NAME" BUZZ_AUTH_TAG || true; }
+agent_field() { conf_get "$(ahome "$1")/agent.conf" "$2" || die "$(ahome "$1")/agent.conf has no $2"; }
+proof_of() { env_get "$(ahome "$1")/$ENV_NAME" BUZZ_AUTH_TAG || true; }
 
 # Other workspaces under ROOT in the same channel: lines "ws<TAB>id<TAB>role<TAB>name"
 channel_peers() { # CHANNEL EXCLUDE_WS
@@ -493,22 +549,22 @@ channel_peers() { # CHANNEL EXCLUDE_WS
         ch=$(conf_get "$d/team.conf" channel) || continue
         [ "$ch" = "$1" ] || continue
         for id in $ALL_ROLES; do
-            name=$(conf_get "$d/$id/agent.conf" name 2>/dev/null) || continue
+            name=$(conf_get "$d/$(role_dir_in "$d" "$id")/agent.conf" name 2>/dev/null) || continue
             printf '%s\t%s\t%s\t%s\n' "$ws" "$id" "$id" "$name"
         done
     done
 }
 
 # The public keys the workspace agent answers besides the owner: the channel supervisor it works with.
-# That is its own team's supervisor; in a team without one (--roles assistant), the local channel
+# That is its own team's supervisor; in a team without one (--roles agent), the local channel
 # supervisor of this channel that team.conf names (external_supervisor), when it is found on this
 # machine. Comma-separated, sorted; empty when there is none (the env file then says owner-only, because
 # the harness refuses allowlist mode with an empty list). Needs T_DIR C_NAME C_CHANNEL C_EXT_SUPERVISOR.
 answer_keys() {
     local k want ws pid prole pname id
     for id in $ALL_ROLES; do
-        is_channel_role "$id" && [ -f "$T_DIR/$id/agent.conf" ] || continue
-        k=$(conf_get "$T_DIR/$id/agent.conf" pubkey) || k=''
+        is_channel_role "$id" && [ -f "$(ahome "$id")/agent.conf" ] || continue
+        k=$(conf_get "$(ahome "$id")/agent.conf" pubkey) || k=''
         if is_hex64 "$k"; then lower "$k"; fi
         return 0
     done
@@ -516,18 +572,19 @@ answer_keys() {
     want=$(lower "$C_EXT_SUPERVISOR")
     channel_peers "$C_CHANNEL" "$C_NAME" | while IFS="$(printf '\t')" read -r ws pid prole pname; do
         is_channel_role "$prole" && [ "$(lower "$pname")" = "$want" ] || continue
-        k=$(conf_get "$ROOT/$ws/$pid/agent.conf" pubkey) || continue
+        k=$(conf_get "$ROOT/$ws/$(role_dir_in "$ROOT/$ws" "$pid")/agent.conf" pubkey) || continue
         if is_hex64 "$k"; then lower "$k"; printf '\n'; fi
     done | LC_ALL=C sort -u | paste -s -d , -
 }
-# The local agent with public key HEX, as "Name (supervisor of workspace shop)"; else the key itself.
+# The local agent with public key HEX, as "Name of workspace shop"; else the key itself.
 key_name() { # HEX
-    local d id k
+    local d id k f
     for d in "$ROOT"/*/; do
         for id in $ALL_ROLES; do
-            k=$(conf_get "$d/$id/agent.conf" pubkey 2>/dev/null) || continue
+            f=$d/$(role_dir_in "$d" "$id")/agent.conf
+            k=$(conf_get "$f" pubkey 2>/dev/null) || continue
             [ "$(lower "$k")" = "$(lower "$1")" ] || continue
-            printf '%s (%s of workspace %s)' "$(conf_get "$d/$id/agent.conf" name || true)" "$id" "$(basename -- "$d")"
+            printf '%s of workspace %s' "$(conf_get "$f" name || true)" "$(basename -- "$d")"
             return 0
         done
     done
@@ -535,7 +592,8 @@ key_name() { # HEX
 }
 # Whom an agent answers, as its env file says (public keys only; the harness always adds the owner).
 answers_text() { # ID
-    local env=$T_DIR/$1/$ENV_NAME mode keys k names=''
+    local env mode keys k names=''
+    env=$(ahome "$1")/$ENV_NAME
     mode=$(env_get "$env" BUZZ_ACP_RESPOND_TO 2>/dev/null) || mode=owner-only
     case $mode in
         anyone)
@@ -559,7 +617,7 @@ set_role_names() { # PEERS
     local extra
     P_SUPERVISOR=${NAME_supervisor:-$C_EXT_SUPERVISOR}
     [ -n "$P_SUPERVISOR" ] || P_SUPERVISOR='none yet'
-    P_WORKSPACE_AGENTS=${NAME_assistant:-$C_EXT_ASSISTANT}
+    P_WORKSPACE_AGENTS=${NAME_agent:-$C_EXT_AGENT}
     extra=$(printf '%s\n' "$1" | while IFS="$(printf '\t')" read -r ws pid prole pname; do
         [ -n "$ws" ] && is_workspace_role "$prole" || continue
         [ "$(lower "$pname")" != "$(lower "$P_WORKSPACE_AGENTS")" ] || continue
@@ -738,7 +796,7 @@ channel_agent_keys() { # CHANNEL OWN_KEY: public keys of every local agent in CH
         [ -f "$d/team.conf" ] || continue
         [ "$(conf_get "$d/team.conf" channel || true)" = "$1" ] || continue
         for id in $ALL_ROLES; do
-            k=$(conf_get "$d/$id/agent.conf" pubkey 2>/dev/null) || continue
+            k=$(conf_get "$d/$(role_dir_in "$d" "$id")/agent.conf" pubkey 2>/dev/null) || continue
             k=$(lower "$k")
             if [ "$k" != "$2" ]; then printf '%s\n' "$k"; fi
         done
@@ -747,7 +805,7 @@ channel_agent_keys() { # CHANNEL OWN_KEY: public keys of every local agent in CH
 team_agent_keys() { # OWN_KEY: public keys of this team's other agents, sorted
     local id k
     for id in $ALL_ROLES; do
-        k=$(conf_get "$T_DIR/$id/agent.conf" pubkey 2>/dev/null) || continue
+        k=$(conf_get "$(ahome "$id")/agent.conf" pubkey 2>/dev/null) || continue
         k=$(lower "$k")
         if [ "$k" != "$1" ]; then printf '%s\n' "$k"; fi
     done | LC_ALL=C sort -u
@@ -798,10 +856,10 @@ write_agent_conf() { # OUT ID NAME PUBKEY ABOUT BACKEND MODEL_CLAUDE MODEL_CODEX
 write_team_conf() { # OUT
     {
         printf '# agent-team.sh workspace record: public facts only.\n'
-        printf 'format=%s\nname=%s\nworkspace=%s\nchannel=%s\ncommunity=%s\nowner=%s\n' \
-            "$FORMAT" "$C_NAME" "$C_WS_PATH" "$C_CHANNEL" "$C_COMMUNITY" "$C_OWNER"
+        printf 'format=%s\nname=%s\nworkspace=%s\nchannel=%s\ncommunity=%s\nowner=%s\nagent_folder=%s\n' \
+            "$FORMAT" "$C_NAME" "$C_WS_PATH" "$C_CHANNEL" "$C_COMMUNITY" "$C_OWNER" "$T_AGENT_TARGET"
         if [ -n "$C_EXT_SUPERVISOR" ]; then printf 'external_supervisor=%s\n' "$C_EXT_SUPERVISOR"; fi
-        if [ -n "$C_EXT_ASSISTANT" ]; then printf 'external_assistant=%s\n' "$C_EXT_ASSISTANT"; fi
+        if [ -n "$C_EXT_AGENT" ]; then printf 'external_agent=%s\n' "$C_EXT_AGENT"; fi
         printf 'created=%s\n' "$(now_utc)"
     } > "$1"
 }
@@ -832,7 +890,7 @@ team_files() { # every such file of this team: TEAM_FILES, one start.sh per agen
     local id
     # shellcheck disable=SC2086
     printf '%s\n' $TEAM_FILES
-    for id in $(team_agents); do printf '%s/start.sh\n' "$id"; done
+    for id in $(team_agents); do printf '%s/start.sh\n' "$(adir "$id")"; done
     printf 'VERSION\n'
 }
 team_file_source() { # REL
@@ -1094,8 +1152,8 @@ usage() {
     cat <<'EOF'
 Usage: agent-team.sh <command> [options]
 
-  preflight [NAME] [--backend claude|codex] [--assistant-backend B] [--supervisor-backend B]
-            [--roles assistant,supervisor|assistant] [--partner]
+  preflight [NAME] [--backend claude|codex] [--agent-backend B] [--supervisor-backend B]
+            [--roles agent,supervisor|agent] [--partner]
             [--roles reviewer] [--reviewer-backend B]
            Check everything a setup needs: the agents' root, the settings file, the
            key generator, the launcher (its path is printed), buzz, buzz-acp, and for
@@ -1117,24 +1175,29 @@ Usage: agent-team.sh <command> [options]
            owner, model, base_url (base_url is no longer used; --unset removes it).
   create   Make the agents for one workspace and one channel: a new key, an env file
            and a prompt per agent. Safe to repeat: existing files are kept. The two
-           agents of a team have two jobs (their ids are assistant and supervisor):
-             assistant   the workspace agent: the stock adapter with all its tools and
+           agents of a team have two jobs (their roles are agent and supervisor):
+             agent       the workspace agent: the stock adapter with all its tools and
                          worker subagents; it answers the owner and the channel
                          supervisor, and starts work only on the owner's acceptance
              supervisor  the channel supervisor: the restricted runtime; it takes a turn
                          on every ordinary message in its channel, talks with anyone
                          there, and hands accepted work to the workspace agent
+           Each agent has a folder in <root>/NAME/. The workspace agent's is named after
+           the workspace, NAME itself (team.conf: agent_folder=), or agent when NAME is
+           one a team folder uses for something else (supervisor, reviewer, models, ...);
+           the others are supervisor/ and reviewer/. On a command line an agent is named
+           by its folder, and the workspace agent also by agent.
            For a workspace agent on Claude it first puts the sandbox settings into the
            project folder, as .claude/settings.json (workspace-settings.py in this skill
            says which, and what they hold); an existing file keeps everything else it holds.
              --workspace DIR      the project folder the agents work in (required)
              --channel UUID       the Buzz channel (required)
              --backend NAME       claude (default) or codex, for both new agents
-             --assistant-backend NAME, --supervisor-backend NAME
+             --agent-backend NAME, --supervisor-backend NAME
                                   the backend of one role; wins over --backend
              --name NAME          the workspace name under the root (default: the
                                   folder name); needed when two folders share a name
-             --roles LIST         assistant,supervisor (default); assistant: a workspace
+             --roles LIST         agent,supervisor (default); agent: a workspace
                                   agent for a channel that already has a channel
                                   supervisor in another team; or reviewer: one
                                   independent reviewer, as a team of its own (give it
@@ -1145,16 +1208,16 @@ Usage: agent-team.sh <command> [options]
              --reviewer-backend NAME, --reviewer-model ID
                                   the reviewer's backend and model, as for the other roles
              --effort LEVEL       reasoning effort for the new agents (optional)
-             --assistant-effort LEVEL, --supervisor-effort LEVEL, --reviewer-effort LEVEL
+             --agent-effort LEVEL, --supervisor-effort LEVEL, --reviewer-effort LEVEL
                                   the effort of one role; wins over --effort. Claude: low,
                                   medium, high, xhigh or max. Codex: a level the model
                                   list offers for that model (low to ultra), which needs a
                                   model too. Kept one per backend, like the model. Without
                                   one, Claude Code uses your own level for the model and
                                   Codex its own default. default clears a saved one.
-             --assistant-name N   the workspace agent's display name (default "<Name>")
+             --agent-name N       the workspace agent's display name (default "<Name>")
              --supervisor-name N  the channel supervisor's display name (default
-                                  "<Name> Supervisor"); with --roles assistant: the
+                                  "<Name> Supervisor"); with --roles agent: the
                                   display name of the channel's existing channel
                                   supervisor, which the workspace agent answers
              --brief TEXT         a few lines about the workspace, added to the end of
@@ -1164,7 +1227,7 @@ Usage: agent-team.sh <command> [options]
              --owner HEX          your own public key, 64 hex characters (not npub)
              --model ID           model for the new agents (default: the runtime
                                   default; a saved model applies to Claude agents only)
-             --assistant-model ID, --supervisor-model ID
+             --agent-model ID, --supervisor-model ID
                                   the model of one role; wins over --model. A model
                                   must be one its backend offers for that role: the
                                   list from "models" when retrieved, else the
@@ -1173,20 +1236,24 @@ Usage: agent-team.sh <command> [options]
              --from-env FILE      copy the three values above from a working env file;
                                   options win; no key, API key or gateway is copied
            Without these options, create uses the defaults in settings.conf. Agents sign
-           in by subscription only: there is no gateway option. A team in an earlier
-           team folder format (1, or 2 from 1.0.0 and 2.0.0) is refused: run upgrade first.
-  upgrade  NAME [--dry-run] [--backend B] [--assistant-backend B] [--supervisor-backend B]
-           [--model ID] [--assistant-model ID] [--supervisor-model ID]
+           in by subscription only: there is no gateway option. The options spelled
+           --assistant-* before 4.0.0, and --roles assistant, are refused with the new
+           spelling. A team in an earlier team folder format (1; 2 from 1.0.0 and 2.0.0;
+           3 from 3.0.0) is refused: run upgrade first.
+  upgrade  NAME [--dry-run] [--backend B] [--agent-backend B] [--supervisor-backend B]
+           [--model ID] [--agent-model ID] [--supervisor-model ID]
            [--reviewer-backend B] [--reviewer-model ID]
-           [--effort LEVEL] [--assistant-effort LEVEL] [--supervisor-effort LEVEL]
+           [--effort LEVEL] [--agent-effort LEVEL] [--supervisor-effort LEVEL]
            [--reviewer-effort LEVEL]   (the saved reasoning effort; default clears it)
-           Bring a team to the current format (3) and to the chosen backends: subscription
+           Bring a team to the current format (4) and to the chosen backends: subscription
            sign-in env files, the current prompts, the channel supervisor's runtime and
-           its subscription rules. In a format-2 team the assistant and the supervisor
-           swap their jobs: each keeps its folder, key, proof, display name, backend,
-           models and effort, and gets the other job's files; the plan says which job
-           each one has from now on and which saved model it keeps (the model options
-           below pick new ones in the same run). identity.key, the stored proof and the workspace's
+           its subscription rules. From format 3 the workspace agent's folder moves from
+           assistant/ to its own name (one rename, before its files are rewritten there),
+           and team.conf records it; the plan names the folder and the new start command.
+           In a format-2 team the two agents also swap their jobs: each keeps its key,
+           proof, display name, backend, models and effort, and gets the other job's
+           files; the plan says which job each one has from now on and which saved model
+           it keeps (the model options pick new ones in the same run). identity.key, the stored proof and the workspace's
            PROJECT.md stay byte-identical. Every replaced or removed file is kept beside
            itself as <file>.bak-<UTC time>. Refuses while an agent runs. Safe to repeat:
            a second run changes nothing. Each agent keeps its saved model per backend;
@@ -1198,15 +1265,17 @@ Usage: agent-team.sh <command> [options]
            workspace agent on Claude are put into the project folder
            (.claude/settings.json; an existing file keeps everything else it holds).
            VERSION in the team folder is set to this skill's version, last.
-  models   [NAME] [--backend claude|codex] [--role assistant|supervisor]
-           (--role reviewer for a reviewer; without --role: assistant)
+  models   [NAME] [--backend claude|codex] [--role agent|supervisor]
+           (--role reviewer for a reviewer; without --role: agent)
            List the models your own sign-in offers for that backend and role, without
            a model turn: one ACP session with the runtime the role runs, in the agents'
            subscription-only environment, at most 30 s, no retry. The list is kept in
            <root>/models/ and used by the model checks. When it cannot be retrieved,
            the reason and the documented list are shown and the exit status is 1.
   proof    NAME AGENT [PROOF | -] [--force] [--no-signature-check]
-           Store the ownership proof from Buzz Desktop for one agent. Reads standard
+           Store the ownership proof from Buzz Desktop for one agent: AGENT is its
+           folder name (the workspace agent's is NAME, or agent), supervisor or
+           reviewer, here and for finish, start and stop. Reads standard
            input when PROOF is - or missing. Checks the format, the owner, the time
            limits and (with python3) the signature against the agent's key.
              --force               replace a different proof already stored for
@@ -1292,48 +1361,54 @@ default_about() { # ID
     elif is_channel_role "$1"; then printf 'Channel supervisor for %s: project discussions, shared knowledge and proposed todos.' "$C_NAME"
     else printf 'Independent reviewer for %s.' "$(derive_ws_name "$C_WS_PATH")"; fi
 }
+# 4.0.0 renamed the workspace agent's role from assistant to agent: the old spellings are refused.
+renamed_option() { printf '%s' "$1 is no longer an option: since 4.0.0 it is --agent-${1#--assistant-}"; } # OPTION
+renamed_roles() { printf '%s' "--roles $1: since 4.0.0 the workspace agent's role is agent: use --roles agent,supervisor, or --roles agent for a workspace agent alone"; } # VALUE
 format_words() { # FORMAT: how an earlier team folder format is named to the user
     case $1 in
         1) printf 'format 1, made before 20 November' ;;
         2) printf 'format 2, made by version 1.0.0 or 2.0.0 of this skill' ;;
+        3) printf 'format 3, made by version 3.0.0 of this skill' ;;
         *) printf 'format %s' "$1" ;;
     esac
 }
 old_format_message() { # NAME FORMAT
     local swap=''
-    [ "$2" != 2 ] || swap=' In format 3 the assistant and the supervisor swap their jobs; the dry run says what each one does from now on.'
+    case $2 in 1 | 2) swap=' Since format 3 the two agents of a team have the other jobs; the dry run says what each one does from now on.' ;; esac
+    swap="$swap Since format 4 the workspace agent's folder is named after the team: assistant/ becomes $(agent_folder_for "$1")/."
     printf '%s' "workspace \"$1\" is in an earlier team folder format ($(format_words "$2")). Bring it to the current format ($FORMAT) first: $PROG upgrade $1 --dry-run, then $PROG upgrade $1. It keeps keys, proofs and PROJECT.md.$swap"
 }
 
 cmd_create() {
-    local ws_arg='' roles_arg='assistant,supervisor' a_opt='' s_opt='' r_opt='' from_env=''
+    local ws_arg='' roles_arg='agent,supervisor' a_opt='' s_opt='' r_opt='' from_env=''
     local opt_comm='' opt_owner='' opt_model='' model_set=no name_opt='' b_all='' b_a='' b_s='' b_r=''
     local v role id home tmp_home f top roles existing name lc n peers ws pid prole pname
     local brief_arg='' brief_set=no brief_changed=no cr saved b m created_now='' key stamp m_a='' m_s='' m_r='' mc mx e e_all='' e_a='' e_s='' e_r=''
-    C_CHANNEL='' REQ_assistant='' REQ_supervisor='' REQ_reviewer=''
-    EFFORT_assistant='' EFFORT_supervisor='' EFFORT_reviewer=''
+    C_CHANNEL='' REQ_agent='' REQ_supervisor='' REQ_reviewer=''
+    EFFORT_agent='' EFFORT_supervisor='' EFFORT_reviewer=''
     while [ "$#" -gt 0 ]; do
         case $1 in
             --backend) need_value "$@"; check_backend "$2"; b_all=$2; shift ;;
-            --assistant-backend) need_value "$@"; check_backend "$2"; b_a=$2; shift ;;
+            --agent-backend) need_value "$@"; check_backend "$2"; b_a=$2; shift ;;
             --supervisor-backend) need_value "$@"; check_backend "$2"; b_s=$2; shift ;;
             --reviewer-backend) need_value "$@"; check_backend "$2"; b_r=$2; shift ;;
+            --assistant-*) die "create: $(renamed_option "$1")" ;;
             --brief) need_value "$@"; brief_arg=$2; brief_set=yes; shift ;;
             --workspace) need_value "$@"; ws_arg=$2; shift ;;
             --channel) need_value "$@"; C_CHANNEL=$2; shift ;;
             --name) need_value "$@"; name_opt=$2; shift ;;
             --roles) need_value "$@"; roles_arg=$2; shift ;;
-            --assistant-name) need_value "$@"; a_opt=$2; shift ;;
+            --agent-name) need_value "$@"; a_opt=$2; shift ;;
             --supervisor-name) need_value "$@"; s_opt=$2; shift ;;
             --reviewer-name) need_value "$@"; r_opt=$2; shift ;;
             --community | --relay) need_value "$@"; opt_comm=$2; shift ;;
             --owner) need_value "$@"; opt_owner=$2; shift ;;
             --model) [ "$#" -ge 2 ] || die '--model needs a value'; opt_model=$2; model_set=yes; shift ;;
-            --assistant-model) need_value "$@"; m_a=$2; shift ;;
+            --agent-model) need_value "$@"; m_a=$2; shift ;;
             --supervisor-model) need_value "$@"; m_s=$2; shift ;;
             --reviewer-model) need_value "$@"; m_r=$2; shift ;;
             --effort) need_value "$@"; e_all=$2; shift ;;
-            --assistant-effort) need_value "$@"; e_a=$2; shift ;;
+            --agent-effort) need_value "$@"; e_a=$2; shift ;;
             --supervisor-effort) need_value "$@"; e_s=$2; shift ;;
             --reviewer-effort) need_value "$@"; e_r=$2; shift ;;
             --base-url) die 'create: agents sign in through your subscription only; a gateway address (--base-url) is not used' ;;
@@ -1343,7 +1418,7 @@ cmd_create() {
         esac
         shift
     done
-    REQ_assistant=${b_a:-$b_all} REQ_supervisor=${b_s:-$b_all} REQ_reviewer=${b_r:-$b_all}
+    REQ_agent=${b_a:-$b_all} REQ_supervisor=${b_s:-$b_all} REQ_reviewer=${b_r:-$b_all}
     need_skill_version
 
     [ -n "$ws_arg" ] || die 'create: --workspace DIR is required'
@@ -1357,11 +1432,12 @@ cmd_create() {
     valid_ws_name "$C_NAME" || die "create: workspace name \"$C_NAME\" must be 1-64 of A-Z a-z 0-9 . _ - (start with a letter or digit); choose one with --name"
     # The supervisor is made first, so that the workspace agent's env file can name its public key.
     case $roles_arg in
-        assistant,supervisor | supervisor,assistant) roles='supervisor assistant' ;;
-        assistant) roles=assistant ;;
+        agent,supervisor | supervisor,agent) roles='supervisor agent' ;;
+        agent) roles=agent ;;
         reviewer) roles=reviewer ;;
-        supervisor) die 'create: a team with a supervisor only is no longer made: since 3.0.0 the supervisor is the channel supervisor. For a workspace agent in a channel that already has a channel supervisor: --roles assistant' ;;
-        *) die "create: --roles must be assistant,supervisor, assistant or reviewer (got: $roles_arg)" ;;
+        supervisor) die 'create: a team with a supervisor only is no longer made: since 3.0.0 the supervisor is the channel supervisor. For a workspace agent in a channel that already has a channel supervisor: --roles agent' ;;
+        *assistant*) die "create: $(renamed_roles "$roles_arg")" ;;
+        *) die "create: --roles must be agent,supervisor, agent or reviewer (got: $roles_arg)" ;;
     esac
 
     resolve_root git
@@ -1420,17 +1496,18 @@ cmd_create() {
 
     # Models are checked before anything is written, so a refused one leaves nothing behind.
     T_DIR=$ROOT/$C_NAME T_NAME=$C_NAME
+    set_agent_dirs
     # Each new agent's model: its own option, else --model, else a saved Claude default for Claude
     # agents. It must be one its backend offers for that role.
     for id in $roles; do
-        [ ! -f "$T_DIR/$id/agent.conf" ] || continue
+        [ ! -f "$(ahome "$id")/agent.conf" ] || continue
         eval "b=\${REQ_$id:-claude}"
-        case $id in assistant) m=$m_a ;; reviewer) m=$m_r ;; *) m=$m_s ;; esac
+        case $id in agent) m=$m_a ;; reviewer) m=$m_r ;; *) m=$m_s ;; esac
         if [ -z "$m" ] && [ "$model_set" = yes ]; then m=$opt_model; fi
         if [ -z "$m" ] && [ "$model_set" = no ] && [ "$b" = claude ]; then m=$C_MODEL; fi
         require_model "$b" "$id" "$m"
         eval "MODEL_$id=\$m"
-        case $id in assistant) e=$e_a ;; reviewer) e=$e_r ;; *) e=$e_s ;; esac
+        case $id in agent) e=$e_a ;; reviewer) e=$e_r ;; *) e=$e_s ;; esac
         [ -n "$e" ] || e=$e_all
         case $e in default | none) e='' ;; esac
         require_effort "$b" "$id" "$m" "$e"
@@ -1449,7 +1526,7 @@ cmd_create() {
     if upgrade_interrupted; then die "an upgrade of workspace \"$C_NAME\" was interrupted; finish it first with: $PROG upgrade $C_NAME"; fi
 
     # The workspace record: one name, one folder, one channel, one community, one owner.
-    C_EXT_ASSISTANT='' C_EXT_SUPERVISOR=''
+    C_EXT_AGENT='' C_EXT_SUPERVISOR=''
     if [ -f "$T_DIR/team.conf" ]; then
         load_team "$C_NAME"
         if [ "$T_WORKSPACE" != "$C_WS_PATH" ]; then
@@ -1462,36 +1539,36 @@ cmd_create() {
         # T-7 prompts). Format 2 holds the other assignment of the two jobs.
         v=$(team_format)
         [ "$v" = "$FORMAT" ] || die "$(old_format_message "$C_NAME" "$v")"
-        C_EXT_ASSISTANT=$T_EXT_ASSISTANT C_EXT_SUPERVISOR=$T_EXT_SUPERVISOR
+        C_EXT_AGENT=$T_EXT_AGENT C_EXT_SUPERVISOR=$T_EXT_SUPERVISOR
         say "Workspace \"$C_NAME\" exists: $T_DIR (kept)"
     fi
     for id in $ALL_ROLES; do
-        [ -f "$T_DIR/$id/agent.conf" ] || continue
+        [ -f "$(ahome "$id")/agent.conf" ] || continue
         v=$(agent_format "$id")
         [ "$v" = "$FORMAT" ] || die "$(old_format_message "$C_NAME" "$v")"
         eval "b=\$REQ_$id"
         saved=$(agent_backend "$id")
         if [ -n "$b" ] && [ "$b" != "$saved" ]; then
-            die "the $id already runs on $saved; create keeps existing agents. To change its saved backend: $PROG upgrade $C_NAME --$id-backend $b"
+            die "$(agent_field "$id" name) already runs on $saved; create keeps existing agents. To change its saved backend: $PROG upgrade $C_NAME --$id-backend $b"
         fi
     done
     # Display names: existing agents keep theirs; new ones come from options or defaults.
-    NAME_assistant='' NAME_supervisor='' NAME_reviewer=''
+    NAME_agent='' NAME_supervisor='' NAME_reviewer=''
     for id in $ALL_ROLES; do
-        if [ -f "$T_DIR/$id/agent.conf" ]; then
-            name=$(conf_get "$T_DIR/$id/agent.conf" name) || die "$T_DIR/$id/agent.conf has no name"
+        if [ -f "$(ahome "$id")/agent.conf" ]; then
+            name=$(conf_get "$(ahome "$id")/agent.conf" name) || die "$(ahome "$id")/agent.conf has no name"
             eval "NAME_$id=\$name"
         fi
     done
-    if [ -z "$NAME_assistant" ]; then
-        case " $roles " in *' assistant '*) NAME_assistant=${a_opt:-$(default_name "$C_NAME" "")} ;; esac
-    elif [ -n "$a_opt" ] && [ "$a_opt" != "$NAME_assistant" ]; then
-        warn "the assistant already exists as \"$NAME_assistant\"; --assistant-name was ignored"
+    if [ -z "$NAME_agent" ]; then
+        case " $roles " in *' agent '*) NAME_agent=${a_opt:-$(default_name "$C_NAME" "")} ;; esac
+    elif [ -n "$a_opt" ] && [ "$a_opt" != "$NAME_agent" ]; then
+        warn "the workspace agent already exists as \"$NAME_agent\"; --agent-name was ignored"
     fi
     if [ -z "$NAME_supervisor" ]; then
         case " $roles " in
             *' supervisor '*) NAME_supervisor=${s_opt:-$(default_name "$C_NAME" Supervisor)} ;;
-            *' assistant '*)
+            *' agent '*)
                 # A workspace agent for a channel whose channel supervisor is in another team.
                 if [ -n "$C_EXT_SUPERVISOR" ]; then :
                 elif [ -n "$s_opt" ]; then C_EXT_SUPERVISOR=$s_opt
@@ -1504,7 +1581,7 @@ cmd_create() {
                         done
                         printf '%s' "$v"
                     })
-                    [ -n "$C_EXT_SUPERVISOR" ] || die 'create: with --roles assistant, name the channel'"'"'s existing channel supervisor: --supervisor-name "<its display name>"'
+                    [ -n "$C_EXT_SUPERVISOR" ] || die 'create: with --roles agent, name the channel'"'"'s existing channel supervisor: --supervisor-name "<its display name>"'
                     say "Using the channel supervisor \"$C_EXT_SUPERVISOR\" found in another workspace of this channel."
                 fi ;;
         esac
@@ -1520,8 +1597,8 @@ cmd_create() {
     if [ -n "$C_EXT_SUPERVISOR" ]; then
         valid_display_name "$C_EXT_SUPERVISOR" || die "channel supervisor name \"$C_EXT_SUPERVISOR\": $display_name_rule"
     fi
-    if [ -n "$C_EXT_ASSISTANT" ]; then
-        valid_display_name "$C_EXT_ASSISTANT" || die "workspace agent name \"$C_EXT_ASSISTANT\": $display_name_rule"
+    if [ -n "$C_EXT_AGENT" ]; then
+        valid_display_name "$C_EXT_AGENT" || die "workspace agent name \"$C_EXT_AGENT\": $display_name_rule"
     fi
 
     # Q5, the offline part: names must differ (ignoring case, as Buzz mention lookup does) from each
@@ -1529,25 +1606,25 @@ cmd_create() {
     # this channel.
     peers=$(channel_peers "$C_CHANNEL" "$C_NAME")
     for id in $roles; do
-        [ ! -f "$T_DIR/$id/agent.conf" ] || continue
+        [ ! -f "$(ahome "$id")/agent.conf" ] || continue
         eval "name=\$NAME_$id"
-        valid_display_name "$name" || die "$id display name \"$name\": $display_name_rule"
+        valid_display_name "$name" || die "display name \"$name\": $display_name_rule"
         lc=$(lower "$name")
         for n in $ALL_ROLES; do
             [ "$n" != "$id" ] || continue
             eval "v=\$NAME_$n"
-            if [ -n "$v" ] && [ "$(lower "$v")" = "$lc" ]; then die "the $id and the $n cannot both be named \"$name\"; give one another name"; fi
+            if [ -n "$v" ] && [ "$(lower "$v")" = "$lc" ]; then die "$(job_words "$id") and $(job_words "$n") cannot both be named \"$name\"; give one another name"; fi
         done
         if [ -n "$C_EXT_SUPERVISOR" ] && [ "$(lower "$C_EXT_SUPERVISOR")" = "$lc" ]; then
-            die "\"$name\" is the name of the channel supervisor this team works with; give the $id another name"
+            die "\"$name\" is the name of the channel supervisor this team works with; give $(job_words "$id") another name"
         fi
-        if [ -n "$C_EXT_ASSISTANT" ] && [ "$(lower "$C_EXT_ASSISTANT")" = "$lc" ]; then
-            die "\"$name\" is the name of the workspace agent this team works with; give the $id another name"
+        if [ -n "$C_EXT_AGENT" ] && [ "$(lower "$C_EXT_AGENT")" = "$lc" ]; then
+            die "\"$name\" is the name of the workspace agent this team works with; give $(job_words "$id") another name"
         fi
         while IFS="$(printf '\t')" read -r ws pid prole pname; do
             [ -n "$ws" ] || continue
             if [ "$(lower "$pname")" = "$lc" ]; then
-                die "\"$name\" is already the $prole of workspace \"$ws\" in this channel; give the $id another name (--$id-name)"
+                die "\"$name\" is already the name of an agent of workspace \"$ws\" in this channel; give $(job_words "$id") another name (--$id-name)"
             fi
         done <<EOF
 $peers
@@ -1588,7 +1665,7 @@ EOF
     set_role_names "$peers"
 
     for id in $roles; do
-        home=$T_DIR/$id
+        home=$(ahome "$id")
         eval "name=\$NAME_$id"
         P_AGENT_NAME=$name
         if [ -d "$home" ] || [ -e "$home" ]; then
@@ -1610,12 +1687,12 @@ EOF
                 fi
                 chmod 600 "$tmp_home"
                 publish_file "$tmp_home" "$home/$f"
-                say "$id: created the missing $f"
-                [ "$f" != "$ENV_NAME" ] || say "$id: the stored proof was in the missing env file; store it again with: $PROG proof $C_NAME $id"
+                say "$(adir "$id"): created the missing $f"
+                [ "$f" != "$ENV_NAME" ] || say "$(adir "$id"): the stored proof was in the missing env file; store it again with: $PROG proof $C_NAME $(adir "$id")"
             done
-            say "$id: exists, kept identity.key agent.conf$existing ($name, $saved, public key $(agent_field "$id" pubkey))"
+            say "$(adir "$id"): exists, kept identity.key agent.conf$existing ($name, $saved, public key $(agent_field "$id" pubkey))"
             case "$brief_changed:$existing" in
-                yes:*prompt.md*) say "$id: its prompt.md was written earlier and is unchanged. To rebuild it with the new brief, delete $home/prompt.md, run create again and restart the agent." ;;
+                yes:*prompt.md*) say "$(adir "$id"): its prompt.md was written earlier and is unchanged. To rebuild it with the new brief, delete $home/prompt.md, run create again and restart the agent." ;;
             esac
             continue
         fi
@@ -1641,7 +1718,10 @@ EOF
         [ ! -e "$home" ] || die "$home appeared while this run was creating it; nothing was replaced"
         mv -- "$tmp_home" "$home"
         created_now="$created_now $id"
-        say "$id: created $home ($name, $b)"
+        say "$(adir "$id"): created $home ($name, $b)"
+        if is_workspace_role "$id" && [ "$T_AGENT_DIR" != "$C_NAME" ]; then
+            say "The workspace agent's folder is $T_AGENT_DIR, not $C_NAME: a team folder uses that name for something else."
+        fi
     done
 
     # The channel supervisor's subscription rules, written once every agent of the team has its key.
@@ -1649,18 +1729,18 @@ EOF
     for id in $(team_agents); do
         is_channel_role "$id" || continue
         key=$(lower "$(agent_field "$id" pubkey)")
-        tmp_home=$(mktemp "$T_DIR/$id/.new-rules.XXXXXX")
+        tmp_home=$(mktemp "$(ahome "$id")/.new-rules.XXXXXX")
         TMP_PATHS+=("$tmp_home")
         write_rules "$tmp_home" "$key"
         chmod 600 "$tmp_home"
-        if [ ! -f "$T_DIR/$id/subscriptions.toml" ]; then
-            publish_file "$tmp_home" "$T_DIR/$id/subscriptions.toml"
-            say "$id: wrote subscriptions.toml (it takes no turn for this channel's local agents)"
-        elif ! cmp -s "$tmp_home" "$T_DIR/$id/subscriptions.toml"; then
+        if [ ! -f "$(ahome "$id")/subscriptions.toml" ]; then
+            publish_file "$tmp_home" "$(ahome "$id")/subscriptions.toml"
+            say "$(adir "$id"): wrote subscriptions.toml (it takes no turn for this channel's local agents)"
+        elif ! cmp -s "$tmp_home" "$(ahome "$id")/subscriptions.toml"; then
             stamp=$(date -u '+%Y%m%dT%H%M%SZ')
-            cp -p -- "$T_DIR/$id/subscriptions.toml" "$T_DIR/$id/subscriptions.toml.bak-$stamp"
-            mv -f -- "$tmp_home" "$T_DIR/$id/subscriptions.toml"
-            say "$id: refreshed subscriptions.toml for the agents now in this channel (earlier file: subscriptions.toml.bak-$stamp)"
+            cp -p -- "$(ahome "$id")/subscriptions.toml" "$(ahome "$id")/subscriptions.toml.bak-$stamp"
+            mv -f -- "$tmp_home" "$(ahome "$id")/subscriptions.toml"
+            say "$(adir "$id"): refreshed subscriptions.toml for the agents now in this channel (earlier file: subscriptions.toml.bak-$stamp)"
         else
             rm -f -- "$tmp_home"
         fi
@@ -1669,9 +1749,9 @@ EOF
     # file written before that supervisor existed is kept, as every existing file is; upgrade rewrites it.
     for id in $(team_agents); do
         is_workspace_role "$id" || continue
-        v=$(env_get "$T_DIR/$id/$ENV_NAME" BUZZ_ACP_RESPOND_TO_ALLOWLIST 2>/dev/null) || v=''
+        v=$(env_get "$(ahome "$id")/$ENV_NAME" BUZZ_ACP_RESPOND_TO_ALLOWLIST 2>/dev/null) || v=''
         if [ "$v" != "$(answer_keys)" ]; then
-            say "Note: the $id was set up to answer $(answers_text "$id"); to let it answer the channel supervisor now in this team or channel: $PROG upgrade $C_NAME"
+            say "Note: the workspace agent was set up to answer $(answers_text "$id"); to let it answer the channel supervisor now in this team or channel: $PROG upgrade $C_NAME"
         fi
     done
     if [ -n "$created_now" ] && [ -n "$peers" ]; then
@@ -1689,7 +1769,7 @@ EOF
         v=0
         f=$(workspace_settings apply "$C_WS_PATH") || v=$?
         if [ "$v" = 0 ]; then say "Project folder settings: $f"
-        else warn "the settings of the $id were not written into the project folder: $f. $T_DIR/team.sh writes them before a start."; fi
+        else warn "the settings of the workspace agent were not written into the project folder: $f. $T_DIR/team.sh writes them before a start."; fi
         break
     done
     ensure_project_record
@@ -1712,18 +1792,18 @@ EOF
     for id in $(team_agents); do
         b=$(agent_backend "$id")
         m=$(agent_model "$id" "$b")
-        printf '  %-11s %-26s %-7s %-18s public key %s\n' "$id" "$(agent_field "$id" name)" "$b" "${m:-runtime default}" "$(agent_field "$id" pubkey)"
+        printf '  %-11s %-26s %-7s %-18s public key %s\n' "$(adir "$id")" "$(agent_field "$id" name)" "$b" "${m:-runtime default}" "$(agent_field "$id" pubkey)"
     done
     for id in $(team_agents); do
         is_workspace_role "$id" || continue
-        say "The workspace agent ($id) answers $(answers_text "$id")."
+        say "The workspace agent, $(adir "$id"), answers $(answers_text "$id")."
     done
     if [ -s "$T_DIR/brief.md" ]; then say "Workspace brief: $T_DIR/brief.md"; else say 'Workspace brief: none'; fi
     say ''
     say 'Next steps:'
     say '  1. In Buzz Desktop: Settings > Security > "Authorize external identity". Paste one'
     say '     public key above and copy the proof it gives you. Repeat for each agent.'
-    say "  2. Store each proof: $PROG proof $C_NAME <agent>   (paste the proof, then Enter)"
+    say "  2. Store each proof: $PROG proof $C_NAME <agent>   (the agent's folder name above; paste the proof, then Enter)"
     say "  3. Preview the community steps: $PROG finish $C_NAME --dry-run, then run them without --dry-run."
     say "  4. Check, then start the agents with the team's own command, from the project folder:"
     say "       cd $(shquote "$C_WS_PATH") && $T_DIR/team.sh check, then $T_DIR/team.sh"
@@ -1777,14 +1857,14 @@ cmd_proof() {
     [ -n "$ws" ] && [ -n "$agent" ] || die 'proof: usage: agent-team.sh proof NAME AGENT [PROOF | -] [--force] [--no-signature-check]'
     load_team "$ws"
     agent=$(select_agents "$agent")
-    home=$T_DIR/$agent env=$home/$ENV_NAME
+    home=$(ahome "$agent") env=$(ahome "$agent")/$ENV_NAME
     [ -f "$env" ] || die "$env is missing; run create again to restore it"
     pubkey=$(agent_field "$agent" pubkey)
     owner=$(env_get "$env" BUZZ_ACP_AGENT_OWNER) || owner=$T_OWNER
     owner=$(lower "$owner")
     read_proof_input "$arg"
     normalize_proof "$PROOF_RAW" || die "proof: malformed proof, nothing stored: $PROOF_ERR"
-    say "Proof for $agent ($(agent_field "$agent" name), public key $pubkey):"
+    say "Proof for $(adir "$agent") ($(agent_field "$agent" name), public key $pubkey):"
     SIG_FAILED=no
     if ! check_proof "$pubkey" "$owner" "$skip_sig"; then
         if [ "$SIG_FAILED" = yes ]; then
@@ -1798,7 +1878,7 @@ cmd_proof() {
     current=$(proof_of "$agent")
     if [ "$current" = "$PROOF_JSON" ]; then say 'This proof is already stored; the env file is unchanged.'; return; fi
     if [ -n "$current" ] && [ "$force" = no ]; then
-        die "$agent already has a different proof. To replace it, run the same command with --force."
+        die "$(adir "$agent") already has a different proof. To replace it, run the same command with --force."
     fi
     tmp=$(mktemp "$home/.new-env.XXXXXX")
     TMP_PATHS+=("$tmp")
@@ -1843,7 +1923,7 @@ cmd_finish() {
     agents=$(select_agents ${ids[@]:1}) || exit 1
     set -- $agents
     for id in "$@"; do
-        [ -n "$(proof_of "$id")" ] || die "$id has no ownership proof yet; run: $PROG proof $T_NAME $id"
+        [ -n "$(proof_of "$id")" ] || die "$(adir "$id") has no ownership proof yet; run: $PROG proof $T_NAME $(adir "$id")"
     done
     launcher=$(launcher_path)
     buzz=$(tool_path "${AGENT_TEAM_BUZZ:-}" buzz)
@@ -1856,28 +1936,28 @@ cmd_finish() {
     if [ "$dry" = yes ]; then say 'Dry run: nothing is run. These commands would run, in this order.'; fi
     say "Step 1, offline: the launcher checks each env file (from the agent's folder)."
     for id in "$@"; do
-        home=$T_DIR/$id
-        say "[$id]"
+        home=$(ahome "$id")
+        say "[$(adir "$id")]"
         print_cmd '  ' cd "$home"
         print_cmd '  ' "$launcher" --check
         if [ "$dry" = no ]; then
             rc=0
             (scrub_env; cd -- "$home" && exec "$launcher" --check) || rc=$?
-            [ "$rc" = 0 ] || die "$id: the launcher check failed (exit $rc); fix the env file and run finish again"
+            [ "$rc" = 0 ] || die "$(adir "$id"): the launcher check failed (exit $rc); fix the env file and run finish again"
         fi
     done
 
     say "Step 2, contacts the community: each agent sets its display name, signing as itself"
     say "(BUZZ_PRIVATE_KEY from identity.key and BUZZ_AUTH_TAG from $ENV_NAME, set only for this command)."
     for id in "$@"; do
-        home=$T_DIR/$id name=$(agent_field "$id" name) about=$(agent_field "$id" about)
+        home=$(ahome "$id") name=$(agent_field "$id" name) about=$(agent_field "$id" about)
         relay=$(env_get "$home/$ENV_NAME" BUZZ_RELAY_URL) || relay=$T_COMMUNITY
-        say "[$id]"
+        say "[$(adir "$id")]"
         print_cmd '  ' "$buzz" --relay "$relay" users set-profile --name "$name" --about "$about"
         if [ "$dry" = no ]; then
             rc=0
             run_as_agent "$home" "$buzz" --relay "$relay" users set-profile --name "$name" --about "$about" || rc=$?
-            [ "$rc" = 0 ] || die "$id: setting the display name failed (exit $rc); nothing after it was run. Earlier steps are safe to repeat: run finish again."
+            [ "$rc" = 0 ] || die "$(adir "$id"): setting the display name failed (exit $rc); nothing after it was run. Earlier steps are safe to repeat: run finish again."
         fi
     done
 
@@ -1888,23 +1968,23 @@ cmd_finish() {
         skip) say 'Step 3, in Buzz Desktop: add each agent to the channel yourself (channel members).' ;;
     esac
     for id in "$@"; do
-        home=$T_DIR/$id pubkey=$(agent_field "$id" pubkey)
+        home=$(ahome "$id") pubkey=$(agent_field "$id" pubkey)
         relay=$(env_get "$home/$ENV_NAME" BUZZ_RELAY_URL) || relay=$T_COMMUNITY
-        say "[$id]"
+        say "[$(adir "$id")]"
         case $step in
             add)
                 print_cmd '  ' "$buzz" --relay "$relay" channels add-member --channel "$T_CHANNEL" --pubkey "$pubkey" --role "$role"
                 if [ "$dry" = no ]; then
                     rc=0
                     (unset BUZZ_PRIVATE_KEY BUZZ_AUTH_TAG; exec "$buzz" --relay "$relay" channels add-member --channel "$T_CHANNEL" --pubkey "$pubkey" --role "$role") || rc=$?
-                    [ "$rc" = 0 ] || die "$id: adding it to the channel failed (exit $rc). Pair the CLI once with \`buzz --relay $relay auth desktop pair\`, or add the agent in Buzz Desktop and run finish with --channel-step skip."
+                    [ "$rc" = 0 ] || die "$(adir "$id"): adding it to the channel failed (exit $rc). Pair the CLI once with \`buzz --relay $relay auth desktop pair\`, or add the agent in Buzz Desktop and run finish with --channel-step skip."
                 fi ;;
             join)
                 print_cmd '  ' "$buzz" --relay "$relay" channels join --channel "$T_CHANNEL"
                 if [ "$dry" = no ]; then
                     rc=0
                     run_as_agent "$home" "$buzz" --relay "$relay" channels join --channel "$T_CHANNEL" || rc=$?
-                    [ "$rc" = 0 ] || die "$id: joining the channel failed (exit $rc). A private channel needs a member to add the agent: use --channel-step add or skip."
+                    [ "$rc" = 0 ] || die "$(adir "$id"): joining the channel failed (exit $rc). A private channel needs a member to add the agent: use --channel-step add or skip."
                 fi ;;
             skip) say "  add $(agent_field "$id" name) (public key $pubkey) to channel $T_CHANNEL" ;;
         esac
@@ -1945,9 +2025,10 @@ ours_alive() { # HOME
     [ "$(proc_start "$PF_PID")" = "$PF_START" ]
 }
 # An upgrade that stopped half-way leaves .<agent>.upgrade.* or .<agent>.prev.* beside the agent folders.
+# (".assistant.*" is what an upgrade by 3.0.0 left, when the workspace agent's role was assistant.)
 upgrade_interrupted() {
     local p id
-    for id in $ALL_ROLES; do
+    for id in $ALL_ROLES $LEGACY_AGENT_DIR; do
         for p in "$T_DIR/.$id.upgrade."* "$T_DIR/.$id.prev."*; do
             if [ -e "$p" ]; then return 0; fi
         done
@@ -1984,7 +2065,7 @@ cmd_start() {
     set -- $agents
     require_current "$@"
     if [ -z "$requested" ] && [ -t 0 ]; then
-        printf 'Backend for %s [1 Claude, 2 Codex, Enter for the saved backends]: ' "$(printf '%s' "$agents" | tr '\n' ' ')" >&2
+        printf 'Backend for %s [1 Claude, 2 Codex, Enter for the saved backends]: ' "$(for id in "$@"; do printf '%s ' "$(adir "$id")"; done)" >&2
         IFS= read -r choice || die 'backend selection cancelled'
         case $choice in '') ;; 1|[Cc]laude) requested=claude ;; 2|[Cc]odex) requested=codex ;; *) die 'choose Claude or Codex' ;; esac
         if [ -z "$run_model" ]; then
@@ -1998,7 +2079,7 @@ cmd_start() {
             else
                 say "No retrieved model list for $b yet ($PROG models --backend $b); the documented values apply." >&2
             fi
-            for id in "$@"; do m=$(agent_model "$id" "$b"); say "  saved for $id on $b: ${m:-runtime default}" >&2; done
+            for id in "$@"; do m=$(agent_model "$id" "$b"); say "  saved for $(adir "$id") on $b: ${m:-runtime default}" >&2; done
             printf 'Model for this run [Enter keeps each saved model]: ' >&2
             IFS= read -r choice || die 'model selection cancelled'
             run_model=$(trim "$choice")
@@ -2012,8 +2093,8 @@ cmd_start() {
         b=${requested:-$saved}
         eval "RUN_BACKEND_$id=\$b"
         if [ -n "$run_model" ]; then require_model "$b" "$id" "$run_model"; fi
-        if [ "$check_only" = no ] && [ -n "$requested" ] && ours_alive "$T_DIR/$id" && [ "${PF_BACKEND:-unrecorded}" != "$requested" ]; then
-            die "$id is running as PID $PF_PID on ${PF_BACKEND:-an unrecorded backend}, not $requested; nothing was started. Stop it first ($PROG stop $T_NAME $id), then start it again with --backend $requested."
+        if [ "$check_only" = no ] && [ -n "$requested" ] && ours_alive "$(ahome "$id")" && [ "${PF_BACKEND:-unrecorded}" != "$requested" ]; then
+            die "$(adir "$id") is running as PID $PF_PID on ${PF_BACKEND:-an unrecorded backend}, not $requested; nothing was started. Stop it first ($PROG stop $T_NAME $(adir "$id")), then start it again with --backend $requested."
         fi
     done
     launcher=$(launcher_path)
@@ -2025,28 +2106,28 @@ cmd_start() {
     case $max_bytes in '' | *[!0-9]*) die 'AGENT_TEAM_LOG_MAX_BYTES must be a number of bytes' ;; esac
     [ "$wait_s" -le 60 ] || die 'AGENT_TEAM_START_WAIT is capped at 60 seconds'
     for id in "$@"; do
-        [ -n "$(proof_of "$id")" ] || die "$id has no ownership proof; nothing was started. Run: $PROG proof $T_NAME $id"
-        [ -f "$T_DIR/$id/$ENV_NAME" ] && [ -f "$T_DIR/$id/identity.key" ] || die "$id is missing its env or key file; nothing was started"
+        [ -n "$(proof_of "$id")" ] || die "$(adir "$id") has no ownership proof; nothing was started. Run: $PROG proof $T_NAME $(adir "$id")"
+        [ -f "$(ahome "$id")/$ENV_NAME" ] && [ -f "$(ahome "$id")/identity.key" ] || die "$(adir "$id") is missing its env or key file; nothing was started"
     done
     if [ "$check_only" = no ]; then take_lock "$T_DIR"; fi
     # Validate the whole selection, sign-in included, before starting the first stopped agent.
     for id in "$@"; do
-        if [ "$check_only" = no ] && ours_alive "$T_DIR/$id"; then continue; fi
+        if [ "$check_only" = no ] && ours_alive "$(ahome "$id")"; then continue; fi
         eval "b=\$RUN_BACKEND_$id"
         if uses_partner_runtime "$id"; then
             # The channel supervisor and the reviewer run their own runtime copy; that copy is what is checked.
-            runtime=$T_DIR/$id/runtime/$(backend_command "$b")
-            [ -x "$runtime" ] || die "$id: its runtime has no $(backend_command "$b"); refresh it with: $PROG upgrade $T_NAME. Nothing was started."
-            "$runtime" --check-runtime || die "$id: the $b restricted runtime check failed (see above); nothing was started"
+            runtime=$(ahome "$id")/runtime/$(backend_command "$b")
+            [ -x "$runtime" ] || die "$(adir "$id"): its runtime has no $(backend_command "$b"); refresh it with: $PROG upgrade $T_NAME. Nothing was started."
+            "$runtime" --check-runtime || die "$(adir "$id"): the $b restricted runtime check failed (see above); nothing was started"
         fi
         (scrub_env
-         cd -- "$T_DIR/$id" && "$launcher" --check --backend "$b" ${run_model:+--model "$run_model"}) || die "$id failed its $b launcher check (see above); nothing was started"
+         cd -- "$(ahome "$id")" && "$launcher" --check --backend "$b" ${run_model:+--model "$run_model"}) || die "$(adir "$id") failed its $b launcher check (see above); nothing was started"
     done
     if [ "$check_only" = yes ]; then say "Launcher checks passed."; return; fi
     say "Launcher: $launcher"
     for id in "$@"; do
-        home=$T_DIR/$id log=$home/agent.log
-        if ours_alive "$home"; then say "$id: already running as PID $PF_PID on ${PF_BACKEND:-an unrecorded backend}; not started again"; continue; fi
+        home=$(ahome "$id") log=$home/agent.log
+        if ours_alive "$home"; then say "$(adir "$id"): already running as PID $PF_PID on ${PF_BACKEND:-an unrecorded backend}; not started again"; continue; fi
         eval "b=\$RUN_BACKEND_$id"
         if [ -f "$log" ]; then
             size=$(wc -c < "$log" | tr -d ' ')
@@ -2063,8 +2144,8 @@ cmd_start() {
         if on_stock_claude "$id" "$b"; then
             walled=0
             am_out=$(workspace_settings apply "$T_WORKSPACE") || walled=$?
-            [ "$walled" = 0 ] || die "$id: its settings could not be put into the project folder: $am_out. Nothing more was started."
-            case $am_out in 'in place:'*) ;; *) say "$id: project folder settings: $am_out" ;; esac
+            [ "$walled" = 0 ] || die "$(adir "$id"): its settings could not be put into the project folder: $am_out. Nothing more was started."
+            case $am_out in 'in place:'*) ;; *) say "$(adir "$id"): project folder settings: $am_out" ;; esac
         fi
         printf '\n=== %s: agent-team.sh start (%s, backend %s) ===\n' "$(now_utc)" "$launcher" "$b" >> "$log"
         (
@@ -2091,19 +2172,20 @@ cmd_start() {
             say "$PROG: $id exited right after starting. Last lines of $log:" >&2
             tail -n 20 "$log" >&2 || true
             [ -z "$started" ] || say "Still running: $started" >&2
-            die "$id did not start"
+            die "$(adir "$id") did not start"
         fi
-        say "$id: started as PID $pid on $b (log $log)"
+        say "$(adir "$id"): started as PID $pid on $b (log $log)"
         started="$started${started:+, }$id"
     done
 }
 
 stop_one() { # ID FORCE GRACE -> 0 stopped or not running, 1 still running
-    local id=$1 home=$T_DIR/$1 i
-    if ! read_pidfile "$home"; then say "$id: not started by this tool; nothing to stop"; return 0; fi
-    if ! kill -0 "$PF_PID" 2>/dev/null; then say "$id: not running"; rm -f -- "$home/agent.pid"; return 0; fi
+    local id=$1 home i
+    home=$(ahome "$1")
+    if ! read_pidfile "$home"; then say "$(adir "$id"): not started by this tool; nothing to stop"; return 0; fi
+    if ! kill -0 "$PF_PID" 2>/dev/null; then say "$(adir "$id"): not running"; rm -f -- "$home/agent.pid"; return 0; fi
     if [ "$(proc_start "$PF_PID")" != "$PF_START" ]; then
-        say "$id: PID $PF_PID now belongs to another process; it was not touched"
+        say "$(adir "$id"): PID $PF_PID now belongs to another process; it was not touched"
         rm -f -- "$home/agent.pid"
         return 0
     fi
@@ -2116,11 +2198,11 @@ stop_one() { # ID FORCE GRACE -> 0 stopped or not running, 1 still running
         while [ "$i" -lt 25 ] && kill -0 "$PF_PID" 2>/dev/null; do sleep 0.2; i=$((i + 1)); done
     fi
     if kill -0 "$PF_PID" 2>/dev/null; then
-        say "$id: still running as PID $PF_PID after ${3}s; run stop again, or stop --force" >&2
+        say "$(adir "$id"): still running as PID $PF_PID after ${3}s; run stop again, or stop --force" >&2
         return 1
     fi
     rm -f -- "$home/agent.pid"
-    say "$id: stopped (PID $PF_PID)"
+    say "$(adir "$id"): stopped (PID $PF_PID)"
 }
 
 cmd_stop() {
@@ -2169,14 +2251,14 @@ cmd_status() {
     d=$(launcher_path)
     say "Launcher for start: ${d:-not found (agent-team.sh settings --launcher /path/to/run-buzz-acp.sh)}"
     [ -z "$T_EXT_SUPERVISOR" ] || say "Channel supervisor (in another team of this channel): $T_EXT_SUPERVISOR"
-    [ -z "$T_EXT_ASSISTANT" ] || say "Workspace agent (in another team of this channel): $T_EXT_ASSISTANT"
+    [ -z "$T_EXT_AGENT" ] || say "Workspace agent (in another team of this channel): $T_EXT_AGENT"
     fmt=$(team_format)
     if [ "$fmt" != "$FORMAT" ]; then
         say "Team folder: $(format_words "$fmt"); it starts only after: $PROG upgrade $T_NAME --dry-run, then $PROG upgrade $T_NAME"
     fi
     if upgrade_interrupted; then say "An upgrade was interrupted: run $PROG upgrade $T_NAME to finish it."; fi
     for id in $(team_agents); do
-        home=$T_DIR/$id
+        home=$(ahome "$id")
         fmt=$(agent_format "$id")
         b=$(agent_backend "$id")
         mode=''
@@ -2193,12 +2275,12 @@ cmd_status() {
         size=0
         if [ -f "$home/agent.log" ]; then size=$(wc -c < "$home/agent.log" | tr -d ' '); fi
         if [ "$fmt" = "$FORMAT" ]; then
-            say "  $id: $(agent_field "$id" name), $(job_words "$id")"
+            say "  $(adir "$id"): $(agent_field "$id" name), $(job_words "$id")"
             m=$(agent_model "$id" "$b"); e=$(agent_effort "$id" "$b")
             say "    backend $b, model ${m:-runtime default}${e:+, reasoning effort $e}; $mode"
             say "    answers $(answers_text "$id")"
         else
-            say "  $id: $(agent_field "$id" name)"
+            say "  $(adir "$id"): $(agent_field "$id" name)"
             say "    $(format_words "$fmt"): run $PROG upgrade $T_NAME --dry-run, then $PROG upgrade $T_NAME"
         fi
         say "    public key $(agent_field "$id" pubkey); $proof; $run"
@@ -2334,7 +2416,7 @@ signin_env() { # CMD...: run CMD in this subshell's environment without the name
 pf_role() { # ID BACKEND RUNTIME_DIR WORKDIR
     local id=$1 b=$2 rt=$3 ws=$4 adapter cmd d out status=0 method plan f names
     adapter=$(backend_command "$b")
-    say "Role $id ($(job_words "$id" | sed 's/^the //')): $b"
+    say "$(job_words "$id" | sed 's/^the/The/'): $b"
     d=$(command -v -- "$adapter" 2>/dev/null || true)
     if [ -z "$d" ]; then
         if [ "$b" = codex ]; then pf_line MISSING "$adapter" 'not on PATH' 'install @agentclientprotocol/codex-acp@1.13.1 under your user npm prefix'
@@ -2392,13 +2474,14 @@ pf_role() { # ID BACKEND RUNTIME_DIR WORKDIR
     rm -f -- "$out"
 }
 cmd_preflight() {
-    local top f p n v d team='' roles_arg='' roles='assistant supervisor' b_all='' b_a='' b_s='' b_r='' id b rt ws='' names
+    local top f p n v d team='' roles_arg='' roles='agent supervisor' b_all='' b_a='' b_s='' b_r='' id b rt ws='' names
     while [ "$#" -gt 0 ]; do
         case $1 in
             --backend) need_value "$@"; check_backend "$2"; b_all=$2; shift ;;
-            --assistant-backend) need_value "$@"; check_backend "$2"; b_a=$2; shift ;;
+            --agent-backend) need_value "$@"; check_backend "$2"; b_a=$2; shift ;;
             --supervisor-backend) need_value "$@"; check_backend "$2"; b_s=$2; shift ;;
             --reviewer-backend) need_value "$@"; check_backend "$2"; b_r=$2; shift ;;
+            --assistant-*) die "preflight: $(renamed_option "$1")" ;;
             --roles) need_value "$@"; roles_arg=$2; shift ;;
             --partner) ;;
             -h|--help) usage; return ;;
@@ -2408,10 +2491,11 @@ cmd_preflight() {
         shift
     done
     case $roles_arg in
-        '' | assistant,supervisor | supervisor,assistant) ;;
-        assistant) roles=assistant ;;
+        '' | agent,supervisor | supervisor,agent) ;;
+        agent) roles=agent ;;
         reviewer) roles=reviewer ;;
-        *) die "preflight: --roles must be assistant,supervisor, assistant or reviewer (got: $roles_arg)" ;;
+        *assistant*) die "preflight: $(renamed_roles "$roles_arg")" ;;
+        *) die "preflight: --roles must be agent,supervisor, agent or reviewer (got: $roles_arg)" ;;
     esac
     PF_MISSING=0
     say 'Preflight (changes nothing):'
@@ -2479,14 +2563,14 @@ cmd_preflight() {
         [ -n "$roles" ] || die "workspace \"$team\" has no agents"
     fi
     for id in $roles; do
-        case $id in assistant) b=$b_a ;; reviewer) b=$b_r ;; *) b=$b_s ;; esac
+        case $id in agent) b=$b_a ;; reviewer) b=$b_r ;; *) b=$b_s ;; esac
         b=${b:-$b_all}
         rt=$(skill_dir)/runtime
         if [ -n "$team" ]; then
             b=${b:-$(agent_backend "$id")}
             v=$(agent_format "$id")
-            if [ "$v" = "$FORMAT" ]; then rt=$T_DIR/$id/runtime
-            else pf_line PROBLEM "$id record" "$(format_words "$v")" "$PROG upgrade $team --dry-run, then $PROG upgrade $team"; fi
+            if [ "$v" = "$FORMAT" ]; then rt=$(ahome "$id")/runtime
+            else pf_line PROBLEM "$(adir "$id") record" "$(format_words "$v")" "$PROG upgrade $team --dry-run, then $PROG upgrade $team"; fi
         fi
         pf_role "$id" "${b:-claude}" "$rt" "$ws"
     done
@@ -2515,7 +2599,7 @@ cmd_preflight() {
 # for the model checks; on failure the reason is shown with the documented list, and exit is 1.
 cmd_models() {
     # Without --role: the workspace agent's, the role on the stock adapter (before 3.0.0, the supervisor's).
-    local backend='' role=assistant team='' adapter cmd py out status=0 list ok n saved line id name timeout
+    local backend='' role=agent team='' adapter cmd py out status=0 list ok n saved line id name timeout
     while [ "$#" -gt 0 ]; do
         case $1 in
             --backend) need_value "$@"; check_backend "$2"; backend=$2; shift ;;
@@ -2526,14 +2610,18 @@ cmd_models() {
         esac
         shift
     done
-    case $role in assistant | supervisor | reviewer) ;; *) die 'models: --role must be assistant, supervisor or reviewer' ;; esac
+    case $role in
+        agent | supervisor | reviewer) ;;
+        assistant) die 'models: --role assistant: since 4.0.0 the workspace agent'"'"'s role is agent: --role agent' ;;
+        *) die 'models: --role must be agent, supervisor or reviewer' ;;
+    esac
     resolve_root
     if [ -n "$team" ]; then load_team "$team"; backend=${backend:-$(agent_backend "$role")}; fi
     backend=${backend:-claude}
     adapter=$(backend_command "$backend")
     if uses_partner_runtime "$role"; then
         cmd=$(skill_dir)/runtime/$adapter
-        if [ -n "$team" ] && [ "$(agent_format "$role")" = "$FORMAT" ]; then cmd=$T_DIR/$role/runtime/$adapter; fi
+        if [ -n "$team" ] && [ "$(agent_format "$role")" = "$FORMAT" ]; then cmd=$(ahome "$role")/runtime/$adapter; fi
         [ -x "$cmd" ] || die "models: the restricted runtime $cmd is missing"
     else
         cmd=$(command -v -- "$adapter" 2>/dev/null) || die "models: $adapter is not on PATH"
@@ -2553,7 +2641,7 @@ cmd_models() {
         export CLAUDE_AGENT_ACP_PROTOCOL=v1
         "$py" -I "$(script_dir)/acp-models.py" --timeout "$timeout" -- "$cmd"
     ) > "$out" 2>/dev/null || status=$?
-    say "Models for the $role on $backend ($cmd):"
+    say "Models for $(job_words "$role") on $backend ($cmd):"
     if [ "$status" = 0 ] && "$py" -I -c 'import json,sys
 d=json.load(open(sys.argv[1]))
 assert d.get("ok") and d.get("models")
@@ -2595,18 +2683,20 @@ print(d.get("reason") or "the listing gave no answer")' "$out" 2>/dev/null || pr
         say '  full names, for example: claude-opus-5-5 claude-sonnet-5-5 claude-haiku-5-5 claude-fable-5-2'
     else
         list=$(codex_bundled_models "$role" | tr '\n' ' ')
-        if [ -n "$list" ]; then say "  $list(the bundled catalog of $(codex_cli_of "$role"))"; else say "  none available offline (the $role's Codex CLI could not list its bundled catalog)"; fi
+        if [ -n "$list" ]; then say "  $list(the bundled catalog of $(codex_cli_of "$role"))"; else say "  none available offline (the Codex CLI of $(job_words "$role") could not list its bundled catalog)"; fi
     fi
     exit 1
 }
 
 # ---------------------------------------------------------------- upgrade
-# Bring a team to the current format (3) and to the chosen backends. identity.key, the stored proof
+# Bring a team to the current format (4) and to the chosen backends. identity.key, the stored proof
 # and PROJECT.md stay byte-identical. Each agent folder is rebuilt beside itself and swapped in with
 # two renames; the next run finishes or undoes an interrupted swap, so a folder is old or new.
-# From format 2 the two jobs swap: each agent keeps its folder, key, proof, display name, backend,
-# models and efforts, and gets the generated files of its new job (the runtime and the subscription
-# rules move from the assistant to the supervisor; every replaced or removed file is kept beside itself).
+# Before format 4 the workspace agent's folder is assistant/: one rename moves it to its own name
+# first, and team.conf records that name last (agent_folder=). From format 2 the two jobs also swap:
+# each agent keeps its key, proof, display name, backend, models and efforts, and gets the generated
+# files of its new job (the runtime and the subscription rules move from the workspace agent's folder
+# to the supervisor's; every replaced or removed file is kept beside itself).
 GENERATED_COMMON='agent.conf .env.buzz-acp.local prompt.md'
 GENERATED_RUNTIME='runtime/claude-agent-acp runtime/restricted-claude runtime/buzz-tools runtime/codex-acp'
 GENERATED_RULES='subscriptions.toml'
@@ -2635,25 +2725,26 @@ job_detail() { # ID: what the new job holds, for the upgrade plan
 }
 recover_upgrade() {
     local id home p
-    for id in $ALL_ROLES; do
-        home=$T_DIR/$id
+    for id in $LEGACY_AGENT_DIR $ALL_ROLES; do
+        if [ "$id" = "$LEGACY_AGENT_DIR" ]; then home=$T_DIR/$id; else set_agent_dirs; home=$(ahome "$id"); fi
         for p in "$T_DIR/.$id.upgrade."*; do
             [ -d "$p" ] || continue
             if [ ! -e "$home" ] && [ -f "$p/.upgrade-complete" ]; then
                 mv -- "$p" "$home"
-                say "$id: finished an interrupted upgrade"
+                say "${home##*/}: finished an interrupted upgrade"
             else
                 rm -rf -- "$p"
-                say "$id: removed the unfinished copy of an interrupted upgrade (the folder is unchanged)"
+                say "${home##*/}: removed the unfinished copy of an interrupted upgrade (the folder is unchanged)"
             fi
         done
         for p in "$T_DIR/.$id.prev."*; do
             [ -d "$p" ] || continue
-            if [ ! -e "$home" ]; then mv -- "$p" "$home"; say "$id: restored its folder from before an interrupted upgrade"
+            if [ ! -e "$home" ]; then mv -- "$p" "$home"; say "${home##*/}: restored its folder from before an interrupted upgrade"
             else rm -rf -- "$p"; fi
         done
         rm -f -- "$home/.upgrade-complete"
     done
+    set_agent_dirs
 }
 # The launcher's single-copy lock for this agent's key is held by a live process (run-buzz-acp.sh lock).
 launcher_lock_alive() { # HOME
@@ -2698,19 +2789,21 @@ env_keys() { # FILE: setting names, one line, sorted (names only)
     [ -f "$1" ] || return 0
     sed -E -e 's/^[[:space:]]*(export[[:space:]]+)?//' -e '/^#/d' -e '/^$/d' -e 's/[[:space:]]*=.*$//' "$1" | LC_ALL=C sort -u | tr '\n' ' '
 }
-build_agent_files() { # ID HOME STAGE BACKEND MODEL_CLAUDE MODEL_CODEX: every generated file, into STAGE
-    local id=$1 home=$2 st=$3 b=$4 name pubkey about created upgraded file
+# HOME is where the agent's folder is now; DEST is where it will be (the workspace agent's folder moves
+# from assistant/ to its own name in format 4), and the env file's paths point there.
+build_agent_files() { # ID HOME STAGE BACKEND MODEL_CLAUDE MODEL_CODEX [DEST]: every generated file, into STAGE
+    local id=$1 home=$2 st=$3 b=$4 dest=${7:-$2} name pubkey about created upgraded file fmt
     name=$(agent_field "$id" name)
     pubkey=$(lower "$(agent_field "$id" pubkey)")
     about=$(conf_get "$home/agent.conf" about) || about=''
     created=$(conf_get "$home/agent.conf" created) || created=$UPGRADE_NOW
-    if [ "$(agent_format "$id")" = "$FORMAT" ]; then upgraded=$(conf_get "$home/agent.conf" upgraded) || upgraded=''
-    else
-        # A converted agent: the description of its profile follows its new job (finish publishes it).
-        upgraded=$UPGRADE_NOW about=$(default_about "$id")
-    fi
+    fmt=$(agent_format "$id")
+    if [ "$fmt" = "$FORMAT" ]; then upgraded=$(conf_get "$home/agent.conf" upgraded) || upgraded=''
+    else upgraded=$UPGRADE_NOW; fi
+    # An agent that changes jobs (format 1 or 2): its profile description follows (finish publishes it).
+    case $fmt in 1 | 2) about=$(default_about "$id") ;; esac
     write_agent_conf "$st/agent.conf" "$id" "$name" "$pubkey" "$about" "$b" "$5" "$6" "$created" "$upgraded"
-    write_env "$st/$ENV_NAME" "$home" "$name" "$id" "$b" "$5" "$6" "$(auth_tag_line "$home/$ENV_NAME")"
+    write_env "$st/$ENV_NAME" "$dest" "$name" "$id" "$b" "$5" "$6" "$(auth_tag_line "$home/$ENV_NAME")"
     P_AGENT_NAME=$name
     render_prompt "$id" "$st/prompt.md"
     chmod 600 "$st/agent.conf" "$st/$ENV_NAME" "$st/prompt.md"
@@ -2730,40 +2823,41 @@ build_agent_files() { # ID HOME STAGE BACKEND MODEL_CLAUDE MODEL_CODEX: every ge
 cmd_upgrade() {
     local dry=no b_all='' b_a='' b_s='' b_r='' model_set=no opt_model='' team='' id home fmt old_b new_b st m old_m
     local gen rel f changed added removed any=no stamp prev ws peers dropped k old_keys new_keys tmp list keep pass m_a='' m_s='' m_r='' mc mx e old_e ec ex e_all='' e_a='' e_s='' e_r=''
-    local v ws_claude=no
+    local v ws_claude=no dest moving
     while [ "$#" -gt 0 ]; do
         case $1 in
             --dry-run) dry=yes ;;
             --backend) need_value "$@"; check_backend "$2"; b_all=$2; shift ;;
-            --assistant-backend) need_value "$@"; check_backend "$2"; b_a=$2; shift ;;
+            --agent-backend) need_value "$@"; check_backend "$2"; b_a=$2; shift ;;
             --supervisor-backend) need_value "$@"; check_backend "$2"; b_s=$2; shift ;;
             --reviewer-backend) need_value "$@"; check_backend "$2"; b_r=$2; shift ;;
             --model) [ "$#" -ge 2 ] || die '--model needs a value'; opt_model=$2; model_set=yes; shift ;;
-            --assistant-model) need_value "$@"; m_a=$2; shift ;;
+            --agent-model) need_value "$@"; m_a=$2; shift ;;
             --supervisor-model) need_value "$@"; m_s=$2; shift ;;
             --reviewer-model) need_value "$@"; m_r=$2; shift ;;
             --effort) need_value "$@"; e_all=$2; shift ;;
-            --assistant-effort) need_value "$@"; e_a=$2; shift ;;
+            --agent-effort) need_value "$@"; e_a=$2; shift ;;
             --supervisor-effort) need_value "$@"; e_s=$2; shift ;;
             --reviewer-effort) need_value "$@"; e_r=$2; shift ;;
+            --assistant-*) die "upgrade: $(renamed_option "$1")" ;;
             -h | --help) usage; exit 0 ;;
             -*) die "upgrade: unknown option: $1" ;;
             *) [ -z "$team" ] || die 'upgrade takes one workspace NAME'; team=$1 ;;
         esac
         shift
     done
-    [ -n "$team" ] || die 'upgrade: usage: agent-team.sh upgrade NAME [--dry-run] [--backend B] [--assistant-backend B] [--supervisor-backend B] [--model ID]'
+    [ -n "$team" ] || die 'upgrade: usage: agent-team.sh upgrade NAME [--dry-run] [--backend B] [--agent-backend B] [--supervisor-backend B] [--model ID]'
     need_skill_version
     load_team "$team"
     [ -n "$(team_agents)" ] || die "workspace \"$team\" has no agent folders to upgrade"
     C_NAME=$T_NAME C_WS_PATH=$T_WORKSPACE C_CHANNEL=$T_CHANNEL C_COMMUNITY=$T_COMMUNITY C_OWNER=$T_OWNER
-    C_EXT_ASSISTANT=$T_EXT_ASSISTANT C_EXT_SUPERVISOR=$T_EXT_SUPERVISOR
+    C_EXT_AGENT=$T_EXT_AGENT C_EXT_SUPERVISOR=$T_EXT_SUPERVISOR
     [ -d "$C_WS_PATH" ] || die "the workspace folder $C_WS_PATH is missing; nothing was changed"
     # A running agent stops the upgrade before anything, the lock included, is written.
     for id in $ALL_ROLES; do
-        [ -f "$T_DIR/$id/identity.key" ] || continue
-        if ours_alive "$T_DIR/$id" || launcher_lock_alive "$T_DIR/$id"; then
-            die "$id is running; stop it first ($PROG stop $T_NAME), then upgrade. Nothing was changed."
+        [ -f "$(ahome "$id")/identity.key" ] || continue
+        if ours_alive "$(ahome "$id")" || launcher_lock_alive "$(ahome "$id")"; then
+            die "$(adir "$id") is running; stop it first ($PROG stop $T_NAME), then upgrade. Nothing was changed."
         fi
     done
     if upgrade_interrupted; then
@@ -2773,14 +2867,14 @@ cmd_upgrade() {
     UPGRADE_NOW=$(now_utc)
     stamp=$(date -u '+%Y%m%dT%H%M%SZ')
     # Prompt placeholders, as create sets them.
-    NAME_assistant='' NAME_supervisor='' NAME_reviewer=''
+    NAME_agent='' NAME_supervisor='' NAME_reviewer=''
     for id in $(team_agents); do eval "NAME_$id=\$(agent_field \"\$id\" name)"; done
     peers=$(channel_peers "$C_CHANNEL" "$C_NAME")
     P_WORKSPACE=$C_WS_PATH P_CHANNEL=$C_CHANNEL P_OWNER=$C_OWNER
     set_role_names "$peers"
     if [ "$dry" = yes ]; then say "Upgrade plan for workspace \"$T_NAME\" ($T_DIR); nothing is changed:"
     else say "Upgrade of workspace \"$T_NAME\" ($T_DIR):"; fi
-    [ "$(team_format)" = "$FORMAT" ] || any=yes
+    if team_conf_behind; then any=yes; fi
     # Pass 1 plans in a temporary folder outside the team, so an up-to-date team is never touched.
     # Pass 2 rebuilds each changed agent beside its folder and swaps it in.
     for pass in plan apply; do
@@ -2789,10 +2883,24 @@ cmd_upgrade() {
             [ -n "$LOCK_DIR" ] || take_lock "$T_DIR"
         fi
         for id in $(team_agents); do
-            home=$T_DIR/$id
+            home=$(ahome "$id") dest=$(ahome "$id") moving=no
+            # Format 4: the workspace agent's folder moves from assistant/ to the team's name. One rename
+            # moves it, before its files are rewritten in the new place; a run cut right after it is
+            # finished by the next one, which finds the folder there (agent_dir_in).
+            if is_workspace_role "$id" && [ "$T_AGENT_DIR" != "$T_AGENT_TARGET" ]; then
+                dest=$T_DIR/$T_AGENT_TARGET moving=yes
+                [ ! -e "$dest" ] || die "$home cannot be moved to $dest: that already exists. Move it aside, then upgrade again; nothing was changed."
+                if [ "$pass" = apply ]; then
+                    mv -- "$home" "$dest"
+                    [ "${AGENT_TEAM_UPGRADE_FAULT:-}" != after-move ] || kill -9 $$
+                    say "  $T_AGENT_DIR/: moved to $T_AGENT_TARGET/"
+                    set_agent_dirs
+                    home=$dest moving=no
+                fi
+            fi
             fmt=$(agent_format "$id")
             old_b=$(agent_backend "$id")
-            case $id in assistant) new_b=${b_a:-${b_all:-$old_b}} ;; reviewer) new_b=${b_r:-${b_all:-$old_b}} ;; *) new_b=${b_s:-${b_all:-$old_b}} ;; esac
+            case $id in agent) new_b=${b_a:-${b_all:-$old_b}} ;; reviewer) new_b=${b_r:-${b_all:-$old_b}} ;; *) new_b=${b_s:-${b_all:-$old_b}} ;; esac
             check_backend "$new_b"
             if on_stock_claude "$id" "$new_b"; then ws_claude=yes; fi
             # One model per backend: the chosen one for the new backend, else the saved one; the
@@ -2809,7 +2917,7 @@ cmd_upgrade() {
                     [ "$new_b" = "$old_b" ] || old_m=''
                 fi
             fi
-            case $id in assistant) m=$m_a ;; reviewer) m=$m_r ;; *) m=$m_s ;; esac
+            case $id in agent) m=$m_a ;; reviewer) m=$m_r ;; *) m=$m_s ;; esac
             if [ -z "$m" ] && [ "$model_set" = yes ]; then m=$opt_model; fi
             if [ -n "$m" ]; then
                 [ "$pass" = apply ] || require_model "$new_b" "$id" "$m"
@@ -2820,7 +2928,7 @@ cmd_upgrade() {
             # new backend; "default" clears it.
             ec=$(agent_effort "$id" claude) ex=$(agent_effort "$id" codex)
             if [ "$new_b" = claude ]; then old_e=$ec; else old_e=$ex; fi
-            case $id in assistant) e=$e_a ;; reviewer) e=$e_r ;; *) e=$e_s ;; esac
+            case $id in agent) e=$e_a ;; reviewer) e=$e_r ;; *) e=$e_s ;; esac
             [ -n "$e" ] || e=$e_all
             if [ -n "$e" ]; then
                 case $e in default | none) e='' ;; esac
@@ -2833,7 +2941,7 @@ cmd_upgrade() {
             else st=$(mktemp -d "$T_DIR/.$id.upgrade.XXXXXX"); fi
             TMP_PATHS+=("$st")
             chmod 700 "$st"
-            build_agent_files "$id" "$home" "$st" "$new_b" "$mc" "$mx"
+            build_agent_files "$id" "$home" "$st" "$new_b" "$mc" "$mx" "$dest"
             gen=$(generated_files "$id")
             changed='' added='' removed=''
             for rel in $gen; do
@@ -2854,11 +2962,14 @@ cmd_upgrade() {
                 new_keys=$(env_keys "$st/$ENV_NAME")
                 dropped=''
                 for k in $old_keys; do case " $new_keys " in *" $k "*) ;; *) dropped="$dropped $k" ;; esac; done
-                say "  $id ($(agent_field "$id" name)): format $fmt -> $FORMAT; backend $old_b -> $new_b"
+                say "  $(adir "$id") ($(agent_field "$id" name)): format $fmt -> $FORMAT; backend $old_b -> $new_b"
                 rm -rf -- "$st"
-                if [ -z "$changed$added$removed" ]; then say '    up to date; nothing to change'; continue; fi
+                if [ -z "$changed$added$removed" ] && [ "$moving" = no ]; then say '    up to date; nothing to change'; continue; fi
+                if [ "$moving" = yes ]; then
+                    say "    folder: $T_AGENT_DIR/ becomes $T_AGENT_TARGET/; its start command from now on: $dest/start.sh"
+                fi
                 # A converted agent: the job it has from now on, and the model it keeps for it.
-                if [ "$fmt" != "$FORMAT" ] && [ "$id" != reviewer ]; then
+                if { [ "$fmt" = 1 ] || [ "$fmt" = 2 ]; } && [ "$id" != reviewer ]; then
                     say "    job: $(old_job_words "$id") until now; from now on $(job_words "$id") ($(job_detail "$id"))"
                     if [ "$old_m" = "$m" ]; then
                         say "    keeps its saved model on $new_b: ${m:-runtime default}${e:+, reasoning effort $e}. It was chosen for the earlier job; to choose another: --$id-model ID"
@@ -2891,8 +3002,8 @@ cmd_upgrade() {
                 cp -p -- "$home/$rel" "$st/$rel"
             done < "$list"
             rm -f -- "$list"
-            cmp -s "$home/identity.key" "$st/identity.key" || die "$id: could not copy identity.key; nothing was changed"
-            [ "$(env_get "$st/$ENV_NAME" BUZZ_AUTH_TAG || true)" = "$(proof_of "$id")" ] || die "$id: the proof did not carry over; nothing was changed"
+            cmp -s "$home/identity.key" "$st/identity.key" || die "$(adir "$id"): could not copy identity.key; nothing was changed"
+            [ "$(env_get "$st/$ENV_NAME" BUZZ_AUTH_TAG || true)" = "$(proof_of "$id")" ] || die "$(adir "$id"): the proof did not carry over; nothing was changed"
             : > "$st/.upgrade-complete"
             # From here an interruption is finished by the next run (recover_upgrade), never torn.
             keep=()
@@ -2905,17 +3016,19 @@ cmd_upgrade() {
             mv -- "$st" "$home"
             rm -f -- "$home/.upgrade-complete"
             rm -rf -- "$prev"
-            say "  $id: upgraded"
+            say "  $(adir "$id"): upgraded"
         done
-        if [ "$pass" = plan ] && [ "$(team_format)" != "$FORMAT" ]; then
-            say "  team.conf: format $(team_format) -> $FORMAT (kept as team.conf.bak-$stamp)"
+        if [ "$pass" = plan ] && team_conf_behind; then
+            say "  team.conf: format $(team_format) -> $FORMAT, agent_folder=$T_AGENT_TARGET (kept as team.conf.bak-$stamp)"
+        fi
+        if [ "$pass" = plan ] && { [ "$(team_format)" = 1 ] || [ "$(team_format)" = 2 ]; }; then
             # The two jobs swap (the lines of each agent say which it has from now on).
             v=''
             for id in $(team_agents); do
                 if is_workspace_role "$id"; then v="${v}w"; elif is_channel_role "$id"; then v="${v}c"; fi
             done
             if [ "$v" = c ]; then
-                say "  note: this team has no assistant, so it has no workspace agent of its own. Its supervisor becomes a channel supervisor and takes a turn on every ordinary message in its channel${C_EXT_ASSISTANT:+, beside $C_EXT_ASSISTANT, the assistant of another team}."
+                say "  note: this team has no workspace agent of its own. Its supervisor becomes a channel supervisor and takes a turn on every ordinary message in its channel${C_EXT_AGENT:+, beside $C_EXT_AGENT, the workspace agent of another team}."
             fi
             if [ -n "$v" ]; then
                 say "  Buzz profiles: each agent's description follows its new job; Buzz shows the earlier one until finish runs again ($PROG finish $T_NAME --dry-run shows its steps)"
@@ -2924,9 +3037,11 @@ cmd_upgrade() {
         if [ "$pass" = plan ]; then
             for f in $(team_files); do
                 [ "$f" != VERSION ] || continue
+                # The plan names the workspace agent's files at the place they will be.
+                v=${f/#$T_AGENT_DIR\//$T_AGENT_TARGET/}
                 case $(team_file_state "$f") in
-                    missing) any=yes; say "  $f: add" ;;
-                    differs) any=yes; say "  $f: replace (kept as $f.bak-$stamp)" ;;
+                    missing) any=yes; say "  $v: add" ;;
+                    differs) any=yes; say "  $v: replace (kept as $v.bak-$stamp)" ;;
                 esac
             done
             # A team made before 2.0.0 holds the wall programs; the settings in the project folder replace them.
@@ -2967,12 +3082,14 @@ cmd_upgrade() {
             case $f in 'in place:'*) ;; *) say "  $f" ;; esac
         fi
     fi
-    if [ "$dry" = no ] && [ "$any" = yes ] && [ "$(team_format)" != "$FORMAT" ]; then
+    if [ "$dry" = no ] && [ "$any" = yes ] && team_conf_behind; then
         cp -p -- "$T_DIR/team.conf" "$T_DIR/team.conf.bak-$stamp"
         tmp=$(mktemp "$T_DIR/.new-team.XXXXXX")
         TMP_PATHS+=("$tmp")
-        sed -E "s/^format=[0-9]+\$/format=$FORMAT/" "$T_DIR/team.conf" > "$tmp"
+        # Format 4: the record names the workspace agent's folder; external_assistant became external_agent.
+        sed -E -e "s/^format=[0-9]+\$/format=$FORMAT/" -e 's/^external_assistant=/external_agent=/' -e '/^agent_folder=/d' "$T_DIR/team.conf" > "$tmp"
         grep -qx "format=$FORMAT" "$tmp" || printf 'format=%s\n' "$FORMAT" >> "$tmp"
+        printf 'agent_folder=%s\n' "$T_AGENT_TARGET" >> "$tmp"
         chmod 600 "$tmp"
         mv -f -- "$tmp" "$T_DIR/team.conf"
         say '  team.conf: upgraded'
@@ -2988,7 +3105,7 @@ cmd_upgrade() {
         say "  VERSION: $SKILL_VERSION"
     fi
     if [ "$any" = no ]; then say "Workspace \"$T_NAME\" is up to date; nothing was changed."; return; fi
-    if [ "$dry" = yes ]; then say "Run it: $PROG upgrade $T_NAME$( [ -z "$b_all" ] || printf ' --backend %s' "$b_all")$( [ -z "$b_a" ] || printf ' --assistant-backend %s' "$b_a")$( [ -z "$b_s" ] || printf ' --supervisor-backend %s' "$b_s")$( [ -z "$b_r" ] || printf ' --reviewer-backend %s' "$b_r")$( [ "$model_set" = no ] || printf ' --model %s' "$(shquote "$opt_model")")$( [ -z "$m_a" ] || printf ' --assistant-model %s' "$(shquote "$m_a")")$( [ -z "$m_s" ] || printf ' --supervisor-model %s' "$(shquote "$m_s")")$( [ -z "$m_r" ] || printf ' --reviewer-model %s' "$(shquote "$m_r")")$( [ -z "$e_all" ] || printf ' --effort %s' "$e_all")$( [ -z "$e_a" ] || printf ' --assistant-effort %s' "$e_a")$( [ -z "$e_s" ] || printf ' --supervisor-effort %s' "$e_s")$( [ -z "$e_r" ] || printf ' --reviewer-effort %s' "$e_r")"
+    if [ "$dry" = yes ]; then say "Run it: $PROG upgrade $T_NAME$( [ -z "$b_all" ] || printf ' --backend %s' "$b_all")$( [ -z "$b_a" ] || printf ' --agent-backend %s' "$b_a")$( [ -z "$b_s" ] || printf ' --supervisor-backend %s' "$b_s")$( [ -z "$b_r" ] || printf ' --reviewer-backend %s' "$b_r")$( [ "$model_set" = no ] || printf ' --model %s' "$(shquote "$opt_model")")$( [ -z "$m_a" ] || printf ' --agent-model %s' "$(shquote "$m_a")")$( [ -z "$m_s" ] || printf ' --supervisor-model %s' "$(shquote "$m_s")")$( [ -z "$m_r" ] || printf ' --reviewer-model %s' "$(shquote "$m_r")")$( [ -z "$e_all" ] || printf ' --effort %s' "$e_all")$( [ -z "$e_a" ] || printf ' --agent-effort %s' "$e_a")$( [ -z "$e_s" ] || printf ' --supervisor-effort %s' "$e_s")$( [ -z "$e_r" ] || printf ' --reviewer-effort %s' "$e_r")"
     else say "Upgraded. Next, with the team's own command, from the project folder: cd $(shquote "$T_WORKSPACE") && $T_DIR/team.sh check, then $T_DIR/team.sh"; fi
 }
 

@@ -241,8 +241,9 @@ check 'a second create keeps it' has "$OUT/create2.out" "Team command: $T/team.s
 check 'and leaves it unchanged' cmp -s "$TEMPLATE" "$T/team.sh"
 check 'the new team folder records the skill'"'"'s version, the skill'"'"'s file byte for byte, mode 600' test "$(cmp -s "$SKILL_DIR/VERSION" "$T/VERSION"; echo $?)$(mode_of "$T/VERSION")" = 0600
 check 'the model list helper is in the team folder, the skill'"'"'s byte for byte, mode 700' test "$(cmp -s "$SKILL_DIR/scripts/acp-models.py" "$T/acp-models.py"; echo $?)$(mode_of "$T/acp-models.py")" = 0700
-check 'each agent folder has its own start command, the template byte for byte' test "$(cmp -s "$START_TEMPLATE" "$T/assistant/start.sh"; echo $?)$(cmp -s "$START_TEMPLATE" "$T/supervisor/start.sh"; echo $?)" = 00
-check 'its mode is 700' test "$(mode_of "$T/assistant/start.sh")$(mode_of "$T/supervisor/start.sh")" = 700700
+check 'each agent folder has its own start command, the template byte for byte' test "$(cmp -s "$START_TEMPLATE" "$T/shop/start.sh"; echo $?)$(cmp -s "$START_TEMPLATE" "$T/supervisor/start.sh"; echo $?)" = 00
+check 'its mode is 700' test "$(mode_of "$T/shop/start.sh")$(mode_of "$T/supervisor/start.sh")" = 700700
+check 'the workspace agent'"'"'s folder is named after the team, as team.conf records it' test "$(grep -c -x 'agent_folder=shop' "$T/team.conf")$(grep -c -x -e 'id=agent' -e 'role=agent' "$T/shop/agent.conf")$([ -e "$T/assistant" ] && echo old)" = 12
 check 'create names it' has "$OUT/create.out" "$T/<agent>/start.sh starts that agent only."
 hasnt "$START_TEMPLATE" 'skills/' && hasnt "$START_TEMPLATE" '.cc-switch' && hasnt "$START_TEMPLATE" 'CLAUDE_SKILL_DIR'
 check 'it names no skill folder' test $? = 0
@@ -252,8 +253,8 @@ run_team noproof "$T" -- start --all
 check 'it fails' rc_is 1
 check 'the check names the missing proof' has "$OUT/noproof.out" 'no ownership proof stored'
 check 'nothing was started' has "$OUT/noproof.out" 'nothing was started'
-check 'no pid file was written' test ! -e "$T/assistant/agent.pid"
-store_proof shop assistant; store_proof shop supervisor
+check 'no pid file was written' test ! -e "$T/shop/agent.pid"
+store_proof shop shop; store_proof shop supervisor
 
 scenario 'check passes and starts nothing'
 : > "$STANDIN_RECORD"
@@ -265,11 +266,19 @@ check 'it lists buzz-acp and buzz' test "$(grep -c -E '^  ok +(buzz-acp|buzz) ' 
 check 'it names the project folder and why' has "$OUT/check.out" "$TD/ws/shop (the current folder)"
 check 'it checks the channel supervisor'"'"'s restricted runtime' has "$OUT/check.out" 'runtime/claude-agent-acp (restricted tools)'
 check 'it checks the workspace agent'"'"'s stock adapter' has "$OUT/check.out" "$BIN/claude-agent-acp"
-check 'it says whom each agent answers: the workspace agent its owner and channel supervisor, the channel supervisor anyone' test "$(grep -c -E '^  ok +answers +(the owner and Shop Supervisor \(supervisor of shop\)|anyone in its channel)' "$OUT/check.out")" = 2
+check 'it says whom each agent answers: the workspace agent its owner and channel supervisor, the channel supervisor anyone' test "$(grep -c -E '^  ok +answers +(the owner and Shop Supervisor of shop|anyone in its channel)' "$OUT/check.out")" = 2
 check 'the launcher checked both agents' test "$(grep -c '^call: --check --backend claude$' "$STANDIN_RECORD")" = 2
-check 'no agent runs' test ! -e "$T/assistant/agent.pid" -a ! -e "$T/supervisor/agent.pid"
+check 'no agent runs' test ! -e "$T/shop/agent.pid" -a ! -e "$T/supervisor/agent.pid"
 run_team check-v "$T" -- check --verbose
 check '--verbose shows the launcher output' has "$OUT/check-v.out" 'stand-in launcher: check passed'
+check 'the check names each agent by its display name, with no role word' test "$(grep -c -e '^Shop: claude' -e '^Shop Supervisor: claude' "$OUT/check.out")$(grep -c -e '(supervisor)' -e '(agent)' -e '(assistant)' "$OUT/check.out")" = 20
+run_team check-name "$T" -- check shop
+run_team check-agent "$T" -- check agent
+run_team check-first "$T" -- shop --check
+check 'an agent is named by its folder; the workspace agent also by agent, and first on the line' test "$(grep -c '^Shop: ' "$OUT/check-name.out")$(grep -c '^Shop Supervisor: ' "$OUT/check-name.out")$(grep -c '^Shop: ' "$OUT/check-agent.out")$(grep -c '^Shop: ' "$OUT/check-first.out")" = 1011
+run_team check-old-name "$T" -- check assistant
+run_team check-old-opt "$T" -- start --assistant-model opus
+check 'the name assistant and the --assistant-* options are refused, with the new spellings' test "$(grep -c 'named after its folder, shop, or agent' "$OUT/check-old-name.out")$(grep -c 'since 4.0.0 it is --agent-model' "$OUT/check-old-opt.out")" = 11
 
 scenario 'check names what is missing'
 mkdir -p "$TD/nobin"
@@ -284,13 +293,13 @@ check 'a launcher refusal fails the check' rc_is 1
 check 'and its reason is shown' has "$OUT/check-signin.out" 'not signed in by subscription'
 run_team start-signin "$T" STANDIN_CHECK_FAIL=yes -- start --all
 check 'start stops on a failed check' has "$OUT/start-signin.out" 'the check failed; nothing was started'
-check 'and starts nothing' test ! -e "$T/assistant/agent.pid"
+check 'and starts nothing' test ! -e "$T/shop/agent.pid"
 
 scenario 'start without a terminal starts every agent on its saved provider and model'
 : > "$STANDIN_RECORD"
 run_team start "$T" -- start
 check 'it succeeds' rc_is 0
-check 'the workspace agent runs' alive "$T/assistant"
+check 'the workspace agent runs' alive "$T/shop"
 check 'the channel supervisor runs' alive "$T/supervisor"
 check 'both were started on claude' test "$(grep -c '^call: --run --backend claude$' "$STANDIN_RECORD")" = 2
 last_call '--run' > "$OUT/run-sup.rec"
@@ -301,13 +310,14 @@ check 'and the folder it was run from as the project folder' has "$OUT/run-sup.r
 check 'a stray exported key did not reach it' has "$OUT/run-sup.rec" 'inherited-key: no'
 check 'the channel supervisor got its own runtime' has "$OUT/run-sup.rec" "BUZZ_ACP_AGENT_COMMAND=$T/supervisor/runtime/claude-agent-acp"
 check 'and its subscription rules' has "$OUT/run-sup.rec" "BUZZ_ACP_CONFIG=$T/supervisor/subscriptions.toml"
-call_for "$T/assistant" > "$OUT/run-ws.rec"
+call_for "$T/shop" > "$OUT/run-ws.rec"
 check 'the workspace agent got neither' test "$(grep -c -e 'BUZZ_ACP_AGENT_COMMAND=unset' -e 'BUZZ_ACP_CONFIG=unset' "$OUT/run-ws.rec")" = 2
 check 'the protocol default is passed' has "$OUT/run-sup.rec" 'CLAUDE_AGENT_ACP_PROTOCOL=v1'
 check 'the pid file records the provider' test "$(sed -n '3p' "$T/supervisor/agent.pid")" = claude
 run_team status "$T" -- status
 check 'status shows both running' test "$(grep -c 'running on claude' "$OUT/status.out")" = 2
-check 'and whom each answers' test "$(grep -c -e '^    answers the owner and Shop Supervisor (supervisor of shop)$' -e '^    answers anyone in its channel' "$OUT/status.out")" = 2
+check 'status names each agent by its folder and display name, with its job' test "$(grep -c -x -e '  shop: Shop, the workspace agent' -e '  supervisor: Shop Supervisor, the channel supervisor' "$OUT/status.out")" = 2
+check 'and whom each answers' test "$(grep -c -e '^    answers the owner and Shop Supervisor of shop$' -e '^    answers anyone in its channel' "$OUT/status.out")" = 2
 run_skill skill-status -- status shop
 check 'the skill sees the same agents running' test "$(grep -c 'running on claude, PID' "$OUT/skill-status.out")" = 2
 run_team start-again "$T" -- start
@@ -317,17 +327,17 @@ check 'switching a running agent is refused' has "$OUT/switch-running.out" 'not 
 P_SUP=$(pid_of "$T/supervisor")
 run_team stop-one "$T" -- stop supervisor
 check 'stop of one agent stops it' has "$OUT/stop-one.out" "supervisor: stopped (PID $P_SUP)"
-check 'the other keeps running' alive "$T/assistant"
-run_team stop "$T" -- stop
-check 'stop stops the rest' has "$OUT/stop.out" 'assistant: stopped'
-check 'nothing runs' test ! -e "$T/assistant/agent.pid" -a ! -e "$T/supervisor/agent.pid"
+check 'the other keeps running' alive "$T/shop"
+run_team stop "$T" -- stop agent
+check 'stop agent stops the workspace agent' has "$OUT/stop.out" 'shop: stopped'
+check 'nothing runs' test ! -e "$T/shop/agent.pid" -a ! -e "$T/supervisor/agent.pid"
 
 scenario 'provider and model per agent, by option'
 : > "$STANDIN_RECORD"
-run_team opts "$T" -- start --assistant-backend codex --supervisor-model claude-opus-5-5
+run_team opts "$T" -- start --agent-backend codex --supervisor-model claude-opus-5-5
 check 'it succeeds' rc_is 0
 check 'the workspace agent was started on codex' grep -q '^call: --run --backend codex$' "$STANDIN_RECORD"
-call_for "$T/assistant" > "$OUT/opts-ws.rec"
+call_for "$T/shop" > "$OUT/opts-ws.rec"
 check 'in the stock adapter'"'"'s workspace-write mode' grep -qx 'INITIAL_AGENT_MODE=agent' "$OUT/opts-ws.rec"
 check 'the supervisor on claude with the chosen model' grep -q '^call: --run --backend claude --model claude-opus-5-5$' "$STANDIN_RECORD"
 check 'the pid file records the model' test "$(sed -n '4p' "$T/supervisor/agent.pid")" = claude-opus-5-5
@@ -347,7 +357,7 @@ check 'an agent this team does not have is refused' has "$OUT/absent-agent.out" 
 scenario 'in a terminal: which agents, then provider and model of each'
 mkdir -p "$ROOT/models"
 printf '# retrieved 2026-11-21T00:00:00Z stand-in\ndefault\tDefault (recommended)\nopus\tOpus 5.5\nsonnet\tSonnet 5.5\n' > "$ROOT/models/claude-supervisor.list"
-printf '# retrieved 2026-11-21T00:00:00Z stand-in\ngpt-example-sol\tExample Sol\ngpt-example-astra\tExample Astra\n' > "$ROOT/models/codex-assistant.list"
+printf '# retrieved 2026-11-21T00:00:00Z stand-in\ngpt-example-sol\tExample Sol\ngpt-example-astra\tExample Astra\n' > "$ROOT/models/codex-agent.list"
 : > "$STANDIN_RECORD"
 # all agents; workspace agent: codex, model number 2; channel supervisor: keep claude, model number 1 (opus: the
 # list's first entry, default, is not offered)
@@ -355,6 +365,7 @@ ask_team ask-all "$T" '\n2\n2\n\n1\n\n' -- start
 check 'it succeeds' rc_is 0
 check 'the Claude menu leaves out default, which Claude Code refuses as a model name' hasnt "$OUT/ask-all.out" 'Default (recommended)'
 check 'it asked which agents' has "$OUT/ask-all.out" 'Start which agents?'
+check 'the menus name each agent by its display name alone' test "$(grep -c -e '\[1\] Shop$' -e '\[2\] Shop Supervisor$' -e 'Shop: provider?' -e 'Shop Supervisor: provider?' "$OUT/ask-all.out")$(grep -c -e '(agent)' -e '(supervisor)' -e '(assistant)' "$OUT/ask-all.out")" = 40
 check 'it asked each provider' test "$(grep -c ': provider?' "$OUT/ask-all.out")" = 2
 check 'it asked each model' test "$(grep -c ': model on ' "$OUT/ask-all.out")" = 2
 check 'it asked the effort of the Claude agent, and not where the list offers no level' test "$(grep -c ': reasoning effort on ' "$OUT/ask-all.out")" = 1
@@ -365,14 +376,14 @@ stop_all "$T"
 : > "$STANDIN_RECORD"
 # only agent 2 (the supervisor); Enter keeps its provider and its model
 ask_team ask-one "$T" '2\n\n\n\n' -- start
-check 'choosing one agent starts only that one' test -e "$T/supervisor/agent.pid" -a ! -e "$T/assistant/agent.pid"
+check 'choosing one agent starts only that one' test -e "$T/supervisor/agent.pid" -a ! -e "$T/shop/agent.pid"
 check 'Enter keeps the saved provider and model' grep -q '^call: --run --backend claude$' "$STANDIN_RECORD"
 stop_all "$T"
 ask_team ask-bad "$T" '2\n\n9\n' -- start
 check 'a model number outside the list is refused' has "$OUT/ask-bad.out" 'no model number 9'
 check 'and nothing starts' test ! -e "$T/supervisor/agent.pid"
 ask_team ask-notlisted "$T" '2\n\nhaiku\n' -- start
-check 'a model the retrieved list does not offer is refused' has "$OUT/ask-notlisted.out" 'is not a claude model offered for the supervisor'
+check 'a model the retrieved list does not offer is refused' has "$OUT/ask-notlisted.out" 'is not a claude model offered for Shop Supervisor'
 : > "$STANDIN_RECORD"
 run_team yes "$T" TEAM_SH_ASK=1 -- start --yes
 check '--yes asks nothing' hasnt "$OUT/yes.out" 'provider?'
@@ -385,15 +396,15 @@ run_agent own-sup "$T" supervisor TEAM_SH_ASK=1 -- --yes
 check 'it succeeds' rc_is 0
 check '--yes asks nothing, in a terminal too' test "$(grep -c -e 'provider?' -e 'model on ' -e 'reasoning effort on ' -e 'Start which agents?' "$OUT/own-sup.out")" = 0
 check 'the channel supervisor runs' alive "$T/supervisor"
-check 'the workspace agent was not started' test ! -e "$T/assistant/agent.pid"
+check 'the workspace agent was not started' test ! -e "$T/shop/agent.pid"
 check 'one agent was started, on its saved provider and model' test "$(grep -c '^call: --run' "$STANDIN_RECORD")$(grep -c '^call: --run --backend claude$' "$STANDIN_RECORD")" = 11
 last_call '--run' > "$OUT/own-sup.rec"
 check 'in the folder the command was run from' has "$OUT/own-sup.rec" "RUN_BUZZ_ACP_WORKDIR=$TD/ws/shop"
 check 'on its own restricted runtime, as a start by the team command is' test "$(grep -c "^BUZZ_ACP_AGENT_COMMAND=$T/supervisor/runtime/claude-agent-acp\$" "$OUT/own-sup.rec")$(sed -n '7p' "$T/supervisor/agent.pid")" = 1runtime
 P_SUP=$(pid_of "$T/supervisor")
-run_agent own-partner "$T" assistant --
+run_agent own-partner "$T" shop --
 check 'without a terminal it asks nothing either' test "$RC$(grep -c -e 'provider?' -e 'model on ' "$OUT/own-partner.out")" = 00
-check 'the workspace agent starts from its own folder' alive "$T/assistant"
+check 'the workspace agent starts from its own folder' alive "$T/shop"
 check 'and the supervisor was left running, not started again' test "$(pid_of "$T/supervisor")" = "$P_SUP"
 run_team own-status "$T" -- status
 check 'status names each start command' test "$(grep -c "start it alone: $T/.*/start.sh" "$OUT/own-status.out")" = 2
@@ -401,8 +412,8 @@ stop_all "$T"
 : > "$STANDIN_RECORD"
 # in a terminal: this agent's provider (Enter), model (2: sonnet, of opus and sonnet) and effort (Enter)
 ask_agent own-ask "$T" supervisor '\n2\n\n' --
-check 'in a terminal it asks this agent'"'"'s provider, model and effort' test "$RC$(grep -c -e 'Supervisor (supervisor): provider?' -e 'Supervisor (supervisor): model on claude?' -e 'Supervisor (supervisor): reasoning effort on claude?' "$OUT/own-ask.out")" = 03
-check 'and neither which agents nor another agent' test "$(grep -c -e 'Start which agents?' -e '(assistant):' "$OUT/own-ask.out")" = 0
+check 'in a terminal it asks this agent'"'"'s provider, model and effort' test "$RC$(grep -c -e 'Shop Supervisor: provider?' -e 'Shop Supervisor: model on claude?' -e 'Shop Supervisor: reasoning effort on claude?' "$OUT/own-ask.out")" = 03
+check 'and neither which agents nor another agent' test "$(grep -c -e 'Start which agents?' -e 'Shop: ' "$OUT/own-ask.out")" = 0
 check 'the chosen model starts that agent only' test "$(grep -c '^call: --run' "$STANDIN_RECORD")$(grep -c '^call: --run --backend claude --model sonnet$' "$STANDIN_RECORD")" = 11
 stop_all "$T"
 : > "$STANDIN_RECORD"
@@ -414,14 +425,14 @@ stop_all "$T"
 run_agent own-check "$T" supervisor -- --check
 check '--check checks that agent and starts nothing' test "$RC$(grep -c 'Check passed.' "$OUT/own-check.out")$(grep -c '^call: --run' "$STANDIN_RECORD")" = 010
 check 'only that agent was checked' test "$(grep -c '^call: --check' "$STANDIN_RECORD")" = 1
-for extra in assistant --all '--assistant-model opus' stop; do
+for extra in shop --all '--agent-model opus' stop; do
     # shellcheck disable=SC2086
     run_agent own-extra "$T" supervisor -- $extra
-    check "it takes no other agent or team option: $extra" test "$RC$(grep -c 'This command starts the supervisor only' "$OUT/own-extra.out")" = 11
+    check "it takes no other agent or team option: $extra" test "$RC$(grep -c 'This command starts Shop Supervisor only' "$OUT/own-extra.out")" = 11
 done
-check 'and nothing was started' test ! -e "$T/supervisor/agent.pid" -a ! -e "$T/assistant/agent.pid"
+check 'and nothing was started' test ! -e "$T/supervisor/agent.pid" -a ! -e "$T/shop/agent.pid"
 run_agent own-help "$T" supervisor -- --help
-check 'help names the agent and how to stop it' test "$(grep -c -e 'start the supervisor of this folder' -e "$T/team.sh stop supervisor" "$OUT/own-help.out")" = 2
+check 'help names the agent and how to stop it' test "$(grep -c -e 'start Shop Supervisor, the agent of this folder' -e "$T/team.sh stop supervisor" "$OUT/own-help.out")" = 2
 cp "$T/supervisor/start.sh" "$TD/elsewhere/start.sh"
 RC=0; (cd -- "$RUN_CWD" && /bin/bash "$TD/elsewhere/start.sh") > "$OUT/own-moved.out" 2>&1 < /dev/null || RC=$?
 check 'a copy outside an agent folder starts nothing' test "$RC$(grep -c 'must stay in its agent folder' "$OUT/own-moved.out")" = 11
@@ -436,13 +447,13 @@ if [ -f "$LAUNCHER_SRC" ]; then
     check 'and the launcher'"'"'s' test "$(fn_body "$TEMPLATE" credential_name | sed 1d)" = "$(fn_body "$LAUNCHER_SRC" credential_name | sed 1d)"
 fi
 # The workspace agent runs the stock adapter: its kept list starts as the channel supervisor's above.
-KEPT=$ROOT/models/claude-assistant.list
+KEPT=$ROOT/models/claude-agent.list
 cp -p "$ROOT/models/claude-supervisor.list" "$KEPT"
 cp -p "$KEPT" "$TD/kept.list"
 echo list > "$ACP_MODE"
 : > "$STANDIN_RECORD"
 # the workspace agent: provider Enter; model 3 of the list retrieved now (opus, sonnet, claude-fable-5-2); effort Enter
-ask_agent now-list "$T" assistant '\n3\n\n' ANTHROPIC_API_KEY=example-not-a-key OPENAI_API_KEY=example-not-a-key CLAUDE_CODE_EXECUTABLE=/stray/claude --
+ask_agent now-list "$T" shop '\n3\n\n' ANTHROPIC_API_KEY=example-not-a-key OPENAI_API_KEY=example-not-a-key CLAUDE_CODE_EXECUTABLE=/stray/claude --
 check 'it succeeds' rc_is 0
 check 'it says it asks the provider, with the bound' has "$OUT/now-list.out" 'asking claude which models it offers now (at most 3 s)'
 check 'the menu offers a model the kept list did not have' has "$OUT/now-list.out" '[3] claude-fable-5-2'
@@ -451,7 +462,7 @@ check 'an ID with a space or a tab is left out' test "$(grep -c -e 'bad id' -e '
 check 'the agent starts on the model chosen from it' grep -q '^call: --run --backend claude --model claude-fable-5-2$' "$STANDIN_RECORD"
 check 'the list is kept where the earlier one was, mode 600' test "$(grep -c 'claude-fable-5-2' "$KEPT")$(mode_of "$KEPT")" = 1600
 check 'with where it came from' test "$(sed -n '1p' "$KEPT" | grep -c "^# retrieved 20.*Z from $BIN/claude-agent-acp$")" = 1
-check 'nothing is left beside it' test -z "$(ls -A "$ROOT/models" | grep -v -e '^claude-assistant.list$' -e '^claude-supervisor.list$' -e '^codex-assistant.list$')"
+check 'nothing is left beside it' test -z "$(ls -A "$ROOT/models" | grep -v -e '^claude-agent.list$' -e '^claude-supervisor.list$' -e '^codex-agent.list$')"
 check 'the adapter was asked once, with no credential, agent key or stray executable' test "$(cat "$ACP_CALLS")" = 'call claude mode=list credential=no key=no exe=unset'
 check 'no adapter is left running' test -z "$(pgrep -f "$BIN/acp-models-stub.py")"
 stop_all "$T"
@@ -464,40 +475,40 @@ stop_all "$T"
 rm -f "$ACP_CALLS"
 : > "$STANDIN_RECORD"
 run_agent now-yes "$T" supervisor TEAM_SH_ASK=1 -- --yes
-run_team now-noterm "$T" -- start assistant
+run_team now-noterm "$T" -- start agent
 check 'a start that asks nothing retrieves nothing' test "$RC$(grep -c '^call: --run' "$STANDIN_RECORD")$(test -e "$ACP_CALLS"; echo $?)" = 021
 stop_all "$T"
 # a model given by option that the kept list does not offer: the provider is asked before a refusal
 cp -p "$TD/kept.list" "$KEPT"
 : > "$STANDIN_RECORD"
-run_agent now-miss "$T" assistant -- --model claude-fable-5-2
+run_agent now-miss "$T" shop -- --model claude-fable-5-2
 check 'a newer model than the kept list is looked up, then started' test "$RC$(grep -c '^call: --run --backend claude --model claude-fable-5-2$' "$STANDIN_RECORD")$(grep -c 'asking claude which models' "$OUT/now-miss.out")" = 011
 stop_all "$T"
-run_agent now-miss2 "$T" assistant -- --model claude-haiku-5-5
-check 'a model the provider does not offer now is still refused' test "$RC$(grep -c 'is not a claude model offered for the assistant' "$OUT/now-miss2.out")" = 11
+run_agent now-miss2 "$T" shop -- --model claude-haiku-5-5
+check 'a model the provider does not offer now is still refused' test "$RC$(grep -c 'is not a claude model offered for Shop' "$OUT/now-miss2.out")" = 11
 # the list cannot be retrieved: the reason, then the kept list
 cp -p "$TD/kept.list" "$KEPT"
 echo error > "$ACP_MODE"
 : > "$STANDIN_RECORD"
-ask_agent now-error "$T" assistant '\n2\n\n' --
+ask_agent now-error "$T" shop '\n2\n\n' --
 check 'a sign-in error is named' has "$OUT/now-error.out" 'not retrieved: the adapter could not open a session: not signed in'
 check 'the kept list is offered, with its date' test "$(grep -c -e 'the list kept from 2026-11-21T00:00:00Z is used instead' -e '\[2\] sonnet' "$OUT/now-error.out")" = 2
 check 'and the agent starts on the choice' test "$RC$(grep -c '^call: --run --backend claude --model sonnet$' "$STANDIN_RECORD")" = 01
 check 'the kept list is unchanged' cmp -s "$TD/kept.list" "$KEPT"
 stop_all "$T"
 echo hang > "$ACP_MODE"
-T0=$(date +%s); ask_agent now-hang "$T" assistant '\n\n\n' --; T1=$(date +%s)
+T0=$(date +%s); ask_agent now-hang "$T" shop '\n\n\n' --; T1=$(date +%s)
 check 'an adapter that does not answer is given up at the bound' test "$RC$(grep -c 'not retrieved: the adapter did not answer within 3 s' "$OUT/now-hang.out")" = 01
 check 'within a few seconds, and it is stopped' test $((T1 - T0)) -le 20 -a -z "$(pgrep -f "$BIN/acp-models-stub.py")"
 check 'no half-written list is left' test -z "$(ls -A "$ROOT/models" | grep -e '^\.new-list')"
 stop_all "$T"
 echo list > "$ACP_MODE"
 mv "$T/acp-models.py" "$TD/acp-models.py.keep"
-ask_agent now-nohelper "$T" assistant '\n\n\n' --
+ask_agent now-nohelper "$T" shop '\n\n\n' --
 check 'a team folder without the helper says how to add it, and starts on the kept choices' test "$RC$(grep -c 'has no acp-models.py (add it with the skill' "$OUT/now-nohelper.out")" = 01
 stop_all "$T"
 mv "$TD/acp-models.py.keep" "$T/acp-models.py"
-ask_agent now-nopython "$T" assistant '\n\n\n' AGENT_TEAM_PYTHON=none --
+ask_agent now-nopython "$T" shop '\n\n\n' AGENT_TEAM_PYTHON=none --
 check 'without python3 the kept list is used' test "$RC$(grep -c 'python3 is not on PATH' "$OUT/now-nopython.out")" = 01
 stop_all "$T"
 rm -f "$ACP_MODE" "$ACP_CALLS"
@@ -514,9 +525,9 @@ check 'and typed at the model question' test "$RC$(grep -c '"default" names no m
 cp -p "$T/supervisor/agent.conf" "$TD/agent.conf.keep"
 sed 's/^model_claude=.*/model_claude=default/' "$TD/agent.conf.keep" > "$T/supervisor/agent.conf"
 run_agent default-saved "$T" supervisor --
-check 'a saved default is refused, naming the fix' test "$RC$(grep -c 'the saved model of the supervisor is "default"' "$OUT/default-saved.out")$(grep -c 'agent-team.sh upgrade <team> --supervisor-model ID' "$OUT/default-saved.out")" = 111
+check 'a saved default is refused, naming the fix' test "$RC$(grep -c 'the saved model of Shop Supervisor is "default"' "$OUT/default-saved.out")$(grep -c 'agent-team.sh upgrade <team> --supervisor-model ID' "$OUT/default-saved.out")" = 111
 run_team default-saved-check "$T" -- check supervisor
-check 'and check says so too' test "$RC$(grep -c 'the saved model of the supervisor is "default"' "$OUT/default-saved-check.out")" = 11
+check 'and check says so too' test "$RC$(grep -c 'the saved model of Shop Supervisor is "default"' "$OUT/default-saved-check.out")" = 11
 run_agent default-saved-named "$T" supervisor -- --model claude-opus-5-5
 check 'a named model for the run starts it all the same' test "$RC$(grep -c '^call: --run --backend claude --model claude-opus-5-5$' "$STANDIN_RECORD")" = 01
 stop_all "$T"
@@ -555,7 +566,7 @@ for from in "$T" "$T/supervisor" "$ROOT"; do
 done
 check 'the launcher never got a folder around the keys' test "$(grep -c "^RUN_BUZZ_ACP_WORKDIR=$TD/ws/shop\$" "$STANDIN_RECORD")" = 3
 RUN_CWD=$TD/ws/shop
-for bad in "$T" "$T/assistant" "$ROOT" "$TD"; do
+for bad in "$T" "$T/shop" "$ROOT" "$TD"; do
     run_team ws-bad "$T" -- start supervisor --workspace "$bad"
     check "--workspace ${bad#"$TOP"/} is refused" has "$OUT/ws-bad.out" 'cannot be the project folder'
 done
@@ -563,12 +574,12 @@ check 'and nothing started' test ! -e "$T/supervisor/agent.pid"
 run_team ws-none "$T" -- start supervisor --workspace "$TD/ws/nowhere"
 check 'a --workspace that is not a folder is refused' has "$OUT/ws-none.out" 'not a folder'
 : > "$STANDIN_RECORD"
-run_team ws-a "$T" -- start assistant
+run_team ws-a "$T" -- start shop
 check 'the workspace agent starts in the current folder' rc_is 0
-check 'its pid file records the folder' test "$(sed -n '5p' "$T/assistant/agent.pid")" = "$TD/ws/shop"
+check 'its pid file records the folder' test "$(sed -n '5p' "$T/shop/agent.pid")" = "$TD/ws/shop"
 RUN_CWD=$TD/ws/moved-shop
 run_team ws-split "$T" -- start supervisor
-check 'the other agent cannot start in another folder' has "$OUT/ws-split.out" "assistant is running in $TD/ws/shop, not in $TD/ws/moved-shop"
+check 'the other agent cannot start in another folder' has "$OUT/ws-split.out" "shop is running in $TD/ws/shop, not in $TD/ws/moved-shop"
 check 'and is not started' test ! -e "$T/supervisor/agent.pid"
 run_team ws-join "$T" -- start supervisor --workspace "$TD/ws/shop"
 check 'it starts when given the same folder' rc_is 0
@@ -593,6 +604,9 @@ check 'with the key file of the new folder' has "$OUT/moved-run.rec" "RUN_BUZZ_A
 check 'and the prompt of the new folder' has "$OUT/moved-run.rec" "BUZZ_ACP_SYSTEM_PROMPT_FILE=$M/supervisor/prompt.md"
 check 'and the folder it was run from as the project folder' has "$OUT/moved-run.rec" "RUN_BUZZ_ACP_WORKDIR=$TD/ws/moved-shop"
 check 'the original folder was not started' test ! -e "$T/supervisor/agent.pid"
+run_team moved-start-ws "$M" -- start shop
+last_call '--run' > "$OUT/moved-run-ws.rec"
+check 'and the workspace agent starts from its folder in the copy, which team.conf names' test "$RC$(grep -c -x -e "cwd: $M/shop" -e "RUN_BUZZ_ACP_KEY_FILE=$M/shop/identity.key" -e "BUZZ_ACP_SYSTEM_PROMPT_FILE=$M/shop/prompt.md" "$OUT/moved-run-ws.rec")" = 03
 run_team moved-ws-running "$M" -- workspace "$TD/ws/moved-shop"
 check 'the saved project folder cannot change while an agent runs' has "$OUT/moved-ws-running.out" 'is running; stop it first'
 stop_all "$M"
@@ -634,6 +648,7 @@ else
     check 'the real launcher accepts the moved team' rc_is 0
     check 'it is the launcher that was checked with' has "$OUT/real-check.out" "$REAL"
     check 'it read the key file of the new folder' has "$OUT/real-check.out" "key file $M/supervisor/identity.key"
+    check 'and the workspace agent'"'"'s, in the folder named after the team' has "$OUT/real-check.out" "key file $M/shop/identity.key"
     check 'and the prompt of the new folder' has "$OUT/real-check.out" "file $M/supervisor/prompt.md"
     check 'and the saved project folder' has "$OUT/real-check.out" "$TD/ws/moved-shop"
     check 'the channel supervisor runs the runtime of the new folder' has "$OUT/real-check.out" "$M/supervisor/runtime/claude-agent-acp"
@@ -651,7 +666,7 @@ RUN_CWD=$TD/ws/shop
 R=$ROOT/shop-reviewer
 printf '# retrieved 2026-11-21T00:00:00Z stand-in\ngpt-example-sol\tExample Sol\ngpt-example-astra\tExample Astra\n' > "$ROOT/models/codex-reviewer.list"
 run_skill rv-bad -- create --workspace "$TD/ws/shop" --channel "$CHANNEL" --name shop-reviewer --roles reviewer --reviewer-backend codex --reviewer-model gpt-not-offered
-check 'a model the list does not offer is refused' has "$OUT/rv-bad.out" 'gpt-not-offered is not a codex model offered for the reviewer'
+check 'a model the list does not offer is refused' has "$OUT/rv-bad.out" 'gpt-not-offered is not a codex model offered for the independent reviewer'
 check 'and no reviewer folder is left' test ! -e "$R/reviewer"
 run_skill rv -- create --workspace "$TD/ws/shop" --channel "$CHANNEL" --name shop-reviewer --roles reviewer --reviewer-name 'Shop Reviewer' --reviewer-backend codex --reviewer-model gpt-example-astra
 check 'create succeeds' rc_is 0
@@ -678,7 +693,7 @@ check 'before that, the channel supervisor does not know the reviewer' hasnt "$T
 run_skill rv-refresh -- upgrade shop
 check 'upgrading the first team refreshes the channel supervisor'"'"'s rules' has "$OUT/rv-refresh.out" 'subscriptions.toml'
 check 'now the channel supervisor takes no turn for the reviewer' has "$T/supervisor/subscriptions.toml" "$RV_KEY"
-check 'and the workspace agent still answers its own channel supervisor only, not the reviewer' test "$(grep -c "^BUZZ_ACP_RESPOND_TO_ALLOWLIST=$(sed -n 's/^pubkey=//p' "$T/supervisor/agent.conf")\$" "$T/assistant/.env.buzz-acp.local")$(grep -c "$RV_KEY" "$T/assistant/.env.buzz-acp.local")" = 10
+check 'and the workspace agent still answers its own channel supervisor only, not the reviewer' test "$(grep -c "^BUZZ_ACP_RESPOND_TO_ALLOWLIST=$(sed -n 's/^pubkey=//p' "$T/supervisor/agent.conf")\$" "$T/shop/.env.buzz-acp.local")$(grep -c "$RV_KEY" "$T/shop/.env.buzz-acp.local")" = 10
 check 'the first team got no reviewer folder' test ! -e "$T/reviewer"
 run_skill rv-status -- status shop-reviewer
 check 'status lists the reviewer' has "$OUT/rv-status.out" 'reviewer: Shop Reviewer'
@@ -693,7 +708,7 @@ store_proof shop-reviewer reviewer
 run_team rv-check "$R" -- check
 check 'its check passes' rc_is 0
 check 'the check covers its restricted runtime' has "$OUT/rv-check.out" 'runtime/codex-acp (restricted tools)'
-check 'and names it' has "$OUT/rv-check.out" 'Shop Reviewer (reviewer): codex, model gpt-example-astra'
+check 'and names it' has "$OUT/rv-check.out" 'Shop Reviewer: codex, model gpt-example-astra'
 run_team rv-start "$R" -- start
 check 'it starts' rc_is 0
 check 'on codex, with the saved model left to the launcher' grep -q '^call: --run --backend codex$' "$STANDIN_RECORD"
@@ -738,7 +753,7 @@ run_team ef-status "$T" -- status
 check 'status shows the level of the run' has "$OUT/ef-status.out" 'reasoning effort high'
 stop_all "$T"
 run_team ef-bad "$T" -- start supervisor --effort ultra
-check 'a level Claude does not offer is refused' has "$OUT/ef-bad.out" 'ultra is not a reasoning effort offered for the supervisor on claude'
+check 'a level Claude does not offer is refused' has "$OUT/ef-bad.out" 'ultra is not a reasoning effort offered for Shop Supervisor on claude'
 check 'and nothing starts' test ! -e "$T/supervisor/agent.pid"
 : > "$STANDIN_RECORD"
 run_team ef-codex "$T" -- start supervisor --backend codex --model gpt-example-sol --effort high
@@ -756,14 +771,14 @@ run_team ef-codex-both "$T" -- start supervisor --backend codex --model 'gpt-exa
 check '--effort wins over the level in the model name' grep -q '^call: --run --backend codex --model gpt-example-sol\[high\]$' "$STANDIN_RECORD"
 stop_all "$T"
 run_team ef-codex-nolevel "$T" -- start supervisor --backend codex --model gpt-example-astra --effort high
-check 'a level the list does not offer for that model is refused' has "$OUT/ef-codex-nolevel.out" 'high is not a reasoning effort offered for the supervisor on codex with gpt-example-astra'
+check 'a level the list does not offer for that model is refused' has "$OUT/ef-codex-nolevel.out" 'high is not a reasoning effort offered for Shop Supervisor on codex with gpt-example-astra'
 run_team ef-codex-nomodel "$T" -- start supervisor --backend codex --effort high
-check 'on Codex a level without a model is refused' has "$OUT/ef-codex-nomodel.out" 'the supervisor needs a model too'
+check 'on Codex a level without a model is refused' has "$OUT/ef-codex-nomodel.out" 'Shop Supervisor needs a model too'
 check 'and nothing starts' test ! -e "$T/supervisor/agent.pid"
 : > "$STANDIN_RECORD"
 # only the supervisor; keep its provider and model; effort number 3 (high)
 ask_team ef-ask "$T" '2\n\n\n3\n' -- start
-check 'in a terminal the effort is the third question' has "$OUT/ef-ask.out" 'Shop Supervisor (supervisor): reasoning effort on claude?'
+check 'in a terminal the effort is the third question' has "$OUT/ef-ask.out" 'Shop Supervisor: reasoning effort on claude?'
 check 'the picked level is used' grep -q '^CLAUDE_CODE_EFFORT_LEVEL=high$' "$STANDIN_RECORD"
 stop_all "$T"
 if [ -n "${AGENT_TEAM_REAL_LAUNCHER:-}" ]; then
@@ -782,7 +797,7 @@ check 'the plan names the change' has "$OUT/ef-up-dry.out" 'reasoning effort (cl
 check 'a dry run saves nothing' hasnt "$T/supervisor/agent.conf" 'effort_'
 run_skill ef-up -- upgrade shop --supervisor-effort xhigh
 check 'upgrade saves it in the agent record' grep -qx 'effort_claude=xhigh' "$T/supervisor/agent.conf"
-check 'the other agent has none' hasnt "$T/assistant/agent.conf" 'effort_'
+check 'the other agent has none' hasnt "$T/shop/agent.conf" 'effort_'
 run_skill ef-up2 -- upgrade shop
 check 'a second upgrade keeps it and changes nothing' test "$(grep -c 'up to date; nothing was changed' "$OUT/ef-up2.out")" = 1 -a "$(grep -cx 'effort_claude=xhigh' "$T/supervisor/agent.conf")" = 1
 run_skill ef-skill-status -- status shop
@@ -838,16 +853,16 @@ check 'and no wall programs' test ! -e "$T/wall"
 check 'create put the sandbox settings into the project folder, exactly the ones the helper shows' test "$(python3 -I "$HELPER" show)" = "$(cat "$WS_FILE")"
 check 'and said so before the project record' test "$(grep -n -e '^Project folder settings: added: ' -e '^Shared project record: ' "$OUT/create.out" | cut -d: -f2 | tr '\n' ' ')" = 'Project folder settings Shared project record '
 check 'the file names the two blocks, the sandbox and the buzz command' test "$(grep -c -e '"blockReadsOutsideWorkingDirectories": true' -e '"blockWritesOutsideWorkingDirectories": true' -e '"enabled": true' -e '"autoAllowBashIfSandboxed": true' -e '"buzz \*"' "$WS_FILE")" = 5
-check 'the workspace agent'"'"'s prompt carries the rule, and the channel supervisor'"'"'s does not' test "$(grep -c -e 'Stay inside the project folder' -e 'never to read or change a file outside the project folder' -e 'Give a buzz command only files that are inside the project folder' "$T/assistant/prompt.md")$(grep -c -e 'Stay inside the project folder' -e 'Give a buzz command only files' "$T/supervisor/prompt.md")" = 20
+check 'the workspace agent'"'"'s prompt carries the rule, and the channel supervisor'"'"'s does not' test "$(grep -c -e 'Stay inside the project folder' -e 'never to read or change a file outside the project folder' -e 'Give a buzz command only files that are inside the project folder' "$T/shop/prompt.md")$(grep -c -e 'Stay inside the project folder' -e 'Give a buzz command only files' "$T/supervisor/prompt.md")" = 20
 : > "$STANDIN_RECORD"
 run_team wl-start "$T" -- start
 check 'start succeeds' rc_is 0
-call_for "$T/assistant" > "$OUT/wl-ws.rec"; call_for "$T/supervisor" > "$OUT/wl-ch.rec"
+call_for "$T/shop" > "$OUT/wl-ws.rec"; call_for "$T/supervisor" > "$OUT/wl-ch.rec"
 check 'the workspace agent runs the stock adapter with nothing in front of it' has "$OUT/wl-ws.rec" 'BUZZ_ACP_AGENT_COMMAND=unset'
 check 'in the permission mode of its own settings file' has "$OUT/wl-ws.rec" 'BUZZ_ACP_PERMISSION_MODE=unset'
 check 'and with no Codex mode' has "$OUT/wl-ws.rec" 'INITIAL_AGENT_MODE=unset'
 check 'the channel supervisor runs its restricted runtime' has "$OUT/wl-ch.rec" "BUZZ_ACP_AGENT_COMMAND=$T/supervisor/runtime/claude-agent-acp"
-check 'the pid files record how each is held' test "$(sed -n '7p' "$T/assistant/agent.pid")" = settings -a "$(sed -n '7p' "$T/supervisor/agent.pid")" = runtime
+check 'the pid files record how each is held' test "$(sed -n '7p' "$T/shop/agent.pid")" = settings -a "$(sed -n '7p' "$T/supervisor/agent.pid")" = runtime
 check 'the check names the settings file' has "$OUT/wl-start.out" "the settings in $WS_FILE hold its file tools and shell to that folder"
 check 'and the channel supervisor'"'"'s runtime' has "$OUT/wl-start.out" 'its runtime reads only the project folder'
 check 'settings that are in place are not written again' hasnt "$OUT/wl-start.out" 'Project folder settings:'
@@ -856,45 +871,45 @@ check 'status shows both' test "$(grep -c 'held by the sandbox settings in its p
 stop_all "$T"
 # A project folder the team is new to gets the settings first.
 mkdir -p "$TD/ws/fresh"
-run_team wl-fresh-check "$T" -- check assistant --workspace "$TD/ws/fresh"
+run_team wl-fresh-check "$T" -- check shop --workspace "$TD/ws/fresh"
 check 'check says that a start writes them, and writes nothing itself' test "$RC$(grep -c "a start puts them into $TD/ws/fresh/.claude/settings.json first" "$OUT/wl-fresh-check.out")$([ -e "$TD/ws/fresh/.claude" ] && echo there)" = 01
-run_team wl-fresh "$T" -- start assistant --workspace "$TD/ws/fresh"
+run_team wl-fresh "$T" -- start shop --workspace "$TD/ws/fresh"
 check 'start writes them before its check, and says so' test "$RC$(grep -n -e '^Project folder settings: added: ' -e '^Check of team' "$OUT/wl-fresh.out" | cut -d: -f2 | cut -c1-5 | tr '\n' ' ')$(in_place "$TD/ws/fresh")" = '0Proje Check 0'
 stop_all "$T"
 # An existing settings file keeps everything else it holds.
 mkdir -p "$TD/ws/has/.claude"
 printf '{"env": {"KEPT": "1"}, "sandbox": {"enabled": false, "excludedCommands": ["docker *"]}}\n' > "$TD/ws/has/.claude/settings.json"
-run_team wl-has "$T" -- start assistant --workspace "$TD/ws/has"
+run_team wl-has "$T" -- start shop --workspace "$TD/ws/has"
 check 'an existing settings file is completed, with the earlier one kept beside it' test "$RC$(grep -c '^Project folder settings: completed: ' "$OUT/wl-has.out")$(grep -c -e '"KEPT": "1"' -e '"docker \*"' "$TD/ws/has/.claude/settings.json")$(ls "$TD/ws/has/.claude" | grep -c '^settings.json.bak-')$(in_place "$TD/ws/has")" = 01210
 stop_all "$T"
 # A settings file that cannot be completed stops the start and is left alone.
 mkdir -p "$TD/ws/bad/.claude"
 printf 'not json\n' > "$TD/ws/bad/.claude/settings.json"
-run_team wl-bad "$T" -- start assistant --workspace "$TD/ws/bad"
+run_team wl-bad "$T" -- start shop --workspace "$TD/ws/bad"
 check 'a settings file that is not JSON stops the start, with the reason' test "$(grep -c -e 'its sandbox settings could not be put into the project folder' -e 'cannot be read as JSON' -e 'the check failed; nothing was started' "$OUT/wl-bad.out")" = 3
-check 'the file is left as it was and nothing starts' test "$(cat "$TD/ws/bad/.claude/settings.json")$(ls "$TD/ws/bad/.claude" | wc -l | tr -d ' ')$([ -e "$T/assistant/agent.pid" ] && echo started)" = 'not json1'
+check 'the file is left as it was and nothing starts' test "$(cat "$TD/ws/bad/.claude/settings.json")$(ls "$TD/ws/bad/.claude" | wc -l | tr -d ' ')$([ -e "$T/shop/agent.pid" ] && echo started)" = 'not json1'
 mkdir -p "$TD/ws/linked" "$TD/ws/elsewhere-claude"
 ln -s "$TD/ws/elsewhere-claude" "$TD/ws/linked/.claude"
-run_team wl-linked "$T" -- start assistant --workspace "$TD/ws/linked"
-check 'a .claude that is a symbolic link is not written through' test "$(grep -c 'is a symbolic link' "$OUT/wl-linked.out")$(ls -A "$TD/ws/elsewhere-claude" | wc -l | tr -d ' ')$([ -e "$T/assistant/agent.pid" ] && echo started)" = 10
+run_team wl-linked "$T" -- start shop --workspace "$TD/ws/linked"
+check 'a .claude that is a symbolic link is not written through' test "$(grep -c 'is a symbolic link' "$OUT/wl-linked.out")$(ls -A "$TD/ws/elsewhere-claude" | wc -l | tr -d ' ')$([ -e "$T/shop/agent.pid" ] && echo started)" = 10
 # --no-wall: the settings are not written, and a folder without them is said to have none.
 mkdir -p "$TD/ws/bare"
-run_team wl-off "$T" -- start assistant --workspace "$TD/ws/bare" --no-wall
+run_team wl-off "$T" -- start shop --workspace "$TD/ws/bare" --no-wall
 check '--no-wall starts without writing the settings' test "$RC$([ -e "$TD/ws/bare/.claude" ] && echo there)" = 0
 check 'and says so twice: in the check and after the start' test "$(grep -c -e 'NONE (--no-wall)' -e 'WITHOUT sandbox settings' "$OUT/wl-off.out")" = 2
-check 'the pid file records it' test "$(sed -n '7p' "$T/assistant/agent.pid")" = none
+check 'the pid file records it' test "$(sed -n '7p' "$T/shop/agent.pid")" = none
 run_team wl-off-status "$T" -- status
 check 'status shows it' has "$OUT/wl-off-status.out" 'NO sandbox settings, only the rule in its prompt'
 stop_all "$T"
-run_team wl-off-there "$T" -- start assistant --no-wall
-check '--no-wall in a folder that has the settings: they stay, apply, and the pid file says so' test "$(sed -n '7p' "$T/assistant/agent.pid")$(in_place "$TD/ws/shop")$(grep -c 'NONE (--no-wall)' "$OUT/wl-off-there.out")" = settings00
+run_team wl-off-there "$T" -- start shop --no-wall
+check '--no-wall in a folder that has the settings: they stay, apply, and the pid file says so' test "$(sed -n '7p' "$T/shop/agent.pid")$(in_place "$TD/ws/shop")$(grep -c 'NONE (--no-wall)' "$OUT/wl-off-there.out")" = settings00
 stop_all "$T"
 # On Codex the stock adapter's own workspace-write mode holds the commands; no file is written for it.
 mkdir -p "$TD/ws/codex-only"
 : > "$STANDIN_RECORD"
-run_team wl-codex "$T" INITIAL_AGENT_MODE=agent-full-access -- start assistant --backend codex --model gpt-example-sol --workspace "$TD/ws/codex-only"
-call_for "$T/assistant" > "$OUT/wl-codex.rec"
-check 'the workspace agent on Codex starts in the adapter'"'"'s workspace-write mode, whatever the calling shell exports' test "$RC$(grep -c '^INITIAL_AGENT_MODE=agent$' "$OUT/wl-codex.rec")$(sed -n '7p' "$T/assistant/agent.pid")" = 01codex
+run_team wl-codex "$T" INITIAL_AGENT_MODE=agent-full-access -- start shop --backend codex --model gpt-example-sol --workspace "$TD/ws/codex-only"
+call_for "$T/shop" > "$OUT/wl-codex.rec"
+check 'the workspace agent on Codex starts in the adapter'"'"'s workspace-write mode, whatever the calling shell exports' test "$RC$(grep -c '^INITIAL_AGENT_MODE=agent$' "$OUT/wl-codex.rec")$(sed -n '7p' "$T/shop/agent.pid")" = 01codex
 check 'the check names that sandbox' has "$OUT/wl-codex.out" "Codex's workspace-write: its commands write only inside $TD/ws/codex-only and temporary folders"
 check 'and no settings file is written for it' test ! -e "$TD/ws/codex-only/.claude" -a ! -e "$TD/ws/codex-only/.codex"
 run_team wl-codex-status "$T" -- status
@@ -909,14 +924,14 @@ stop_all "$T"
 # Without the helper, or without python3, a folder that lacks the settings stops the start.
 mkdir -p "$TD/ws/later"
 mv "$T/workspace-settings.py" "$TD/workspace-settings.aside"
-run_team wl-nohelper "$T" -- start assistant --workspace "$TD/ws/later"
-check 'a team folder without the helper stops the start and names the fix' test "$(grep -c -e 'this team folder has no workspace-settings.py' -e 'the check failed; nothing was started' "$OUT/wl-nohelper.out")$([ -e "$T/assistant/agent.pid" ] && echo started)" = 2
+run_team wl-nohelper "$T" -- start shop --workspace "$TD/ws/later"
+check 'a team folder without the helper stops the start and names the fix' test "$(grep -c -e 'this team folder has no workspace-settings.py' -e 'the check failed; nothing was started' "$OUT/wl-nohelper.out")$([ -e "$T/shop/agent.pid" ] && echo started)" = 2
 run_skill wl-up-dry -- upgrade shop --dry-run
 check 'the upgrade plan names the missing helper' has "$OUT/wl-up-dry.out" '  workspace-settings.py: add'
 run_skill wl-up -- upgrade shop
 check 'upgrade puts it back' cmp -s "$HELPER" "$T/workspace-settings.py"
-run_team wl-nopython "$T" AGENT_TEAM_PYTHON="$TD/no-such-python3" -- start assistant --workspace "$TD/ws/later"
-check 'without python3 a folder that lacks the settings stops the start' test "$(grep -c -e 'python3 is needed to write the settings file' -e 'the check failed; nothing was started' "$OUT/wl-nopython.out")$([ -e "$T/assistant/agent.pid" ] && echo started)$([ -e "$TD/ws/later/.claude" ] && echo written)" = 2
+run_team wl-nopython "$T" AGENT_TEAM_PYTHON="$TD/no-such-python3" -- start shop --workspace "$TD/ws/later"
+check 'without python3 a folder that lacks the settings stops the start' test "$(grep -c -e 'python3 is needed to write the settings file' -e 'the check failed; nothing was started' "$OUT/wl-nopython.out")$([ -e "$T/shop/agent.pid" ] && echo started)$([ -e "$TD/ws/later/.claude" ] && echo written)" = 2
 # A team made before 2.0.0: wall programs in the team folder, no settings in the project folder.
 mkdir -p "$T/wall/bin"
 printf '#!/bin/sh\n' > "$T/wall/walled-claude"
@@ -948,12 +963,12 @@ grep -v '^wall_read=' "$T/team.conf" > "$TD/team.conf.tmp" && cat "$TD/team.conf
 # The skill's own start does the same.
 rm -rf "$TD/ws/shop/.claude"
 : > "$STANDIN_RECORD"
-RC=0; env STANDIN_SKIP_PATHS=yes /bin/bash "$SCRIPT" start shop assistant > "$OUT/wl-skill-start.out" 2>&1 < /dev/null || RC=$?
-call_for "$T/assistant" > "$OUT/wl-skill.rec"
-check 'the skill start puts the settings into the project folder and runs the stock adapter too' test "$RC$(in_place "$TD/ws/shop")$(grep -c -e 'BUZZ_ACP_AGENT_COMMAND=unset' -e 'INITIAL_AGENT_MODE=unset' "$OUT/wl-skill.rec")$(grep -c 'assistant: project folder settings: added: ' "$OUT/wl-skill-start.out")" = 0021
+RC=0; env STANDIN_SKIP_PATHS=yes /bin/bash "$SCRIPT" start shop shop > "$OUT/wl-skill-start.out" 2>&1 < /dev/null || RC=$?
+call_for "$T/shop" > "$OUT/wl-skill.rec"
+check 'the skill start puts the settings into the project folder and runs the stock adapter too' test "$RC$(in_place "$TD/ws/shop")$(grep -c -e 'BUZZ_ACP_AGENT_COMMAND=unset' -e 'INITIAL_AGENT_MODE=unset' "$OUT/wl-skill.rec")$(grep -c 'shop: project folder settings: added: ' "$OUT/wl-skill-start.out")" = 0021
 stop_all "$T"
 if [ -n "${AGENT_TEAM_REAL_LAUNCHER:-}" ]; then
-    run_team wl-real "$T" AGENT_TEAM_LAUNCHER="$AGENT_TEAM_REAL_LAUNCHER" -- check assistant --verbose
+    run_team wl-real "$T" AGENT_TEAM_LAUNCHER="$AGENT_TEAM_REAL_LAUNCHER" -- check shop --verbose
     check 'the real launcher accepts the workspace agent on the stock adapter' rc_is 0
     check 'in bypass-permissions, the mode these settings were measured in' has "$OUT/wl-real.out" 'BUZZ_ACP_PERMISSION_MODE=bypass-permissions'
     check 'answering the owner and its channel supervisor' has "$OUT/wl-real.out" 'Access:       BUZZ_ACP_RESPOND_TO=allowlist'
@@ -975,16 +990,16 @@ check 'an edited command is replaced' has "$OUT/up3.out" 'team.sh: replaced'
 check 'and the edited one is kept beside it' test "$(ls "$T" | grep -c '^team.sh.bak-')" = 1
 check 'the template is back' cmp -s "$TEMPLATE" "$T/team.sh"
 rm -f "$T/supervisor/start.sh" "$T/acp-models.py"
-printf '\n# edited by hand\n' >> "$T/assistant/start.sh"
+printf '\n# edited by hand\n' >> "$T/shop/start.sh"
 run_skill up-start-dry -- upgrade shop --dry-run
-check 'the plan names a missing and an edited start command' test "$(grep -c -e 'supervisor/start.sh: add' -e 'assistant/start.sh: replace' "$OUT/up-start-dry.out")" = 2
+check 'the plan names a missing and an edited start command' test "$(grep -c -e 'supervisor/start.sh: add' -e 'shop/start.sh: replace' "$OUT/up-start-dry.out")" = 2
 check 'and the missing model list helper' has "$OUT/up-start-dry.out" 'acp-models.py: add'
 check 'a dry run adds nothing' test ! -e "$T/supervisor/start.sh"
 run_skill up-start -- upgrade shop
-check 'upgrade adds the one and replaces the other' test "$(grep -c -e 'supervisor/start.sh: added' -e 'assistant/start.sh: replaced' "$OUT/up-start.out")" = 2
+check 'upgrade adds the one and replaces the other' test "$(grep -c -e 'supervisor/start.sh: added' -e 'shop/start.sh: replaced' "$OUT/up-start.out")" = 2
 check 'the model list helper is back' cmp -s "$SKILL_DIR/scripts/acp-models.py" "$T/acp-models.py"
-check 'both are the template again, mode 700' test "$(cmp -s "$START_TEMPLATE" "$T/supervisor/start.sh"; echo $?)$(cmp -s "$START_TEMPLATE" "$T/assistant/start.sh"; echo $?)$(mode_of "$T/supervisor/start.sh")" = 00700
-check 'the edited one is kept beside it' test "$(ls "$T/assistant" | grep -c '^start.sh.bak-')" = 1
+check 'both are the template again, mode 700' test "$(cmp -s "$START_TEMPLATE" "$T/supervisor/start.sh"; echo $?)$(cmp -s "$START_TEMPLATE" "$T/shop/start.sh"; echo $?)$(mode_of "$T/supervisor/start.sh")" = 00700
+check 'the edited one is kept beside it' test "$(ls "$T/shop" | grep -c '^start.sh.bak-')" = 1
 run_skill up-start2 -- upgrade shop
 check 'a second upgrade changes nothing' has "$OUT/up-start2.out" 'up to date; nothing was changed'
 # The recorded version: the team folder says which version of the skill wrote its files.
