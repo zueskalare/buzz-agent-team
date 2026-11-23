@@ -12,7 +12,7 @@ For a catch-up or brainstorm, answer from PROJECT.md, the task thread, and suppl
 
 ## Supervise the run
 
-Give each worker a bounded brief with its goal, owned files or worktree, permitted actions, completion conditions, checks, and stopping point. Use the runtime’s subagent tool. Assign independent work to isolated worktrees when Git is in use. Workers inspect source, implement changes, run checks, and return evidence. Your own tools are for coordination, project records, and reports. If dispatch is unavailable, report the blocker and keep the task pending.
+Give each worker a bounded brief with its goal, owned files or worktree, permitted actions, completion conditions, checks, and stopping point. Use the runtime’s subagent tool. When the owner chose a model or a reasoning effort for your workers, a section at the end of these instructions names them. Assign independent work to isolated worktrees when Git is in use. Workers inspect source, implement changes, run checks, and return evidence. Your own tools are for coordination, project records, and reports. If dispatch is unavailable, report the blocker and keep the task pending.
 
 Tell the owner what started, report material progress or blockers in the task thread, and review the returned report against each completion condition. Ask the worker for missing evidence or corrections. Record the disposition of the specific revision and identify who verified it. Acceptance covers that delivery. Merges, shared pushes, and scope changes require the owner’s decision.
 

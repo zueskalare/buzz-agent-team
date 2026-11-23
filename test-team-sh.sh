@@ -32,6 +32,7 @@ OUT=$TD/out BIN=$TD/bin ROOT=$TD/root
 export GIT_CEILING_DIRECTORIES=$TOP
 export HOME=$TD/home
 unset CODEX_HOME CLAUDE_CONFIG_DIR AGENT_TEAM_TEMPLATES AGENT_TEAM_PYTHON CLAUDE_AGENT_ACP_PROTOCOL BUZZ_AUTH_TAG AGENT_TEAM_LAUNCHER TEAM_SH_ASK CLAUDE_CODE_EFFORT_LEVEL
+unset CLAUDE_CODE_SUBAGENT_MODEL CLAUDE_CODE_SUBAGENT_MODEL_FORCE CLAUDE_CODE_SUBAGENT_EFFORT
 export AGENT_TEAM_ROOT=$ROOT AGENT_TEAM_KEYGEN=$KEYGEN AGENT_TEAM_BUZZ=$BIN/buzz
 export BUZZ_CLAUDE_MANAGED_DIR=$TD/managed-none
 export AGENT_TEAM_START_WAIT=1 AGENT_TEAM_STOP_GRACE=5
@@ -192,7 +193,8 @@ rec=${STANDIN_RECORD:-/dev/null}
 {
     printf 'call: %s\n' "$*"
     printf 'cwd: %s\n' "$(pwd -P)"
-    for v in RUN_BUZZ_ACP_KEY_FILE BUZZ_ACP_SYSTEM_PROMPT_FILE RUN_BUZZ_ACP_WORKDIR BUZZ_ACP_AGENT_COMMAND BUZZ_ACP_CONFIG CLAUDE_AGENT_ACP_PROTOCOL CLAUDE_CODE_EFFORT_LEVEL INITIAL_AGENT_MODE BUZZ_ACP_PERMISSION_MODE; do
+    for v in RUN_BUZZ_ACP_KEY_FILE BUZZ_ACP_SYSTEM_PROMPT_FILE RUN_BUZZ_ACP_WORKDIR BUZZ_ACP_AGENT_COMMAND BUZZ_ACP_CONFIG CLAUDE_AGENT_ACP_PROTOCOL CLAUDE_CODE_EFFORT_LEVEL INITIAL_AGENT_MODE BUZZ_ACP_PERMISSION_MODE \
+        CLAUDE_CODE_SUBAGENT_MODEL CLAUDE_CODE_SUBAGENT_MODEL_FORCE CLAUDE_CODE_SUBAGENT_EFFORT; do
         printf '%s=%s\n' "$v" "${!v-unset}"
     done
     if [ -n "${BUZZ_PRIVATE_KEY+x}" ]; then printf 'inherited-key: yes\n'; else printf 'inherited-key: no\n'; fi
@@ -359,9 +361,10 @@ mkdir -p "$ROOT/models"
 printf '# retrieved 2026-11-21T00:00:00Z stand-in\ndefault\tDefault (recommended)\nopus\tOpus 5.5\nsonnet\tSonnet 5.5\n' > "$ROOT/models/claude-supervisor.list"
 printf '# retrieved 2026-11-21T00:00:00Z stand-in\ngpt-example-sol\tExample Sol\ngpt-example-astra\tExample Astra\n' > "$ROOT/models/codex-agent.list"
 : > "$STANDIN_RECORD"
-# all agents; workspace agent: codex, model number 2; channel supervisor: keep claude, model number 1 (opus: the
-# list's first entry, default, is not offered)
-ask_team ask-all "$T" '\n2\n2\n\n1\n\n' -- start
+# all agents; workspace agent: codex, model number 2, Enter for the model of its workers (the list offers no
+# level for that model, so neither its effort nor theirs is asked); channel supervisor: keep claude, model
+# number 1 (opus: the list's first entry, default, is not offered)
+ask_team ask-all "$T" '\n2\n2\n\n\n1\n\n' -- start
 check 'it succeeds' rc_is 0
 check 'the Claude menu leaves out default, which Claude Code refuses as a model name' hasnt "$OUT/ask-all.out" 'Default (recommended)'
 check 'it asked which agents' has "$OUT/ask-all.out" 'Start which agents?'
@@ -372,6 +375,8 @@ check 'it asked the effort of the Claude agent, and not where the list offers no
 check 'it offered the retrieved list' has "$OUT/ask-all.out" 'gpt-example-astra'
 check 'the workspace agent started on codex with model 2' grep -q '^call: --run --backend codex --model gpt-example-astra$' "$STANDIN_RECORD"
 check 'the supervisor started on claude with the first model offered' grep -q '^call: --run --backend claude --model opus$' "$STANDIN_RECORD"
+check 'the workspace agent is asked the model of its workers after its own, before the next agent' test "$(grep -n -e 'Shop: provider?' -e 'Shop: model on codex?' -e 'Shop: model for its workers on codex?' -e 'Shop Supervisor: provider?' "$OUT/ask-all.out" | cut -d: -f3 | tr '\n' '|')" = ' provider?| model on codex?| model for its workers on codex?| provider?|'
+check 'Enter keeps the same model as the agent, and the channel supervisor is asked nothing about workers' test "$(grep -c '\[Enter\] keep the same model as Shop$' "$OUT/ask-all.out")$(grep -c 'Shop Supervisor: .*workers' "$OUT/ask-all.out")" = 10
 stop_all "$T"
 : > "$STANDIN_RECORD"
 # only agent 2 (the supervisor); Enter keeps its provider and its model
@@ -452,8 +457,9 @@ cp -p "$ROOT/models/claude-supervisor.list" "$KEPT"
 cp -p "$KEPT" "$TD/kept.list"
 echo list > "$ACP_MODE"
 : > "$STANDIN_RECORD"
-# the workspace agent: provider Enter; model 3 of the list retrieved now (opus, sonnet, claude-fable-5-2); effort Enter
-ask_agent now-list "$T" shop '\n3\n\n' ANTHROPIC_API_KEY=example-not-a-key OPENAI_API_KEY=example-not-a-key CLAUDE_CODE_EXECUTABLE=/stray/claude --
+# the workspace agent: provider Enter; model 3 of the list retrieved now (opus, sonnet, claude-fable-5-2); effort
+# Enter; its workers' model and effort Enter (that model menu uses the list already retrieved: no second session)
+ask_agent now-list "$T" shop '\n3\n\n\n\n' ANTHROPIC_API_KEY=example-not-a-key OPENAI_API_KEY=example-not-a-key CLAUDE_CODE_EXECUTABLE=/stray/claude --
 check 'it succeeds' rc_is 0
 check 'it says it asks the provider, with the bound' has "$OUT/now-list.out" 'asking claude which models it offers now (at most 3 s)'
 check 'the menu offers a model the kept list did not have' has "$OUT/now-list.out" '[3] claude-fable-5-2'
@@ -490,25 +496,25 @@ check 'a model the provider does not offer now is still refused' test "$RC$(grep
 cp -p "$TD/kept.list" "$KEPT"
 echo error > "$ACP_MODE"
 : > "$STANDIN_RECORD"
-ask_agent now-error "$T" shop '\n2\n\n' --
+ask_agent now-error "$T" shop '\n2\n\n\n\n' --
 check 'a sign-in error is named' has "$OUT/now-error.out" 'not retrieved: the adapter could not open a session: not signed in'
-check 'the kept list is offered, with its date' test "$(grep -c -e 'the list kept from 2026-11-21T00:00:00Z is used instead' -e '\[2\] sonnet' "$OUT/now-error.out")" = 2
+check 'the kept list is offered, with its date' test "$(grep -c -e 'the list kept from 2026-11-21T00:00:00Z is used instead' -e '\[2\] sonnet  *Sonnet 5.5' "$OUT/now-error.out")" = 2
 check 'and the agent starts on the choice' test "$RC$(grep -c '^call: --run --backend claude --model sonnet$' "$STANDIN_RECORD")" = 01
 check 'the kept list is unchanged' cmp -s "$TD/kept.list" "$KEPT"
 stop_all "$T"
 echo hang > "$ACP_MODE"
-T0=$(date +%s); ask_agent now-hang "$T" shop '\n\n\n' --; T1=$(date +%s)
+T0=$(date +%s); ask_agent now-hang "$T" shop '\n\n\n\n\n' --; T1=$(date +%s)
 check 'an adapter that does not answer is given up at the bound' test "$RC$(grep -c 'not retrieved: the adapter did not answer within 3 s' "$OUT/now-hang.out")" = 01
 check 'within a few seconds, and it is stopped' test $((T1 - T0)) -le 20 -a -z "$(pgrep -f "$BIN/acp-models-stub.py")"
 check 'no half-written list is left' test -z "$(ls -A "$ROOT/models" | grep -e '^\.new-list')"
 stop_all "$T"
 echo list > "$ACP_MODE"
 mv "$T/acp-models.py" "$TD/acp-models.py.keep"
-ask_agent now-nohelper "$T" shop '\n\n\n' --
+ask_agent now-nohelper "$T" shop '\n\n\n\n\n' --
 check 'a team folder without the helper says how to add it, and starts on the kept choices' test "$RC$(grep -c 'has no acp-models.py (add it with the skill' "$OUT/now-nohelper.out")" = 01
 stop_all "$T"
 mv "$TD/acp-models.py.keep" "$T/acp-models.py"
-ask_agent now-nopython "$T" shop '\n\n\n' AGENT_TEAM_PYTHON=none --
+ask_agent now-nopython "$T" shop '\n\n\n\n\n' AGENT_TEAM_PYTHON=none --
 check 'without python3 the kept list is used' test "$RC$(grep -c 'python3 is not on PATH' "$OUT/now-nopython.out")" = 01
 stop_all "$T"
 rm -f "$ACP_MODE" "$ACP_CALLS"
@@ -843,6 +849,217 @@ check 'create saves a level given at creation' grep -qx 'effort_codex=high' "$RO
 run_skill ef-create-bad -- create --workspace "$TD/ws/shop" --channel "$CHANNEL" --name shop-reviewer-three --roles reviewer --reviewer-name 'Shop Third Reviewer' --reviewer-backend codex --reviewer-effort high
 check 'create refuses a Codex level without a model' has "$OUT/ef-create-bad.out" 'needs a model too'
 check 'and leaves no agent behind' test ! -e "$ROOT/shop-reviewer-three/reviewer"
+# The workspace agent's workers: their model and reasoning effort are named in its system prompt for
+# the run (prompt.run.md: its prompt.md followed by one section). Nothing is exported for them, and the
+# calling shell's own worker variables never reach the agent.
+STRAY='CLAUDE_CODE_SUBAGENT_MODEL=stray-model CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1 CLAUDE_CODE_SUBAGENT_EFFORT=max'
+NOVARS='CLAUDE_CODE_SUBAGENT_MODEL=unset CLAUDE_CODE_SUBAGENT_MODEL_FORCE=unset CLAUDE_CODE_SUBAGENT_EFFORT=unset '
+wk_vars() { grep -E '^CLAUDE_CODE_SUBAGENT_(MODEL|MODEL_FORCE|EFFORT)=' "$1" | tr '\n' ' '; } # the three, as the launcher got them
+wk_prompt() { sed -n 's/^BUZZ_ACP_SYSTEM_PROMPT_FILE=//p' "$1"; } # the prompt file the launcher got
+P=$T/shop/prompt.md RUNP=$T/shop/prompt.run.md
+P_SHA=$(shasum -a 256 "$P" | cut -c1-64)
+# The exact section a run adds: model only, level only, or both.
+SEC_HEAD='## Your workers for this run\n\nThe owner chose how your workers run when starting you.'
+SEC_TAIL=' Pass these when you start a worker, and use another model or effort only when the owner asks for one in the task.\n'
+run_prompt_is() { # FILE MODEL LEVEL: FILE is prompt.md, a blank line, then the section with these sentences
+    local m='' l=''
+    [ -z "$2" ] || m=" Start each worker on the model \`$2\`."
+    [ -z "$3" ] || l=" Start each worker at reasoning effort \`$3\`."
+    { cat "$P"; printf "\\n$SEC_HEAD%s%s$SEC_TAIL" "$m" "$l"; } | cmp -s - "$1"
+}
+: > "$STANDIN_RECORD"
+# shellcheck disable=SC2086
+run_team wk-none "$T" $STRAY -- start shop
+call_for "$T/shop" > "$OUT/wk-none.rec"
+check 'with none chosen: the stale worker variables of the calling shell are removed, and the launcher gets prompt.md' test "$RC$(wk_vars "$OUT/wk-none.rec")$(wk_prompt "$OUT/wk-none.rec")" = "0$NOVARS$P"
+check 'the check says its workers get the same as the agent, and no prompt of a run is written' test "$(grep -c '^  ok  *workers  *the same as Shop$' "$OUT/wk-none.out")$([ -e "$RUNP" ] && echo written)" = 1
+check 'the pid file has the two lines of its workers, empty' test "$(wc -l < "$T/shop/agent.pid" | tr -d ' ')$(sed -n '8p;9p' "$T/shop/agent.pid" | tr -d '\n')" = 9
+stop_all "$T"
+: > "$STANDIN_RECORD"
+# shellcheck disable=SC2086
+run_team wk-opt "$T" $STRAY -- start shop --worker-model sonnet --worker-effort low
+call_for "$T/shop" > "$OUT/wk-opt.rec"
+check 'chosen for one run: the launcher gets the prompt of the run, and still no worker variable' test "$RC$(wk_vars "$OUT/wk-opt.rec")$(wk_prompt "$OUT/wk-opt.rec")" = "0$NOVARS$RUNP"
+check 'the prompt of the run is prompt.md and the section naming both, mode 600' test "$(run_prompt_is "$RUNP" sonnet low; echo $?)$(mode_of "$RUNP")" = 0600
+check 'the agent'"'"'s own model option is not touched' grep -qx -- '--run --backend claude' "$OUT/wk-opt.rec"
+check 'the check says what its workers get, and that it is in its prompt for this run' grep -q '^  ok  *workers  *model sonnet, reasoning effort low, named in its prompt for this run' "$OUT/wk-opt.out"
+check 'the start line and the pid file say so' test "$(grep -c 'shop: started as PID .*; its workers: model sonnet, reasoning effort low (log' "$OUT/wk-opt.out")$(sed -n '8p;9p' "$T/shop/agent.pid" | tr '\n' ' ')" = '1sonnet low '
+run_team wk-opt-status "$T" -- status
+check 'status shows what the running agent'"'"'s workers were started with, beside the saved none' test "$(grep -c 'running on claude.*; its workers: model sonnet, reasoning effort low' "$OUT/wk-opt-status.out")$(grep -c '^    saved for its workers on claude: the same as Shop$' "$OUT/wk-opt-status.out")" = 11
+# A pid file written by 4.1.0 has seven lines: it is still read, with nothing said about workers.
+head -n 7 "$T/shop/agent.pid" > "$TD/pid.41" && cat "$TD/pid.41" > "$T/shop/agent.pid"
+run_team wk-old-pid "$T" -- status
+run_skill wk-old-pid-skill -- status shop
+check 'a 4.1.0 pid file is still read by both status commands' test "$(grep -c "running on claude, in $TD/ws/shop; PID .*; held by the sandbox settings in its project folder\$" "$OUT/wk-old-pid.out")$(grep -c 'its workers:' "$OUT/wk-old-pid.out")$(grep -c 'running on claude, PID' "$OUT/wk-old-pid-skill.out")" = 101
+run_team wk-old-pid-stop "$T" -- stop shop
+check 'and it stops the agent' has "$OUT/wk-old-pid-stop.out" 'shop: stopped'
+run_team wk-effort-only "$T" -- start shop --worker-effort low
+check 'a level alone: the section names the level only' test "$RC$(run_prompt_is "$RUNP" '' low; echo $?)" = 00
+stop_all "$T"
+run_team wk-model-only "$T" -- start shop --worker-model haiku
+check 'a model alone: the section names the model only' test "$RC$(run_prompt_is "$RUNP" haiku ''; echo $?)" = 00
+stop_all "$T"
+cp -p "$RUNP" "$TD/run-prompt.before"
+: > "$STANDIN_RECORD"
+run_team wk-stale "$T" -- start shop --worker-model default --worker-effort default
+call_for "$T/shop" > "$OUT/wk-stale.rec"
+check 'none chosen again: the prompt of the earlier run is removed and the launcher gets prompt.md' test "$RC$([ -e "$RUNP" ] && echo left)$(wk_prompt "$OUT/wk-stale.rec")" = "0$P"
+stop_all "$T"
+# On Claude the subagent tool takes a worker's model as one of four names, and only these are offered.
+for w in opus sonnet haiku fable; do
+    run_team wk-name "$T" -- check shop --worker-model "$w"
+    check "the Claude name $w is accepted" test "$RC$(grep -c "workers  *model $w, " "$OUT/wk-name.out")" = 01
+done
+check 'a check writes no prompt of a run and leaves no file of its own' test -z "$(ls -A "$T/shop" | grep -e '^prompt.run.md$' -e '^\.check-prompt' -e '^\.new-prompt')"
+run_team wk-full "$T" -- start shop --worker-model claude-sonnet-5-5
+check 'a full model name is refused by option, in one line naming the four' test "$RC$(grep -c -x 'team.sh: claude-sonnet-5-5 is not a model the subagent tool of Claude takes for a worker: choose opus, sonnet, haiku or fable; nothing was started' "$OUT/wk-full.out")$([ -e "$T/shop/agent.pid" ] && echo started)" = 11
+# provider, model, its own effort: Enter; its workers' model: a full name typed
+ask_agent wk-full-ask "$T" shop '\n\n\nclaude-opus-5-5\n' --
+check 'and typed at the question' test "$RC$(grep -c 'claude-opus-5-5 is not a model the subagent tool of Claude takes for a worker: choose opus, sonnet, haiku or fable' "$OUT/wk-full-ask.out")" = 11
+run_skill wk-full-up -- upgrade shop --worker-model claude-opus-5-5
+check 'and saving it with the skill' test "$RC$(grep -c 'claude-opus-5-5 is not a model the subagent tool of Claude takes for a worker: choose opus, sonnet, haiku or fable' "$OUT/wk-full-up.out")$(grep -c '^worker_' "$T/shop/agent.conf")" = 110
+cp -p "$T/shop/agent.conf" "$TD/agent.conf.wk"
+printf 'worker_model_claude=claude-opus-5-5\n' >> "$T/shop/agent.conf"
+run_team wk-full-saved "$T" -- start shop
+RC_TEAM=$RC
+RC=0; env STANDIN_SKIP_PATHS=yes /bin/bash "$SCRIPT" start shop shop > "$OUT/wk-full-saved-skill.out" 2>&1 < /dev/null || RC=$?
+check 'and a full name saved by hand, by both starts' test "$RC_TEAM$(grep -c 'the saved worker model of Shop, claude-opus-5-5, is not a model the subagent tool of Claude takes' "$OUT/wk-full-saved.out")$RC$(grep -c 'its saved worker model, claude-opus-5-5, is not a model the subagent tool of Claude takes' "$OUT/wk-full-saved-skill.out")$([ -e "$T/shop/agent.pid" ] && echo started)" = 1111
+cp -p "$TD/agent.conf.wk" "$T/shop/agent.conf"
+# The Claude effort rule, in its three places.
+run_team wk-rule-opt "$T" -- start shop --effort high --worker-effort low
+check 'the Claude rule: a level for its workers beside one of its own is refused, saying how to get there' test "$RC$(grep -c -e '--worker-effort low cannot be used while Shop runs at reasoning effort high: on Claude the level a session runs at, CLAUDE_CODE_EFFORT_LEVEL=high, also applies to its workers, whatever level it names for them' "$OUT/wk-rule-opt.out")$(grep -c 'start Shop with no level of its own: --effort default' "$OUT/wk-rule-opt.out")$([ -e "$T/shop/agent.pid" ] && echo started)" = 111
+# provider and model Enter; its own effort 3 (high); its workers' model 1 (opus). Their effort is not asked.
+ask_agent wk-rule-ask "$T" shop '\n\n3\n1\n' --
+check 'the Claude rule: with a level of its own, the workers'"'"' level question is replaced by one line' test "$RC$(grep -c 'Shop: reasoning effort for its workers?' "$OUT/wk-rule-ask.out")$(grep -c 'Shop: its workers run at its own reasoning effort, high: on Claude the level a session runs at, CLAUDE_CODE_EFFORT_LEVEL=high, also applies to its workers, whatever level it names for them$' "$OUT/wk-rule-ask.out")" = 001
+check 'and the section of that run names their model and no level' test "$(run_prompt_is "$RUNP" opus ''; echo $?)" = 0
+stop_all "$T"
+: > "$STANDIN_RECORD"
+# provider Enter, model Enter, its own effort Enter (none); its workers: model 2, level 1
+ask_agent wk-ask "$T" shop '\n\n\n2\n1\n' --
+awk '/model for its workers on claude\?/ { on = 1 } /reasoning effort for its workers\?/ { on = 0 } on' "$OUT/wk-ask.out" > "$OUT/wk-ask-menu.out"
+check 'in a terminal the two questions of its workers come after its own effort' test "$RC$(grep -n -e 'Shop: model on claude?' -e 'Shop: reasoning effort on claude?' -e 'Shop: model for its workers on claude?' -e 'Shop: reasoning effort for its workers?' "$OUT/wk-ask.out" | cut -d: -f3 | tr '\n' '|')" = '0 model on claude?| reasoning effort on claude?| model for its workers on claude?| reasoning effort for its workers?|'
+check 'on Claude the workers'"'"' model menu is exactly the four names, and Enter' test "$(grep -E -o '\[([0-9]+|Enter)\] [^ ]+' "$OUT/wk-ask-menu.out" | tr '\n' '|')" = '[Enter] keep|[1] opus|[2] sonnet|[3] haiku|[4] fable|'
+check 'Enter would keep the same as the agent; the levels are Claude'"'"'s' test "$(grep -c -e '\[Enter\] keep the same model as Shop$' -e '\[Enter\] set none here: its workers use the same level as Shop$' "$OUT/wk-ask.out")$(grep -c '\[1\] low   \[2\] medium   \[3\] high   \[4\] xhigh   \[5\] max' "$OUT/wk-ask.out")" = 22
+check 'the answers are in the prompt of the run' test "$(run_prompt_is "$RUNP" sonnet low; echo $?)$(wk_prompt "$STANDIN_RECORD" | tail -n 1)" = "0$RUNP"
+stop_all "$T"
+run_agent wk-own "$T" shop -- --worker-model opus --worker-effort high
+check 'the agent'"'"'s own start.sh passes both options' test "$RC$(run_prompt_is "$RUNP" opus high; echo $?)" = 00
+stop_all "$T"
+run_team wk-badeffort "$T" -- start shop --worker-effort ultra
+check 'a level Claude does not offer is refused' test "$RC$(grep -c 'ultra is not a reasoning effort offered for the workers of Shop on claude' "$OUT/wk-badeffort.out")" = 11
+run_team wk-sup "$T" -- start supervisor --worker-model opus
+run_agent wk-sup-own "$T" supervisor -- --worker-effort low
+run_team wk-rv "$R" -- start --worker-model opus
+check 'the options are refused when the workspace agent is not started, with one line, also by another agent'"'"'s start.sh and in a team without one' test "$(grep -c -x "team.sh: --worker-model and --worker-effort are for the workspace agent's workers, and the workspace agent (shop) is not among the agents started; nothing was started" "$OUT/wk-sup.out" "$OUT/wk-sup-own.out" | cut -d: -f2 | tr -d '\n')$(grep -c 'the workspace agent (none in this team) is not among the agents started' "$OUT/wk-rv.out")$([ -e "$T/supervisor/agent.pid" ] && echo started)" = 111
+run_team wk-shell "$T" CLAUDE_CODE_EFFORT_LEVEL=low -- check
+check 'a level the shell exports: the note says it applies to the workers too, for the workspace agent only' test "$(grep -c 'this shell exports CLAUDE_CODE_EFFORT_LEVEL=low, which this agent will use, and its workers too$' "$OUT/wk-shell.out")$(grep -c 'this shell exports CLAUDE_CODE_EFFORT_LEVEL=low, which this agent will use$' "$OUT/wk-shell.out")" = 11
+run_team wk-shell-chosen "$T" CLAUDE_CODE_EFFORT_LEVEL=low -- check shop --worker-effort high
+check 'and that it wins over a level chosen for them' has "$OUT/wk-shell-chosen.out" 'and its workers too, over the level high chosen for them'
+# Saved by the skill, per provider; default clears. The prompt of an earlier run comes through an upgrade.
+cp -p "$RUNP" "$TD/run-prompt.before"
+run_skill wk-up-dry -- upgrade shop --dry-run --worker-model opus --worker-effort medium
+check 'the upgrade plan names both changes and repeats the options in its run line' test "$RC$(grep -c -e '^    model of its workers (claude): the same as the agent -> opus$' -e '^    reasoning effort of its workers (claude): none set here -> medium$' -e '^Run it: agent-team.sh upgrade shop --worker-model opus --worker-effort medium$' "$OUT/wk-up-dry.out")$(grep -c '^worker_' "$T/shop/agent.conf")" = 030
+run_skill wk-up -- upgrade shop --worker-model opus --worker-effort medium
+check 'upgrade saves them for the agent'"'"'s provider' test "$RC$(grep -c -x -e 'worker_model_claude=opus' -e 'worker_effort_claude=medium' "$T/shop/agent.conf")$(grep -c '^worker_.*_codex=' "$T/shop/agent.conf")" = 020
+check 'the upgrade rebuilt the agent'"'"'s folder and carried the prompt of the earlier run, byte for byte' test "$(grep -c '^    replace (each kept as <file>.bak-.*): agent.conf' "$OUT/wk-up-dry.out")$(cmp -s "$TD/run-prompt.before" "$RUNP"; echo $?)$(mode_of "$RUNP")" = 10600
+run_skill wk-up-again -- upgrade shop
+check 'a second upgrade carries them and changes nothing' test "$(grep -c 'up to date; nothing was changed' "$OUT/wk-up-again.out")$(grep -c -x -e 'worker_model_claude=opus' -e 'worker_effort_claude=medium' "$T/shop/agent.conf")" = 12
+run_team wk-saved-status "$T" -- status
+run_skill wk-saved-skill -- status shop
+check 'both status commands show the saved ones' test "$(grep -c '^    saved for its workers on claude: model opus, reasoning effort medium$' "$OUT/wk-saved-status.out")$(grep -c '^    its workers on claude: model opus, reasoning effort medium$' "$OUT/wk-saved-skill.out")" = 11
+: > "$STANDIN_RECORD"
+run_team wk-yes "$T" TEAM_SH_ASK=1 -- start shop --yes
+check '--yes asks nothing and names the saved ones' test "$(grep -c -e 'for its workers' -e 'provider?' "$OUT/wk-yes.out")$(run_prompt_is "$RUNP" opus medium; echo $?)" = 00
+stop_all "$T"
+ask_agent wk-keep "$T" shop '\n\n\n\n\n' --
+check 'in a terminal Enter keeps the saved ones' test "$(grep -c -e '\[Enter\] keep opus (saved)' -e '\[Enter\] keep medium (saved)' "$OUT/wk-keep.out")$(run_prompt_is "$RUNP" opus medium; echo $?)" = 20
+stop_all "$T"
+run_team wk-default "$T" -- start shop --worker-model default --worker-effort default
+check 'default sets none for one run, whatever is saved: no prompt of a run' test "$RC$([ -e "$RUNP" ] && echo left)" = 0
+stop_all "$T"
+: > "$STANDIN_RECORD"
+# shellcheck disable=SC2086
+RC=0; env $STRAY STANDIN_SKIP_PATHS=yes /bin/bash "$SCRIPT" start shop shop > "$OUT/wk-skill-start.out" 2>&1 < /dev/null || RC=$?
+call_for "$T/shop" > "$OUT/wk-skill.rec"
+check 'the skill start names the saved ones in the prompt of the run, exports none, and records them' test "$RC$(wk_vars "$OUT/wk-skill.rec")$(wk_prompt "$OUT/wk-skill.rec")$(run_prompt_is "$RUNP" opus medium; echo $?)$(sed -n '8p;9p' "$T/shop/agent.pid" | tr '\n' ' ')" = "0$NOVARS${RUNP}0opus medium "
+run_skill wk-skill-run-status -- status shop
+grep 'running on claude, PID' "$OUT/wk-skill-run-status.out" | grep -q '; its workers: model opus, reasoning effort medium$'
+check 'and the skill status shows what it was started with' test $? = 0
+stop_all "$T"
+# The Claude rule when saving: both levels cannot be kept on Claude.
+cp -p "$T/shop/agent.conf" "$TD/agent.conf.wk"
+run_skill wk-rule-up -- upgrade shop --agent-effort high
+check 'upgrade refuses a level of the agent'"'"'s own on Claude while one for its workers is saved, with the way out' test "$RC$(grep -c -e "cannot be saved while the agent has one of its own there (high): the level a Claude session runs at, CLAUDE_CODE_EFFORT_LEVEL, also applies to its workers" "$OUT/wk-rule-up.out")$(grep -c '(--agent-effort default), or save none for the workers (--worker-effort default)' "$OUT/wk-rule-up.out")$(cmp -s "$TD/agent.conf.wk" "$T/shop/agent.conf"; echo $?)" = 1110
+run_skill wk-rule-up2 -- upgrade shop --agent-effort high --worker-effort default
+check 'the same run that clears theirs saves it' test "$RC$(grep -c -x -e 'effort_claude=high' -e 'worker_model_claude=opus' "$T/shop/agent.conf")$(grep -c '^worker_effort_' "$T/shop/agent.conf")" = 020
+run_skill wk-rule-up3 -- upgrade shop --worker-effort low
+check 'and a level for its workers is then refused' test "$RC$(grep -c 'cannot be saved while the agent has one of its own there (high)' "$OUT/wk-rule-up3.out")" = 11
+run_team wk-rule-saved "$T" -- start shop --yes
+RC_TEAM=$RC
+cp -p "$RUNP" "$TD/run-prompt.team"
+stop_all "$T"
+RC=0; env STANDIN_SKIP_PATHS=yes /bin/bash "$SCRIPT" start shop shop > "$OUT/wk-rule-skill.out" 2>&1 < /dev/null || RC=$?
+check 'started with its saved level, both starts name the workers'"'"' model and no level' test "$RC_TEAM$(run_prompt_is "$TD/run-prompt.team" opus ''; echo $?)$RC$(run_prompt_is "$RUNP" opus ''; echo $?)" = 0000
+stop_all "$T"
+if [ -n "${AGENT_TEAM_REAL_LAUNCHER:-}" ]; then
+    run_team wk-real "$T" AGENT_TEAM_LAUNCHER="$AGENT_TEAM_REAL_LAUNCHER" -- check shop --effort default --worker-model sonnet --worker-effort low --verbose
+    check 'the real launcher accepts the prompt of a run, from a file the check removes, and removes no variable' test "$RC$(grep -c "Prompt:       file $T/shop/.check-prompt\." "$OUT/wk-real.out")$(grep -c 'Removed:      none' "$OUT/wk-real.out")$(ls -A "$T/shop" | grep -c '^\.check-prompt')" = 0110
+fi
+run_skill wk-clear -- upgrade shop --agent-effort default --worker-model default
+check 'default clears what is saved' test "$RC$(grep -c -e '^worker_' -e '^effort_' "$T/shop/agent.conf")" = 00
+# On Codex the same section; nothing goes into .codex.
+printf '# retrieved 2026-11-21T00:00:00Z stand-in\ngpt-example-sol\tExample Sol\ngpt-example-sol[low]\tExample Sol (low)\ngpt-example-sol[high]\tExample Sol (high)\ngpt-example-astra[medium]\tExample Astra (medium)\n' > "$ROOT/models/codex-agent.list"
+WSC=$TD/ws/wk-codex
+mkdir -p "$WSC"
+CX="--backend codex --model gpt-example-sol --workspace $WSC"
+: > "$STANDIN_RECORD"
+# shellcheck disable=SC2086
+run_team wk-cx "$T" $STRAY -- start shop $CX --worker-model gpt-example-astra --worker-effort medium
+call_for "$T/shop" > "$OUT/wk-cx.rec"
+check 'on Codex the launcher gets the prompt of the run, with the same section, and no worker variable' test "$RC$(wk_vars "$OUT/wk-cx.rec")$(wk_prompt "$OUT/wk-cx.rec")$(run_prompt_is "$RUNP" gpt-example-astra medium; echo $?)" = "0$NOVARS${RUNP}0"
+check 'the check says so, and the pid file records them' test "$(grep -c '^  ok  *workers  *model gpt-example-astra, reasoning effort medium, named in its prompt for this run' "$OUT/wk-cx.out")$(sed -n '8p;9p' "$T/shop/agent.pid" | tr '\n' ' ')" = '1gpt-example-astra medium '
+stop_all "$T"
+# shellcheck disable=SC2086
+run_team wk-cx-name "$T" -- start shop $CX --worker-model 'gpt-example-sol[high]'
+check 'a level in the Codex model name is their level' test "$RC$(run_prompt_is "$RUNP" gpt-example-sol high; echo $?)" = 00
+stop_all "$T"
+# shellcheck disable=SC2086
+run_team wk-cx-model "$T" -- start shop $CX --worker-model gpt-example-astra
+check 'a Codex model alone' test "$RC$(run_prompt_is "$RUNP" gpt-example-astra ''; echo $?)" = 00
+stop_all "$T"
+# shellcheck disable=SC2086
+run_team wk-cx-level "$T" -- start shop $CX --worker-effort high
+check 'a Codex level alone, offered for the agent'"'"'s model' test "$RC$(run_prompt_is "$RUNP" '' high; echo $?)" = 00
+stop_all "$T"
+# provider 2 (codex), model 1 (gpt-example-sol), its own effort Enter; its workers: model 2 (each base model
+# once: gpt-example-sol, gpt-example-astra), level 1 (the one level the list has for that model, medium)
+ask_agent wk-cx-ask "$T" shop '2\n1\n\n2\n1\n' -- --workspace "$WSC"
+awk '/model for its workers on codex\?/ { on = 1 } /reasoning effort for its workers\?/ { on = 0 } on' "$OUT/wk-cx-ask.out" > "$OUT/wk-cx-menu.out"
+check 'on Codex the workers'"'"' model menu offers each base model once, and their levels are the list'"'"'s for that model' test "$RC$(grep -c -e '\[1\] gpt-example-sol ' -e '\[2\] gpt-example-astra ' "$OUT/wk-cx-menu.out")$(grep -c -e '\[3\]' -e 'gpt-example-sol\[' "$OUT/wk-cx-menu.out")$(grep -c -x '  \[1\] medium   ' "$OUT/wk-cx-ask.out")$(run_prompt_is "$RUNP" gpt-example-astra medium; echo $?)" = 02010
+stop_all "$T"
+# shellcheck disable=SC2086
+run_team wk-cx-bad "$T" -- start shop $CX --worker-model gpt-example-nova
+check 'a Codex model the list does not offer is refused' test "$RC$(grep -c 'gpt-example-nova is not a codex model offered for the workers of Shop' "$OUT/wk-cx-bad.out")" = 11
+run_team wk-cx-tab "$T" -- start shop $CX --worker-model "$(printf 'gpt\texample')"
+check 'and a name with a control character' test "$RC$(grep -c 'not a model id' "$OUT/wk-cx-tab.out")" = 11
+# The skill's own start does the same on Codex.
+run_skill wk-up-cx -- upgrade shop --agent-backend codex --agent-model gpt-example-sol --worker-model gpt-example-astra --worker-effort medium
+check 'upgrade saves them for Codex, beside nothing for Claude' test "$RC$(grep -c -x -e 'worker_model_codex=gpt-example-astra' -e 'worker_effort_codex=medium' "$T/shop/agent.conf")$(grep -c '^worker_.*_claude=' "$T/shop/agent.conf")" = 020
+run_skill wk-up-cx-bad -- upgrade shop --worker-effort high
+check 'a level the list does not offer for the workers'"'"' model is refused when saving' test "$RC$(grep -c 'high is not a reasoning effort that the list retrieved for the workspace agent offers for gpt-example-astra, for its workers' "$OUT/wk-up-cx-bad.out")" = 11
+: > "$STANDIN_RECORD"
+RC=0; env STANDIN_SKIP_PATHS=yes /bin/bash "$SCRIPT" start shop shop > "$OUT/wk-skill-cx.out" 2>&1 < /dev/null || RC=$?
+call_for "$T/shop" > "$OUT/wk-skill-cx.rec"
+check 'the skill start on Codex names the saved ones in the prompt of the run' test "$RC$(wk_prompt "$OUT/wk-skill-cx.rec")$(run_prompt_is "$RUNP" gpt-example-astra medium; echo $?)" = "0${RUNP}0"
+stop_all "$T"
+run_skill wk-up-cx-clear -- upgrade shop --worker-model default --worker-effort default
+RC=0; env STANDIN_SKIP_PATHS=yes /bin/bash "$SCRIPT" start shop shop > "$OUT/wk-skill-cx2.out" 2>&1 < /dev/null || RC=$?
+check 'and removes the prompt of the earlier run when none is saved' test "$RC$([ -e "$RUNP" ] && echo left)$(grep -c '^worker_' "$T/shop/agent.conf")" = 00
+stop_all "$T"
+run_skill wk-up-back -- upgrade shop --agent-backend claude
+check 'no start wrote anything under .codex in any project folder' test -z "$(find "$TD/ws" -name .codex)"
+check 'prompt.md is byte for byte what create wrote, after every start' test "$(shasum -a 256 "$P" | cut -c1-64)" = "$P_SHA"
+printf '# retrieved 2026-11-21T00:00:00Z stand-in\ngpt-example-sol\tExample Sol\ngpt-example-astra\tExample Astra\n' > "$ROOT/models/codex-agent.list"
 
 scenario 'what holds each agent: its runtime, or the sandbox settings in the project folder'
 RUN_CWD=$TD/ws/shop

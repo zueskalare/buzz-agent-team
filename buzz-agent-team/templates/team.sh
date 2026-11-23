@@ -85,6 +85,13 @@ start and check:
                             the same for one agent. On Claude: low, medium, high, xhigh or max.
                             On Codex: a level the model list offers for that model (low to
                             ultra). default sets none for this run, whatever is saved.
+  --worker-model ID         the model of the workspace agent's workers (its subagents), for
+                            this run (on Claude: opus, sonnet, haiku or fable); default: the
+                            same model as the agent, whatever is saved
+  --worker-effort LEVEL     their reasoning effort, for this run; default sets none. On Claude
+                            it needs the workspace agent to have no level of its own in that
+                            run (--agent-effort default). Both are refused when the workspace
+                            agent is not among the agents started.
   --yes                     ask nothing: every agent keeps its saved provider and model
   --no-wall                 do not put the sandbox settings into the project folder at this
                             start, and start the workspace agent on Claude in a folder that has
@@ -94,8 +101,9 @@ start and check:
   --check                   with start: the same as "team.sh check"
 
 In a terminal, start asks which agents, then for each one its provider (Claude or Codex), its
-model and its reasoning effort. Enter keeps the saved choice. A choice lasts for that run; the
-saved choice is changed with the skill (agent-team.sh upgrade).
+model and its reasoning effort; for the workspace agent then also the model and the reasoning
+effort of its workers. Enter keeps the saved choice. A choice lasts for that run; the saved choice
+is changed with the skill (agent-team.sh upgrade).
 
 The model menu shows what the provider offers now. Before the menu of an agent, its provider's
 adapter is asked for its model list: one session, no model turn, your subscription sign-in, at
@@ -141,6 +149,20 @@ over your own Claude Code setting. A Codex agent gets it in the model name, mode
 none set here, Claude Code uses your own saved level for that model, or the model's default, and
 Codex uses the default of your Codex configuration.
 
+The workspace agent's workers (the subagents it starts) get a model and a reasoning effort of
+their own when one is chosen; otherwise the same as the agent. They are named in the agent's system
+prompt for that run: its prompt.md followed by a section "Your workers for this run", in prompt.run.md
+in its folder, which asks it to pass them when it starts a worker. It is an instruction the agent is
+trusted to follow; nothing is written into the project folder for it and no setting enforces it.
+prompt.md itself is not changed, and with neither chosen the agent gets prompt.md. Values the calling
+shell exports for CLAUDE_CODE_SUBAGENT_MODEL, CLAUDE_CODE_SUBAGENT_MODEL_FORCE and
+CLAUDE_CODE_SUBAGENT_EFFORT are removed, so that none overrides it.
+  - On Claude the subagent tool takes a worker's model only as opus, sonnet, haiku or fable, so only
+    these are offered. The level a Claude session runs at, CLAUDE_CODE_EFFORT_LEVEL (the agent's own),
+    applies to its workers whatever level it names, so a level for them is used only when the agent
+    has none of its own.
+  - On Codex: a model the list offers (each model once; model[level] also gives their level).
+
 Before anything starts, the check must pass:
   - run-buzz-acp.sh, buzz-acp and buzz are on PATH, and so is each agent's adapter
   - the project folder exists and is not around the secret keys
@@ -170,10 +192,11 @@ EOF
 }
 
 # ---------------------------------------------------------------- cleanup and lock
-LOCK_DIR='' LIST_TMP=''
+LOCK_DIR='' LIST_TMP='' CHECK_PROMPT=''
 cleanup() {
     if [ -n "$LOCK_DIR" ]; then rm -rf -- "$LOCK_DIR"; LOCK_DIR=''; fi
     if [ -n "$LIST_TMP" ]; then rm -f -- "$LIST_TMP" "$LIST_TMP.err"; LIST_TMP=''; fi
+    if [ -n "$CHECK_PROMPT" ]; then rm -f -- "$CHECK_PROMPT"; CHECK_PROMPT=''; fi
 }
 trap cleanup EXIT
 trap 'cleanup; exit 130' INT
@@ -406,11 +429,14 @@ resolve_workspace() { # -> RUN_WORKSPACE WORKSPACE_SOURCE
 
 # ---------------------------------------------------------------- running agents
 # agent.pid: PID, the process start time, the provider and (from team.sh) the model, the project
-# folder and the reasoning effort of that run.
-read_pidfile() { # HOME -> PF_PID PF_START PF_BACKEND PF_MODEL PF_WORKSPACE PF_EFFORT PF_WALL; returns 1 when there is none
-    PF_PID='' PF_START='' PF_BACKEND='' PF_MODEL='' PF_WORKSPACE='' PF_EFFORT='' PF_WALL=''
+# folder, the reasoning effort and how the agent is held in that run; since 4.2.0 also the model and
+# the reasoning effort chosen for the workspace agent's workers (empty: none chosen). A file written
+# before 4.2.0 has no such lines, and PF_WREC stays empty.
+read_pidfile() { # HOME -> PF_PID PF_START PF_BACKEND PF_MODEL PF_WORKSPACE PF_EFFORT PF_WALL PF_WMODEL PF_WEFFORT PF_WREC; returns 1 when there is none
+    PF_PID='' PF_START='' PF_BACKEND='' PF_MODEL='' PF_WORKSPACE='' PF_EFFORT='' PF_WALL='' PF_WMODEL='' PF_WEFFORT='' PF_WREC=''
     [ -f "$1/agent.pid" ] || return 1
-    { IFS= read -r PF_PID && IFS= read -r PF_START && IFS= read -r PF_BACKEND && IFS= read -r PF_MODEL && IFS= read -r PF_WORKSPACE && IFS= read -r PF_EFFORT && IFS= read -r PF_WALL; } < "$1/agent.pid" || true
+    { IFS= read -r PF_PID && IFS= read -r PF_START && IFS= read -r PF_BACKEND && IFS= read -r PF_MODEL && IFS= read -r PF_WORKSPACE && IFS= read -r PF_EFFORT && IFS= read -r PF_WALL &&
+        IFS= read -r PF_WMODEL && IFS= read -r PF_WEFFORT && PF_WREC=yes; } < "$1/agent.pid" || true
     case $PF_PID in '' | *[!0-9]*) PF_PID=''; return 1 ;; esac
 }
 proc_start() { trim "$(ps -o lstart= -p "$1" 2>/dev/null || true)"; }
@@ -442,6 +468,39 @@ claude_documented_model() {
 claude_default_model() { [ "$1" = claude ] && [ "$2" = default ]; } # BACKEND MODEL
 menu_models() { # BACKEND LIST: the ID<TAB>name lines the model menu offers
     awk -F'\t' -v b="$1" '!/^#/ && !(b == "claude" && $1 == "default")' "$2"
+}
+# The ID<TAB>name lines the workers' model menu offers: the same, with each Codex base model once
+# (the list names a Codex model once per reasoning level, model[level]).
+worker_menu() { # BACKEND LIST
+    if [ "$1" != codex ]; then menu_models "$1" "$2"; return; fi
+    menu_models codex "$2" | awk -F'\t' '
+        { b = $1; sub(/\[[^]]*\]$/, "", b); if (!(b in seen)) { seen[b] = 1; order[++n] = b } if ($1 == b) name[b] = $2 }
+        END { for (i = 1; i <= n; i++) printf "%s\t%s\n", order[i], name[order[i]] }'
+}
+# Print a model menu's numbered rows (ID<TAB>name lines) to standard error; its ids go to standard output.
+print_model_rows() { # ROWS
+    local ids count n mid mname
+    ids=$(printf '%s\n' "$1" | cut -f1)
+    count=$(printf '%s\n' "$ids" | grep -c .)
+    if [ "$count" -le 16 ]; then
+        n=1
+        while IFS=$'\t' read -r mid mname; do
+            printf '  [%d] %-28s %s\n' "$n" "$mid" "${mname:0:70}" >&2
+            n=$((n + 1))
+        done <<EOF
+$1
+EOF
+    else
+        # A long list (Codex lists each model once per reasoning level): the ids only, in columns.
+        printf '%s\n' "$ids" | awk '
+            { a[NR] = $0; if (length($0) > w) w = length($0) }
+            END {
+                cols = int(100 / (w + 8)); if (cols < 1) cols = 1
+                fmt = "  [%2d] %-" w "s"
+                for (i = 1; i <= NR; i++) { printf fmt, i, a[i]; if (i % cols == 0 || i == NR) printf "\n" }
+            }' >&2
+    fi
+    printf '%s\n' "$ids"
 }
 
 # ---------------------------------------------------------------- the provider's list, retrieved now
@@ -643,7 +702,7 @@ choose_backend() { # ID -> RUN_BACKEND_<id>, RUN_EXPLICIT_<id>
 }
 
 choose_model() { # ID -> RUN_MODEL_<id>; empty keeps the model saved for that provider
-    local id=$1 b m='' saved list rows ids count line n mid mname
+    local id=$1 b m='' saved list rows ids
     eval "b=\$RUN_BACKEND_$id; m=\$OPT_MODEL_$id"
     [ -n "$m" ] || m=$OPT_MODEL
     saved=$(saved_model "$id" "$b")
@@ -653,26 +712,7 @@ choose_model() { # ID -> RUN_MODEL_<id>; empty keeps the model saved for that pr
         note "  [Enter] keep ${saved:-the runtime default} (saved)"
         ids=''
         if list=$(models_file "$b" "$id") && rows=$(menu_models "$b" "$list") && [ -n "$rows" ]; then
-            ids=$(printf '%s\n' "$rows" | cut -f1)
-            count=$(printf '%s\n' "$ids" | grep -c .)
-            if [ "$count" -le 16 ]; then
-                n=1
-                while IFS=$'\t' read -r mid mname; do
-                    printf '  [%d] %-28s %s\n' "$n" "$mid" "${mname:0:70}" >&2
-                    n=$((n + 1))
-                done <<EOF
-$rows
-EOF
-            else
-                # A long list (Codex lists each model once per reasoning level): the ids only, in columns.
-                printf '%s\n' "$ids" | awk '
-                    { a[NR] = $0; if (length($0) > w) w = length($0) }
-                    END {
-                        cols = int(100 / (w + 8)); if (cols < 1) cols = 1
-                        fmt = "  [%2d] %-" w "s"
-                        for (i = 1; i <= NR; i++) { printf fmt, i, a[i]; if (i % cols == 0 || i == NR) printf "\n" }
-                    }' >&2
-            fi
+            ids=$(print_model_rows "$rows")
             note "  a number, or a model id (list retrieved $(sed -n '1s/^# retrieved //p' "$list" | cut -d' ' -f1))"
         else
             note "  or a model id (no retrieved list for $b here)"
@@ -766,6 +806,184 @@ choose_effort() { # ID -> RUN_EFFORT_<id>; on Codex the level also goes into RUN
     eval "RUN_EFFORT_$id=\$e"
 }
 
+# ---------------------------------------------------------------- the workspace agent's workers
+# The worker subagents of the workspace agent may get a model and a reasoning effort of their own, one
+# each per provider, saved in its agent.conf by the skill (worker_model_claude=, worker_model_codex=,
+# worker_effort_claude=, worker_effort_codex=). Empty: none chosen, the workers get the same as the agent.
+# They reach the agent as an instruction, not as a setting: for a run in which one applies, the agent's
+# system prompt is its prompt.md followed by a section that names them (prompt.run.md in its folder,
+# written whole before the start), and the agent names them itself when it starts a worker. Nothing is
+# written into the project folder and nothing is exported for them; CLAUDE_CODE_SUBAGENT_MODEL,
+# CLAUDE_CODE_SUBAGENT_MODEL_FORCE and CLAUDE_CODE_SUBAGENT_EFFORT, which the calling shell may export,
+# are removed, so that none of them overrides what the section says.
+# On Claude the subagent tool takes a model only as one of four names, and the level a session runs at
+# (CLAUDE_CODE_EFFORT_LEVEL, the agent's own) applies to its workers whatever level it names for them,
+# so a level for the workers is used only when the agent has none of its own for the run.
+CLAUDE_WORKER_MODELS='opus sonnet haiku fable'
+OPT_WMODEL='' OPT_WEFFORT='' RUN_WMODEL='' RUN_WEFFORT='' RUN_PROMPT_agent=''
+RUN_PROMPT_NAME=prompt.run.md
+saved_worker() { afield agent "worker_$1_$2"; } # model|effort BACKEND
+claude_worker_model() { case " $CLAUDE_WORKER_MODELS " in *" $1 "*) return 0 ;; esac; return 1; } # MODEL
+# 0: the Codex list offers MODEL for the workers; 1: it does not; 2: there is no list here to tell.
+# A base model counts when the list offers it with a level, model[level].
+worker_offered() { # MODEL
+    local list
+    if list=$(models_file codex agent); then
+        grep -v '^#' "$list" | cut -f1 | awk -v m="$1" '$0 == m || index($0, m "[") == 1 { found = 1 } END { exit !found }'
+        return
+    fi
+    model_offered codex agent "$1"
+}
+require_worker_model() { # BACKEND MODEL
+    local list rc=0
+    if [ "$1" = claude ]; then
+        claude_worker_model "$2" || die "$2 is not a model the subagent tool of Claude takes for a worker: choose opus, sonnet, haiku or fable; nothing was started"
+        return 0
+    fi
+    valid_model "$2" || die "not a model id: $2"
+    worker_offered "$2" || rc=$?
+    # The kept list may be older than the model: the provider is asked again, once, before a refusal.
+    if [ "$rc" = 1 ] && refresh_models codex agent; then rc=0; worker_offered "$2" || rc=$?; fi
+    case $rc in
+        0) ;;
+        2) note "note: no retrieved model list for codex here; $2 is named to the workers of $(label agent) as given" ;;
+        *)
+            list=$(models_file codex agent)
+            die "$2 is not a codex model offered for the workers of $(label agent). The list retrieved $(sed -n '1s/^# retrieved //p' "$list" | cut -d' ' -f1) offers: $(worker_menu codex "$list" | cut -f1 | tr '\n' ' ')" ;;
+    esac
+}
+# What the workers get, in words: "the same as <Name>", or their model and reasoning effort.
+workers_words() { # WORKER_MODEL WORKER_EFFORT
+    local n
+    n=$(label agent)
+    if [ -z "$1$2" ]; then printf 'the same as %s' "$n"; return 0; fi
+    printf 'model %s, reasoning effort %s' "${1:-the same as $n}" "${2:-the same as $n}"
+}
+# On Claude the workers run at the agent's own level when it has one.
+claude_effort_rule() { # AGENT_EFFORT: why the workers run at it
+    printf 'on Claude the level a session runs at, CLAUDE_CODE_EFFORT_LEVEL=%s, also applies to its workers, whatever level it names for them' "$1"
+}
+# The section at the end of the agent's prompt for this run, with only the sentences that apply.
+workers_section() { # WORKER_MODEL WORKER_EFFORT
+    printf '## Your workers for this run\n\nThe owner chose how your workers run when starting you.'
+    if [ -n "$1" ]; then printf ' Start each worker on the model `%s`.' "$1"; fi
+    if [ -n "$2" ]; then printf ' Start each worker at reasoning effort `%s`.' "$2"; fi
+    printf ' Pass these when you start a worker, and use another model or effort only when the owner asks for one in the task.\n'
+}
+# The workspace agent's prompt.md followed by that section, written whole into DEST (mode 600).
+# prompt.md itself is never changed.
+write_run_prompt() { # DEST
+    local home tmp
+    home=$(ahome agent)
+    tmp=$(mktemp "$home/.new-prompt.XXXXXX" 2>/dev/null) || return 1
+    if {
+        cat -- "$home/prompt.md" &&
+            if [ -n "$(tail -c 1 "$home/prompt.md")" ]; then printf '\n'; fi &&
+            printf '\n' && workers_section "$RUN_WMODEL" "$RUN_WEFFORT"
+    } > "$tmp" && chmod 600 "$tmp" && mv -f -- "$tmp" "$1"; then return 0; fi
+    rm -f -- "$tmp"
+    return 1
+}
+
+choose_workers() { # the workspace agent's, after its own effort -> RUN_WMODEL RUN_WEFFORT
+    local b e m n wm we saved_wm saved_we list rows ids model levels lv row k given=no
+    eval "b=\$RUN_BACKEND_agent; e=\$RUN_EFFORT_agent; m=\$RUN_MODEL_agent"
+    n=$(label agent)
+    saved_wm=$(saved_worker model "$b")
+    saved_we=$(saved_worker effort "$b")
+    wm=$OPT_WMODEL we=$OPT_WEFFORT
+    [ -z "$wm" ] || given=yes
+    if [ -z "$wm" ] && [ "$ASK" = yes ]; then
+        [ "$b" = claude ] || refresh_models "$b" agent || true
+        note "$n: model for its workers on $b?"
+        if [ -n "$saved_wm" ]; then note "  [Enter] keep $saved_wm (saved)"; else note "  [Enter] keep the same model as $n"; fi
+        ids=''
+        if [ "$b" = claude ]; then
+            # The names the subagent tool of Claude takes for a worker, and no other.
+            ids=$(print_model_rows "$(printf '%s\t\n' $CLAUDE_WORKER_MODELS)")
+            note '  a number, or one of these names'
+        elif list=$(models_file "$b" agent) && rows=$(worker_menu "$b" "$list") && [ -n "$rows" ]; then
+            ids=$(print_model_rows "$rows")
+            note "  a number, or a model id (list retrieved $(sed -n '1s/^# retrieved //p' "$list" | cut -d' ' -f1))"
+        else
+            note "  or a model id (no retrieved list for $b here)"
+        fi
+        [ -z "$saved_wm" ] || note "  or type default, for the same model as $n in this run"
+        ask '> '
+        case $REPLY in
+            '') ;;
+            *[!0-9]*) wm=$REPLY given=yes ;;
+            *)
+                wm=$(printf '%s\n' "$ids" | sed -n "${REPLY}p") given=yes
+                [ -n "$wm" ] || die "no model number $REPLY in that list; nothing was started" ;;
+        esac
+    fi
+    if [ "$given" = yes ]; then
+        case $wm in default | none) wm='' ;; esac
+        if [ -n "$wm" ]; then
+            # On Codex a level written into the model name is the workers' level, unless one is given.
+            if [ "$b" = codex ]; then
+                k=$(model_level "$wm")
+                wm=$(model_base "$wm")
+                [ -n "$we" ] || we=$k
+            fi
+            require_worker_model "$b" "$wm"
+        fi
+    else
+        wm=$saved_wm
+        if [ "$b" = claude ] && [ -n "$wm" ] && ! claude_worker_model "$wm"; then
+            die "the saved worker model of $n, $wm, is not a model the subagent tool of Claude takes for a worker: choose opus, sonnet, haiku or fable. Start it with --worker-model NAME or --worker-model default (the same model as $n), and change the saved one with the skill (agent-team.sh upgrade <team> --worker-model NAME); nothing was started"
+        fi
+    fi
+    if [ "$b" = claude ] && [ -n "$e" ]; then
+        # The Claude effort rule: no level of their own while the agent has one.
+        case $we in
+            '' | default | none) ;;
+            *) die "--worker-effort $we cannot be used while $n runs at reasoning effort $e: $(claude_effort_rule "$e"). To give its workers another level, start $n with no level of its own: --effort default (team.sh: --agent-effort default); nothing was started" ;;
+        esac
+        if [ "$ASK" = yes ] || [ -n "$saved_we" ]; then
+            note "$n: its workers run at its own reasoning effort, $e: $(claude_effort_rule "$e")${saved_we:+; the level saved for them, $saved_we, is not used in this run}"
+        fi
+        we=''
+    else
+        if [ "$b" = claude ]; then levels=$CLAUDE_EFFORTS
+        else
+            model=$wm
+            [ -n "$model" ] || model=$m
+            [ -n "$model" ] || model=$(saved_model agent codex)
+            if [ -n "$model" ]; then levels=$(trim "$(effort_levels codex agent "$model")"); else levels=$CODEX_EFFORTS; fi
+        fi
+        if [ -z "$we" ] && [ "$ASK" = yes ] && [ -n "$levels" ]; then
+            note "$n: reasoning effort for its workers?"
+            if [ -n "$saved_we" ]; then note "  [Enter] keep $saved_we (saved)"
+            else note "  [Enter] set none here: its workers use the same level as $n"; fi
+            k=1 row=''
+            for lv in $levels; do row="$row[$k] $lv   "; k=$((k + 1)); done
+            note "  $row"
+            [ -z "$saved_we" ] || note '  or type default, to set none for this run'
+            ask '> '
+            case $REPLY in
+                '') ;;
+                *[!0-9]*) we=$REPLY ;;
+                *)
+                    [ "$REPLY" -ge 1 ] && [ "$REPLY" -lt "$k" ] || die "choose a number from 1 to $((k - 1)); nothing was started"
+                    # shellcheck disable=SC2086
+                    set -- $levels
+                    eval "we=\${$REPLY}" ;;
+            esac
+        fi
+        [ -n "$we" ] || we=$saved_we
+        case $we in default | none) we='' ;; esac
+        if [ -n "$we" ]; then
+            case " $levels " in
+                *" $we "*) ;;
+                *) die "$we is not a reasoning effort offered for the workers of $n on $b${wm:+ with $wm} (offered: ${levels:-none}; default sets none); nothing was started" ;;
+            esac
+        fi
+    fi
+    RUN_WMODEL=$wm RUN_WEFFORT=$we
+}
+
 # ---------------------------------------------------------------- what holds an agent to the project folder
 # How an agent is held for this run:
 #   runtime   its restricted runtime (the channel supervisor, the reviewer): reads inside the project
@@ -822,11 +1040,16 @@ agent_env() { # ID
     # calling shell has it, as the user's own Claude Code settings are.
     eval "b=\$RUN_BACKEND_$1; e=\$RUN_EFFORT_$1"
     if [ "$b" = claude ] && [ -n "$e" ]; then export CLAUDE_CODE_EFFORT_LEVEL=$e; fi
+    # The workspace agent's workers are named in its prompt for the run, never set by a variable: those
+    # the calling shell may export are removed, so that none overrides what the prompt says.
+    unset CLAUDE_CODE_SUBAGENT_MODEL CLAUDE_CODE_SUBAGENT_MODEL_FORCE CLAUDE_CODE_SUBAGENT_EFFORT
     # On the stock Codex adapter: its workspace-write mode, whatever the calling shell exports. The
     # adapter sends that mode's sandbox with every turn, over what a Codex config file says.
     if [ "$(hold_kind "$1" "$b")" = codex ]; then export INITIAL_AGENT_MODE=agent; fi
     export RUN_BUZZ_ACP_KEY_FILE=$home/identity.key
-    export BUZZ_ACP_SYSTEM_PROMPT_FILE=$home/prompt.md
+    # Its prompt: prompt.md, or for the workspace agent in a run that names its workers, the file of that run.
+    if [ "$1" = agent ] && [ -n "$RUN_PROMPT_agent" ]; then export BUZZ_ACP_SYSTEM_PROMPT_FILE=$RUN_PROMPT_agent
+    else export BUZZ_ACP_SYSTEM_PROMPT_FILE=$home/prompt.md; fi
     export RUN_BUZZ_ACP_WORKDIR=$RUN_WORKSPACE
     v=$(env_get "$home/$ENV_NAME" BUZZ_ACP_AGENT_COMMAND) || v=''
     case $v in */runtime/claude-agent-acp | */runtime/codex-acp) export BUZZ_ACP_AGENT_COMMAND=$home/runtime/${v##*/} ;; esac
@@ -858,7 +1081,7 @@ need_cmd() { # NAME
 indent() { sed 's/^/             /'; }
 
 run_checks() { # AGENT...: 0 when everything a start needs is in place
-    local id home b m e shown runtime out rc f missing perm old launcher reason rules own
+    local id home b m e shown runtime out rc f missing perm old launcher reason rules own hk
     PROBLEMS=0
     say "Check of team \"$T_NAME\" in $T_DIR (starts nothing):"
     launcher=$(launcher_path)
@@ -885,7 +1108,11 @@ run_checks() { # AGENT...: 0 when everything a start needs is in place
         [ -n "$shown" ] || shown=$(saved_model "$id" "$b")
         say "$(label "$id"): $b, model ${shown:-the runtime default}, reasoning effort ${e:-none set here}"
         if [ "$b" = claude ] && [ -z "$e" ] && [ -n "${CLAUDE_CODE_EFFORT_LEVEL:-}" ]; then
-            line note 'reasoning effort' "this shell exports CLAUDE_CODE_EFFORT_LEVEL=$CLAUDE_CODE_EFFORT_LEVEL, which this agent will use"
+            if [ "$id" = agent ]; then
+                line note 'reasoning effort' "this shell exports CLAUDE_CODE_EFFORT_LEVEL=$CLAUDE_CODE_EFFORT_LEVEL, which this agent will use, and its workers too${RUN_WEFFORT:+, over the level $RUN_WEFFORT chosen for them}"
+            else
+                line note 'reasoning effort' "this shell exports CLAUDE_CODE_EFFORT_LEVEL=$CLAUDE_CODE_EFFORT_LEVEL, which this agent will use"
+            fi
         fi
         f=$(agent_format "$id")
         if [ "$f" != "$FORMAT" ]; then
@@ -912,7 +1139,8 @@ run_checks() { # AGENT...: 0 when everything a start needs is in place
         if [ -n "$old" ] && [ "$old" != "$home/identity.key" ]; then
             line note 'moved folder' "the settings file names ${old%/identity.key}; this folder's own paths are used instead"
         fi
-        case $(hold_kind "$id" "$b") in
+        hk=$(hold_kind "$id" "$b")
+        case $hk in
             runtime) line ok sandbox 'its runtime reads only the project folder; no edits, no commands' ;;
             codex) line ok sandbox "Codex's workspace-write: its commands write only inside $RUN_WORKSPACE and temporary folders" ;;
             *)
@@ -932,6 +1160,16 @@ run_checks() { # AGENT...: 0 when everything a start needs is in place
                     printf '%s\n' "$out" | tail -n 4 | indent
                 fi ;;
         esac
+        # What the workspace agent's workers get, and how: named in its prompt for this run.
+        if [ "$id" = agent ]; then
+            if [ -n "$RUN_WMODEL$RUN_WEFFORT" ]; then
+                line ok workers "$(workers_words "$RUN_WMODEL" "$RUN_WEFFORT"), named in its prompt for this run (it is asked to pass them when it starts a worker)"
+            elif [ "$b" = claude ] && [ -n "$e" ]; then
+                line ok workers "$(workers_words '' ''): $(claude_effort_rule "$e")"
+            else
+                line ok workers "$(workers_words '' '')"
+            fi
+        fi
         own=$(env_get "$home/$ENV_NAME" BUZZ_ACP_AGENT_COMMAND) || own=''
         if case $own in */runtime/claude-agent-acp | */runtime/codex-acp) true ;; *) false ;; esac; then
             # The channel supervisor and the reviewer run their own restricted runtime; that copy is checked.
@@ -965,7 +1203,7 @@ run_checks() { # AGENT...: 0 when everything a start needs is in place
 
 # ---------------------------------------------------------------- start and check
 cmd_start() { # MODE(start|check) ARGS...
-    local mode=$1 ids='' all=no yes=no id b m e w home log pid protocol wait_s max_bytes size i alive started='' todo='' explicit rc out
+    local mode=$1 ids='' all=no yes=no id b m e w home log pid protocol wait_s max_bytes size i alive started='' todo='' explicit rc out wm we wk
     shift
     while [ "$#" -gt 0 ]; do
         case $1 in
@@ -991,6 +1229,8 @@ cmd_start() { # MODE(start|check) ARGS...
                 need_value "$@"
                 id=${1#--}; id=${id%-effort}
                 eval "OPT_EFFORT_$id=\$2"; shift ;;
+            --worker-model) need_value "$@"; OPT_WMODEL=$2; shift ;;
+            --worker-effort) need_value "$@"; OPT_WEFFORT=$2; shift ;;
             -h | --help) usage; exit 0 ;;
             -*) die "$mode: unknown option: $1 (see team.sh help)" ;;
             *)
@@ -1010,10 +1250,18 @@ cmd_start() { # MODE(start|check) ARGS...
     elif [ "$all" = yes ]; then SELECTED=$(trim "$(team_agents | tr '\n' ' ')")
     else choose_agents; fi
     [ -n "$SELECTED" ] || die 'no agent selected; nothing was started'
+    # The workers' options belong to the workspace agent.
+    if [ -n "$OPT_WMODEL$OPT_WEFFORT" ]; then
+        case " $SELECTED " in
+            *' agent '*) ;;
+            *) die "--worker-model and --worker-effort are for the workspace agent's workers, and the workspace agent ($(if [ -f "$(ahome agent)/agent.conf" ]; then adir agent; else printf 'none in this team'; fi)) is not among the agents started; nothing was started" ;;
+        esac
+    fi
     for id in $SELECTED; do
         choose_backend "$id"
         choose_model "$id"
         choose_effort "$id"
+        if [ "$id" = agent ]; then choose_workers; fi
     done
     # A choice that would switch an agent that is already running stops here, before anything starts.
     for id in $SELECTED; do
@@ -1028,6 +1276,15 @@ cmd_start() { # MODE(start|check) ARGS...
     done
     todo=$(trim "$todo")
     if [ "$mode" = check ]; then
+        # The launcher checks the prompt a start would give the workspace agent, from a file of its own
+        # that goes when the check ends; the file of a run is left as it is.
+        case " $SELECTED " in
+            *' agent '*)
+                if [ -n "$RUN_WMODEL$RUN_WEFFORT" ]; then
+                    CHECK_PROMPT=$(mktemp "$(ahome agent)/.check-prompt.XXXXXX" 2>/dev/null) && write_run_prompt "$CHECK_PROMPT" || die "could not write a prompt in $(ahome agent) for the check"
+                    RUN_PROMPT_agent=$CHECK_PROMPT
+                fi ;;
+        esac
         # shellcheck disable=SC2086
         run_checks $SELECTED || exit 1
         return 0
@@ -1061,6 +1318,18 @@ cmd_start() { # MODE(start|check) ARGS...
             break
         done
     fi
+    # The workspace agent's prompt for this run: prompt.md followed by the section that names its workers
+    # when one applies; else prompt.md, and the file of an earlier run goes. An agent that already runs
+    # keeps the prompt it was started with.
+    case " $todo " in
+        *' agent '*)
+            if [ -n "$RUN_WMODEL$RUN_WEFFORT" ]; then
+                write_run_prompt "$(ahome agent)/$RUN_PROMPT_NAME" || die "could not write $(ahome agent)/$RUN_PROMPT_NAME; nothing was started"
+                RUN_PROMPT_agent=$(ahome agent)/$RUN_PROMPT_NAME
+            else
+                rm -f -- "$(ahome agent)/$RUN_PROMPT_NAME"
+            fi ;;
+    esac
     # The whole selection is checked, sign-in included, before the first agent starts.
     # shellcheck disable=SC2086
     run_checks $todo || die 'the check failed; nothing was started'
@@ -1072,11 +1341,13 @@ cmd_start() { # MODE(start|check) ARGS...
         home=$(ahome "$id") log=$home/agent.log
         if ours_alive "$home"; then say "$(adir "$id"): already running as PID $PF_PID on ${PF_BACKEND:-an unrecorded provider}${PF_WORKSPACE:+ in $PF_WORKSPACE}; not started again"; continue; fi
         eval "b=\$RUN_BACKEND_$id; m=\$RUN_MODEL_$id; e=\$RUN_EFFORT_$id"
+        wm='' we='' wk=''
+        if [ "$id" = agent ]; then wm=$RUN_WMODEL we=$RUN_WEFFORT wk=$(workers_words "$wm" "$we"); fi
         if [ -f "$log" ]; then
             size=$(wc -c < "$log" | tr -d ' ')
             if [ "$size" -gt "$max_bytes" ]; then mv -f -- "$log" "$log.1"; fi
         fi
-        printf '\n=== %s: team.sh start (%s, provider %s, model %s, reasoning effort %s, project folder %s) ===\n' "$(now_utc)" "$LAUNCHER" "$b" "${m:-saved}" "${e:-none set here}" "$RUN_WORKSPACE" >> "$log"
+        printf '\n=== %s: team.sh start (%s, provider %s, model %s, reasoning effort %s, %sproject folder %s) ===\n' "$(now_utc)" "$LAUNCHER" "$b" "${m:-saved}" "${e:-none set here}" "${wk:+workers: $wk, }" "$RUN_WORKSPACE" >> "$log"
         (
             scrub_env
             agent_env "$id"
@@ -1087,7 +1358,7 @@ cmd_start() { # MODE(start|check) ARGS...
         pid=$!
         [ -n "$m" ] || m=$(saved_model "$id" "$b")
         w=$(hold_kind "$id" "$b")
-        printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n' "$pid" "$(proc_start "$pid")" "$b" "$m" "$RUN_WORKSPACE" "$e" "$w" > "$home/.new-pid"
+        printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' "$pid" "$(proc_start "$pid")" "$b" "$m" "$RUN_WORKSPACE" "$e" "$w" "$wm" "$we" > "$home/.new-pid"
         mv -f -- "$home/.new-pid" "$home/agent.pid"
         alive=yes
         i=0
@@ -1103,7 +1374,7 @@ cmd_start() { # MODE(start|check) ARGS...
             [ -z "$started" ] || note "Still running: $started"
             die "$(adir "$id") did not start"
         fi
-        say "$(adir "$id"): started as PID $pid on $b, model ${m:-the runtime default}${e:+, reasoning effort $e} (log $log)"
+        say "$(adir "$id"): started as PID $pid on $b, model ${m:-the runtime default}${e:+, reasoning effort $e}${wk:+; its workers: $wk} (log $log)"
         if [ "$w" = none ]; then say "$(adir "$id"): WARNING: started WITHOUT sandbox settings in its project folder; only the rule in its prompt holds it"; fi
         started="$started${started:+, }$id"
     done
@@ -1185,6 +1456,8 @@ cmd_status() {
                 runtime) run="$run; held to the project folder by its runtime" ;;
                 none) run="$run; NO sandbox settings, only the rule in its prompt" ;;
             esac
+            # Its workers, as that start chose them (a start before 4.2.0 recorded none).
+            if [ "$id" = agent ] && [ "$PF_WREC" = yes ]; then run="$run; its workers: $(workers_words "$PF_WMODEL" "$PF_WEFFORT")"; fi
         elif read_pidfile "$home"; then run='not running (it exited; see the log)'
         else run='not running'; fi
         size=0
@@ -1192,6 +1465,7 @@ cmd_status() {
         say "  $(adir "$id"): $(label "$id"), $(job_words "$id")"
         if [ "$(agent_format "$id")" = "$FORMAT" ]; then
             say "    saved: $b, model ${m:-the runtime default}, reasoning effort ${se:-none set here}"
+            if [ "$id" = agent ]; then say "    saved for its workers on $b: $(workers_words "$(saved_worker model "$b")" "$(saved_worker effort "$b")")"; fi
             say "    answers $(answers "$id" || true)"
         else say "    made by an earlier version of the skill (format $(agent_format "$id")): upgrade it with the skill (agent-team.sh upgrade <team>) before starting"; fi
         say "    $run"

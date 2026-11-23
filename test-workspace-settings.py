@@ -7,10 +7,16 @@ and shell actions inside and outside the project folder.
 Offline: a loopback model endpoint, a fixture API key, a disposable home folder, a stand-in buzz.
 Nothing signs in, and nothing contacts a provider or a community.
 
-    python3 test-workspace-settings.py [--verbose]
+    python3 test-workspace-settings.py [--verbose] [--also-without]
 
 It asserts what the settings hold, and reports what they leave to the rule in the supervisor's
 prompt, so the documentation of both stays what was measured.
+
+Then it measures what the section that names the workspace agent's workers relies on, on Claude: the
+local model starts one worker with the subagent tool, passing a model and an effort on the call as
+that section asks, with no CLAUDE_CODE_SUBAGENT_* variable set, and the endpoint records the model and
+the effort of every request; a second session sets CLAUDE_CODE_EFFORT_LEVEL as well. --also-without
+adds a session in which nothing is named on the call, where the worker must run as the main session.
 """
 import http.server
 import json
@@ -261,6 +267,157 @@ def exercise(home, earlier=None, settings=True):
     return out, state
 
 
+WORKER_MARK = "WORKER-PROMPT-MARKER"
+
+
+def first_user_text(body):
+    for message in body.get("messages") or []:
+        if message.get("role") == "user":
+            content = message.get("content")
+            if isinstance(content, str):
+                return content
+            return " ".join(item.get("text", "") for item in content if isinstance(item, dict))
+    return ""
+
+
+def worker_fixture(log, call):
+    """A model that starts one worker with the subagent tool, passing CALL's model and effort (as the
+    workspace agent does when its prompt names them), and records the model and the effort of every
+    request: the main session's, the worker's and any on the side."""
+    class Model(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *_):
+            pass
+
+        def do_POST(self):
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            if "/count_tokens" in self.path:
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b'{"input_tokens":10}')
+                return
+            text, tools = first_user_text(body), [t.get("name") for t in body.get("tools") or []]
+            if WORKER_MARK in text:
+                kind = "worker"
+            elif "Start one worker." in text and "Agent" in tools:
+                kind = "main"
+            else:
+                kind = "side"
+            log.append({"kind": kind, "model": body.get("model"), "effort": (body.get("output_config") or {}).get("effort"),
+                        "results": [item for message in body.get("messages") or [] if isinstance(message.get("content"), list)
+                                    for item in message["content"] if item.get("type") == "tool_result"]})
+            first_main = kind == "main" and sum(1 for r in log if r["kind"] == "main") == 1
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+
+            def emit(event, **data):
+                self.wfile.write(f"event: {event}\ndata: {json.dumps({'type': event, **data})}\n\n".encode())
+
+            emit("message_start", message={"id": f"msg_{len(log)}", "type": "message", "role": "assistant", "model": body.get("model"),
+                                           "content": [], "stop_reason": None, "usage": {"input_tokens": 10, "output_tokens": 0}})
+            if first_main:
+                arguments = {"description": "probe the worker", "prompt": WORKER_MARK + ": reply with the word done.",
+                             "subagent_type": "general-purpose", "run_in_background": False, **call}
+                emit("content_block_start", index=0, content_block={"type": "tool_use", "id": "tool_worker", "name": "Agent", "input": {}})
+                emit("content_block_delta", index=0, delta={"type": "input_json_delta", "partial_json": json.dumps(arguments)})
+                reason = "tool_use"
+            else:
+                emit("content_block_start", index=0, content_block={"type": "text", "text": ""})
+                emit("content_block_delta", index=0, delta={"type": "text_delta", "text": "Done."})
+                reason = "end_turn"
+            emit("content_block_stop", index=0)
+            emit("message_delta", delta={"stop_reason": reason}, usage={"output_tokens": 2})
+            emit("message_stop")
+
+    return Model
+
+
+def exercise_workers(home, extra, call):
+    """One session of the stock Claude adapter whose model starts one worker, passing CALL (a model
+    and an effort, or neither), with the environment EXTRA. Returns the requests."""
+    home = home.resolve()
+    project = home / "proj"
+    project.mkdir(parents=True)
+    (home / ".claude").mkdir()
+    (home / "tmp").mkdir()
+    adapter = shutil.which("claude-agent-acp")
+    if not adapter:
+        raise SystemExit("Install the Claude ACP adapter before running this test.")
+    log = []
+    with http.server.ThreadingHTTPServer(("127.0.0.1", 0), worker_fixture(log, call)) as server:
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        env = {
+            "PATH": os.environ["PATH"], "HOME": str(home), "TMPDIR": str(home / "tmp"), "CLAUDE_CONFIG_DIR": str(home / ".claude"),
+            "ANTHROPIC_API_KEY": "fixture-only", "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{server.server_port}",
+            "NO_PROXY": "localhost,127.0.0.1", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1", "DISABLE_TELEMETRY": "1",
+            "CLAUDE_AGENT_ACP_PROTOCOL": "v1", **extra,
+        }
+        acp = Acp([adapter], str(project), env, time.monotonic() + 300)
+        try:
+            assert "result" in acp.request("initialize", {"protocolVersion": 1, "clientCapabilities": {},
+                                                          "clientInfo": {"name": "worker-test", "version": "1"}})
+            new = acp.request("session/new", {"cwd": str(project), "mcpServers": []})
+            assert "result" in new, new
+            session = new["result"]["sessionId"]
+            acp.request("session/set_config_option", {"sessionId": session, "configId": "mode", "value": "bypassPermissions"})
+            done = acp.request("session/prompt", {"sessionId": session, "prompt": [{"type": "text", "text": "Start one worker."}]})
+            assert "result" in done, done
+        finally:
+            acp.close()
+            server.shutdown()
+            worker.join()
+    main_requests = [r for r in log if r["kind"] == "main"]
+    workers = [r for r in log if r["kind"] == "worker"]
+    # The subagent tool was driven: the worker made requests, and its result came back to the session
+    # as a result that is not an error (a refused argument would come back as one).
+    results = [item for r in main_requests for item in r["results"] if item.get("tool_use_id") == "tool_worker"]
+    assert workers, f"the subagent tool was not driven: no request carried the worker's prompt; its result: {results} ({log})"
+    assert results and not any(item.get("is_error") for item in results), f"the subagent tool refused the call: {results}"
+    return main_requests, workers
+
+
+def check_workers(verbose, also_without):
+    """What reaches a worker's requests when the agent names a model and an effort on the subagent call,
+    as the section of its prompt asks it to, with no CLAUDE_CODE_SUBAGENT_* variable set. The named
+    model must differ from the main session's."""
+    named = {"model": "haiku", "effort": "low"}
+    runs = [("a model and a level named on the call", {}, named),
+            ("the same, with the session's own level set", {"CLAUDE_CODE_EFFORT_LEVEL": "high"}, named)]
+    if also_without:
+        runs.append(("nothing named on the call", {}, {}))
+    seen = {}
+    for label, extra, call in runs:
+        with tempfile.TemporaryDirectory(prefix="buzz-workers-") as tmp:
+            main_requests, workers = exercise_workers(Path(tmp), extra, call)
+        if verbose:
+            print(f"--- workers: {label}: env {extra}, call {call}")
+            for r in main_requests + workers:
+                print(f"  {r['kind']:7s} model={r['model']} effort={r['effort']}")
+        seen[label] = (main_requests, workers)
+    main_requests, workers = seen[runs[0][0]]
+    main_model, main_effort = main_requests[0]["model"], main_requests[0]["effort"]
+    # (a) the model named on the call reaches the worker's requests, and not the main session's.
+    assert all("haiku" in (r["model"] or "") for r in workers), f"the named model did not reach the worker: {workers}"
+    assert all("haiku" not in (r["model"] or "") for r in main_requests), f"the worker's model reached the main session: {main_requests}"
+    # (b) the effort named on the call reaches the worker's requests, and not the main session's.
+    assert all(r["effort"] == "low" for r in workers), f"the named effort did not reach the worker: {workers}"
+    assert all(r["effort"] != "low" for r in main_requests), f"the worker's effort reached the main session: {main_requests}"
+    # (c) the level the session runs at wins over the one named on the call.
+    main_high, workers_high = seen[runs[1][0]]
+    assert all(r["effort"] == "high" for r in workers_high + main_high), f"CLAUDE_CODE_EFFORT_LEVEL did not set both: {main_high + workers_high}"
+    assert all("haiku" in (r["model"] or "") for r in workers_high), f"the named model did not reach the worker: {workers_high}"
+    if also_without:
+        main_none, workers_none = seen[runs[2][0]]
+        assert all(r["model"] == main_none[0]["model"] and r["effort"] == main_none[0]["effort"] for r in workers_none), \
+            f"with nothing named, the worker did not run as the main session: {main_none + workers_none}"
+    print(f"Measured over ACP with the installed Claude adapter and no CLAUDE_CODE_SUBAGENT_* variable, the agent "
+          f"starting one worker with model \"haiku\" and effort \"low\" on the subagent call: every request of the worker "
+          f"named {workers[0]['model']} with effort low, while the main session stayed on {main_model} with effort "
+          f"{main_effort}; with CLAUDE_CODE_EFFORT_LEVEL=high the worker's requests carried high instead of low."
+          + (" With nothing named on the call, the worker ran on the main session's model and effort." if also_without else ""))
+
+
 HELD = "the settings hold"
 LEFT = "left to the rule in the supervisor's prompt"
 
@@ -340,6 +497,8 @@ def main():
     print(f"Not held by the settings ({LEFT}):")
     for line in found or ["nothing measured"]:
         print(f"  - {line}")
+    # The workspace agent's workers: what a start's variables give a worker started through the subagent tool.
+    check_workers(verbose, "--also-without" in sys.argv)
 
 
 if __name__ == "__main__":

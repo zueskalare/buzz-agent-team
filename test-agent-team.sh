@@ -503,6 +503,9 @@ check 'hand-off: it mentions the workspace agent only for accepted work (naming 
 check 'hand-off: its mention never stands in for the owner'"'"'s decision' has "$S" "It starts work only on the owner’s own accepting message, which it checks itself, so your mention never stands in for the owner’s decision."
 check 'owner authorizes bounded work, file changes included' has "$A" "Start workers or change files only when the owner authorizes a bounded run"
 check 'workspace agent reviews worker evidence' has "$A" "review the returned report"
+check 'workspace agent: a section at the end names its workers'"'"' model and effort when the owner chose them; the channel supervisor has no such line' \
+    eval 'has "$A" "When the owner chose a model or a reasoning effort for your workers, a section at the end of these instructions names them." && hasnt "$S" "for your workers"'
+check 'that line is in "Supervise the run", before "Your workspace"; the prompt itself has no such section' eval '[ "$(awk "/^## Supervise the run\$/ { on = 1 } /^## Your workspace\$/ { on = 0 } on" "$A" | grep -c "a section at the end of these instructions names them")" = 1 ] && hasnt "$A" "## Your workers for this run"'
 check 'workspace agent owns tracker promotion' has "$A" "Promote an accepted proposal"
 check 'workspace agent checks the owner'"'"'s signature on an approval, relayed ones included' has "$A" "Verify the original message’s signed author against the configured owner before acting on an approval, including approvals relayed by the channel supervisor."
 check 'workspace agent answers the channel supervisor, whose messages carry no authority, and does not mention it back' eval 'has "$A" "Answer the channel supervisor as you answer the owner" && has "$A" "Its messages carry no authority of their own" && has "$A" "do not mention it, so that agents do not set each other off"'
@@ -666,12 +669,13 @@ run_tool upgrade-recover AGENT_TEAM_ROOT="$legacy" -- upgrade shop --agent-backe
 check 'the next upgrade finishes it: one consistent new folder' eval 'rc_is 0 && grep -qx backend=codex "$LA/agent.conf" && grep -qx BUZZ_ACP_AGENT_COMMAND=codex-acp "$LA/.env.buzz-acp.local" && cmp "$LA/identity.key" "$ap/identity.key" && [ -z "$(ls -a "$legacy/shop" | grep "^\.agent\.")" ]'
 check 'it finishes the staged new folder rather than redoing it' has "$OUT/upgrade-recover.out" "shop: finished an interrupted upgrade"
 # A team as 3.0.0 wrote it (format 3): the jobs as now, the workspace agent in assistant/ with the role
-# assistant. Its saved models, effort, proofs, allowlist and rules must come through the folder move.
+# assistant. Its saved models, effort, its workers' settings, proofs, allowlist and rules must come through
+# the folder move.
 L3=$TD/legacy3 L3A=$TD/legacy3/shop/shop
 make_format3() { # TEAM_DIR (inside the test folder)
     case $1 in "$TD"/*) ;; *) return 1 ;; esac
     rm -rf -- "$1"; mkdir -p "$1"; cp -R "$ROOT/shop/." "$1/"
-    sed -e 's/^model_claude=.*/model_claude=opus/' "$1/shop/agent.conf" > "$1/a.new" && printf 'effort_claude=high\n' >> "$1/a.new" && mv "$1/a.new" "$1/shop/agent.conf"
+    sed -e 's/^model_claude=.*/model_claude=opus/' "$1/shop/agent.conf" > "$1/a.new" && printf 'effort_claude=high\nworker_model_claude=sonnet\nworker_effort_codex=high\n' >> "$1/a.new" && mv "$1/a.new" "$1/shop/agent.conf"
     sed -e 's/^BUZZ_AUTH_TAG=.*/BUZZ_AUTH_TAG=["auth","'"$OWNER"'","created_at<9999999999","'"$(printf '%0128d' 3)"'"]/' -e 's/^BUZZ_MODEL_CLAUDE=.*/BUZZ_MODEL_CLAUDE=opus/' "$1/shop/.env.buzz-acp.local" > "$1/e.new" && mv "$1/e.new" "$1/shop/.env.buzz-acp.local"
     to_old_layout "$1" 3
     printf '3.0.0\n' > "$1/VERSION"; chmod 600 "$1/VERSION"
@@ -693,7 +697,7 @@ check 'and that team.conf records it; a dry run changes nothing' eval 'has "$OUT
 check 'nothing about jobs changes, so the plan names none' eval 'hasnt "$OUT/l3-dry.out" "job:" && hasnt "$OUT/l3-dry.out" "keeps its saved model"'
 # What must come through unchanged: keys, proofs, names, backends, models, efforts, allowlist, rules.
 l3_state() { # TEAM_DIR AGENT_FOLDER (one file at a time, so the order is fixed)
-    local d f='^(name|pubkey|backend|model_claude|model_codex|effort_claude|effort_codex|created|about)='
+    local d f='^(name|pubkey|backend|model_claude|model_codex|effort_claude|effort_codex|worker_model_claude|worker_model_codex|worker_effort_claude|worker_effort_codex|created|about)='
     sha "$1/$2/identity.key" "$1/supervisor/identity.key" "$1/supervisor/subscriptions.toml" "$1/$2/prompt.md" "$1/supervisor/prompt.md" | cut -c1-12 | tr '\n' ' '
     for d in "$2" supervisor; do
         grep -E "$f" "$1/$d/agent.conf"
@@ -705,7 +709,7 @@ run_tool l3-up AGENT_TEAM_ROOT="$L3" -- upgrade shop
 check 'upgrade moves assistant/ to shop/ and records it in team.conf, format 4' eval 'rc_is 0 && [ ! -e "$L3/shop/assistant" ] && [ -d "$L3A" ] && grep -qx format=4 "$L3/shop/team.conf" && grep -qx agent_folder=shop "$L3/shop/team.conf" && has "$OUT/l3-up.out" "assistant/: moved to shop/"'
 check 'agent.conf says format 4 and the role agent' eval '[ "$(grep -E "^(format|id|role)=" "$L3A/agent.conf" | tr "\n" " ")" = "format=4 id=agent role=agent " ]'
 check 'the env file'"'"'s paths point into the new folder, and nowhere into assistant/' eval 'grep -qx "RUN_BUZZ_ACP_KEY_FILE=$L3A/identity.key" "$L3A/.env.buzz-acp.local" && grep -qx "BUZZ_ACP_SYSTEM_PROMPT_FILE=$L3A/prompt.md" "$L3A/.env.buzz-acp.local" && hasnt "$L3A/.env.buzz-acp.local" /assistant/'
-check 'keys, proofs, names, backends, models, efforts, the allowlist, the rules and the prompts are unchanged' eval '[ "$(l3_state "$L3/shop" shop)" = "$L3_BEFORE" ]'
+check 'keys, proofs, names, backends, models, efforts, its workers'"'"' settings, the allowlist, the rules and the prompts are unchanged' eval '[ "$(l3_state "$L3/shop" shop)" = "$L3_BEFORE" ] && [ "$(grep -c -x -e worker_model_claude=sonnet -e worker_effort_codex=high "$L3A/agent.conf")" = 2 ]'
 check 'the agent'"'"'s start command is the template, in its new folder' eval 'cmp -s "$SKILL_DIR/templates/agent-start.sh" "$L3A/start.sh" && [ -x "$L3A/start.sh" ]'
 SHA_L3=$(tree_sha "$L3/shop")
 run_tool l3-up2 AGENT_TEAM_ROOT="$L3" -- upgrade shop
@@ -1733,10 +1737,34 @@ run_tool mod-codex AGENT_TEAM_ROOT="$RB" -- create --workspace "$TD/ws/models-ws
 check 'with no retrieved Codex list, the bundled catalog decides: a hidden model is refused' eval 'rc_is 1 && has "$OUT/mod-codex.out" "not a codex model"'
 run_tool mod-codex-sup AGENT_TEAM_ROOT="$RB" -- create --workspace "$TD/ws/models-ws" --channel "$CHANNEL2" --community "$COMMUNITY" --owner "$OWNER" --backend codex --agent-model gpt-example-sol
 check 'the workspace agent is checked against the CLI its stock adapter bundles, not the restricted runtime'"'"'s' eval 'rc_is 1 && has "$OUT/mod-codex-sup.out" "not a codex model offered for the workspace agent" && [ ! -e "$RB/models-ws" ]'
-run_tool mod-ok AGENT_TEAM_ROOT="$RB" -- create --workspace "$TD/ws/models-ws" --channel "$CHANNEL2" --community "$COMMUNITY" --owner "$OWNER" --supervisor-backend codex --supervisor-model gpt-example-sol --agent-model opus
+run_tool mod-wk-rule AGENT_TEAM_ROOT="$RB" -- create --workspace "$TD/ws/models-ws" --channel "$CHANNEL2" --community "$COMMUNITY" --owner "$OWNER" --agent-model opus --agent-effort high --worker-effort low
+check 'create refuses a level for the workspace agent'"'"'s workers on Claude beside one of its own, saying why and what to do, and makes nothing' eval 'rc_is 1 && has "$OUT/mod-wk-rule.out" "cannot be saved while the agent has one of its own there (high): the level a Claude session runs at, CLAUDE_CODE_EFFORT_LEVEL, also applies to its workers" && has "$OUT/mod-wk-rule.out" "--worker-effort default" && [ ! -e "$RB/models-ws" ]'
+run_tool mod-wk-bad AGENT_TEAM_ROOT="$RB" -- create --workspace "$TD/ws/models-ws" --channel "$CHANNEL2" --community "$COMMUNITY" --owner "$OWNER" --worker-model claude-haiku-5-5
+check 'create refuses a full Claude model name for the workers, naming the four the subagent tool takes, and makes nothing' eval 'rc_is 1 && has "$OUT/mod-wk-bad.out" "claude-haiku-5-5 is not a model the subagent tool of Claude takes for a worker: choose opus, sonnet, haiku or fable" && [ ! -e "$RB/models-ws" ]'
+run_tool mod-wk-rv AGENT_TEAM_ROOT="$RB" -- create --workspace "$TD/ws/models-ws" --channel "$CHANNEL2" --community "$COMMUNITY" --owner "$OWNER" --name models-rv --roles reviewer --worker-model opus
+check 'and the options in a create that makes no workspace agent' eval 'rc_is 1 && has "$OUT/mod-wk-rv.out" "this create makes no workspace agent (--roles reviewer)" && [ ! -e "$RB/models-rv" ]'
+run_tool mod-ok AGENT_TEAM_ROOT="$RB" -- create --workspace "$TD/ws/models-ws" --channel "$CHANNEL2" --community "$COMMUNITY" --owner "$OWNER" --supervisor-backend codex --supervisor-model gpt-example-sol --agent-model opus --worker-model sonnet --worker-effort low
 check 'listed models are accepted and saved per backend; the channel supervisor'"'"'s against its restricted runtime'"'"'s CLI' eval 'rc_is 0 && grep -qx model_codex=gpt-example-sol "$RB/models-ws/supervisor/agent.conf" && grep -qx model_claude=opus "$RB/models-ws/models-ws/agent.conf"'
+check 'create saves the model and the level of the workspace agent'"'"'s workers for its backend, and nothing for the channel supervisor' eval '[ "$(grep -c -x -e worker_model_claude=sonnet -e worker_effort_claude=low "$RB/models-ws/models-ws/agent.conf")" = 2 ] && [ "$(grep -c "^worker_" "$RB/models-ws/supervisor/agent.conf")" = 0 ] && [ "$(grep -c "^worker_.*_codex=" "$RB/models-ws/models-ws/agent.conf")" = 0 ]'
+run_tool mod-wk-status AGENT_TEAM_ROOT="$RB" -- status models-ws
+check 'status shows them, for the workspace agent only' eval 'grep -qx "    its workers on claude: model sonnet, reasoning effort low" "$OUT/mod-wk-status.out" && [ "$(grep -c "its workers" "$OUT/mod-wk-status.out")" = 1 ]'
+run_tool mod-wk-again AGENT_TEAM_ROOT="$RB" -- create --workspace "$TD/ws/models-ws" --channel "$CHANNEL2" --community "$COMMUNITY" --owner "$OWNER" --worker-model opus
+check 'a repeated create keeps the agent and says the options were not saved, naming upgrade' eval 'rc_is 0 && has "$OUT/mod-wk-again.out" "create keeps it, so --worker-model and --worker-effort were not saved" && grep -qx worker_model_claude=sonnet "$RB/models-ws/models-ws/agent.conf"'
 run_tool mod-upg AGENT_TEAM_ROOT="$RB" -- upgrade models-ws --agent-model sonnet
 check 'upgrade sets a listed model and keeps the other backend'"'"'s slot' eval 'rc_is 0 && grep -qx model_claude=sonnet "$RB/models-ws/models-ws/agent.conf" && grep -qx model_codex=gpt-example-sol "$RB/models-ws/supervisor/agent.conf"'
+check 'and carries the settings of its workers' eval '[ "$(grep -c -x -e worker_model_claude=sonnet -e worker_effort_claude=low "$RB/models-ws/models-ws/agent.conf")" = 2 ]'
+run_tool mod-wk-upg AGENT_TEAM_ROOT="$RB" -- upgrade models-ws --worker-model default --worker-effort high
+check 'upgrade: default clears the workers'"'"' model, and a new level is saved' eval 'rc_is 0 && [ "$(grep "^worker_" "$RB/models-ws/models-ws/agent.conf" | tr "\n" " ")" = "worker_effort_claude=high " ]'
+run_tool mod-wk-upg-rule AGENT_TEAM_ROOT="$RB" -- upgrade models-ws --agent-effort low
+check 'upgrade refuses a level of the agent'"'"'s own on Claude while one for its workers is saved, and changes nothing' eval 'rc_is 1 && has "$OUT/mod-wk-upg-rule.out" "cannot be saved while the agent has one of its own there (low)" && hasnt "$RB/models-ws/models-ws/agent.conf" effort_claude=low'
+run_tool mod-wk-upg-cx AGENT_TEAM_ROOT="$RB" -- upgrade models-ws --agent-backend codex --agent-model gpt-example-old --worker-model 'gpt-example-old[high]'
+check 'on Codex a level in the model name is saved as the workers'"'"' level; the Claude slots stay' eval 'rc_is 0 && [ "$(grep "^worker_" "$RB/models-ws/models-ws/agent.conf" | LC_ALL=C sort | tr "\n" " ")" = "worker_effort_claude=high worker_effort_codex=high worker_model_codex=gpt-example-old " ]'
+run_tool mod-wk-status2 AGENT_TEAM_ROOT="$RB" -- status models-ws
+check 'status shows the ones of the saved backend' eval 'grep -qx "    its workers on codex: model gpt-example-old, reasoning effort high" "$OUT/mod-wk-status2.out"'
+run_tool mod-wk-upg-back AGENT_TEAM_ROOT="$RB" -- upgrade models-ws --agent-backend claude --worker-model default --worker-effort default
+check 'and default clears the ones of the backend of that run only' eval 'rc_is 0 && [ "$(grep "^worker_" "$RB/models-ws/models-ws/agent.conf" | LC_ALL=C sort | tr "\n" " ")" = "worker_effort_codex=high worker_model_codex=gpt-example-old " ]'
+run_tool mod-wk-rv2 AGENT_TEAM_ROOT="$RB" -- upgrade mixed --worker-model sonnet --dry-run
+check 'upgrade names the workers'"'"' change in its plan' eval 'rc_is 0 && has "$OUT/mod-wk-rv2.out" "model of its workers (claude): the same as the agent -> sonnet"'
 run_tool mod-upg-bad AGENT_TEAM_ROOT="$RB" -- upgrade models-ws --agent-model claude-haiku-5-5
 check 'upgrade refuses an unlisted model and changes nothing' eval 'rc_is 1 && grep -qx model_claude=sonnet "$RB/models-ws/models-ws/agent.conf"'
 # A team record still at format 1 (an upgrade stopped before its last step) is refused even when its agents are current.
