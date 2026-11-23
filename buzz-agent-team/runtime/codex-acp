@@ -69,9 +69,13 @@ def codex_server():
         prefix = "mcp_servers." + BUZZ_SERVER
         setting(prefix + ".command", str(HERE / "buzz-tools"))
         setting(prefix + ".required", True)
+        # buzz-tools registers the channel tools for the channel supervisor only (agent.conf role=supervisor);
+        # for a reviewer they do not exist, so enabling them here gives it nothing.
         tools = ["list_project", "read_project", "read_channel", "read_thread", "search_messages",
                  "read_canvas", "read_issue", "list_issues", "post_message", "list_memory",
-                 "read_memory", "save_memory"]
+                 "read_memory", "save_memory", "list_channels", "get_channel", "list_channel_members",
+                 "create_channel", "update_channel", "set_channel_topic", "set_channel_purpose",
+                 "add_channel_member", "remove_channel_member", "archive_channel", "unarchive_channel"]
         setting(prefix + ".enabled_tools", tools)
         for tool in tools:
             setting(prefix + ".tools." + tool + ".approval_mode", "approve")

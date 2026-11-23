@@ -29,6 +29,15 @@ BUZZ_TOOLS = {
     "read_channel", "read_thread", "search_messages", "read_canvas", "read_issue",
     "list_issues", "post_message", "list_memory", "read_memory", "save_memory",
 }
+# The channel supervisor's alone (agent.conf role=supervisor); test-codex-partner.py checks each one's arguments.
+CHANNEL_TOOLS = {
+    "list_channels", "get_channel", "list_channel_members", "create_channel", "update_channel",
+    "set_channel_topic", "set_channel_purpose", "add_channel_member", "remove_channel_member",
+    "archive_channel", "unarchive_channel",
+}
+# The CLI's tool-discovery entries; DeferredToolPlaceholder stands for deferred tools that are
+# still limited to the allowed set (it appears with some models, for example claude-opus-5-5).
+DISCOVERY = {"ToolSearch", "ListMcpResourcesTool", "ReadMcpResourceTool", "DeferredToolPlaceholder"}
 
 
 def model_fixture(calls, requests, models):
@@ -120,6 +129,27 @@ def exercise(home):
         ("mcp__buzz__post_message", {"channel": CHANNEL, "text": "Proposed todo"}),
         ("Read", {"file_path": str(outside)}),
     ]
+    # This folder has no agent.conf, so no channel tool is registered.
+    init, requests, models, results = session(home, runtime, workspace, adapter, cli, calls)
+    expected = {"Read", "Glob", "Grep"} | {"mcp__buzz__" + name for name in BUZZ_TOOLS}
+    assert init["permissionMode"] == "dontAsk"
+    assert expected <= set(init["tools"]) <= expected | DISCOVERY, init["tools"]
+    assert len(requests) == len(calls) + 1, len(requests)
+    for request in requests:
+        assert {tool["name"] for tool in request["tools"]} <= expected | DISCOVERY
+    assert results["tool_0"].get("is_error") and project.read_text() == "shared project fixture\n"
+    assert "shared project fixture" in str(results["tool_1"]) and not results["tool_1"].get("is_error")
+    assert "proposal-observed" in str(results["tool_2"]) and not results["tool_2"].get("is_error")
+    assert results["tool_3"].get("is_error") and "outside project fixture" not in str(results["tool_3"])
+    assert not any("personal" in t for t in init["tools"]), init["tools"]
+    assert set(models) == {"claude-opus-5-5"}, models
+    check_supervisor(home, workspace, adapter)
+    check_sign_in_passthrough(home, runtime, adapter)
+
+
+def session(home, runtime, workspace, adapter, cli, calls):
+    """One run of the restricted runtime against the loopback model, which makes CALLS in turn. Returns the
+    CLI's init event, the model requests, the models they named and the tool results by tool_use id."""
     requests, models = [], []
     with http.server.ThreadingHTTPServer(("127.0.0.1", 0), model_fixture(calls, requests, models)) as server:
         worker = threading.Thread(target=server.serve_forever, daemon=True)
@@ -144,25 +174,36 @@ def exercise(home):
             worker.join()
     init = next(e for line in run.stdout.splitlines() if line.startswith("{")
                 and (e := json.loads(line)).get("subtype") == "init")
-    expected = {"Read", "Glob", "Grep"} | {"mcp__buzz__" + name for name in BUZZ_TOOLS}
-    # The CLI's tool-discovery entries; DeferredToolPlaceholder stands for deferred tools that are
-    # still limited to the allowed set (it appears with some models, for example claude-opus-5-5).
-    discovery = {"ToolSearch", "ListMcpResourcesTool", "ReadMcpResourceTool", "DeferredToolPlaceholder"}
-    assert init["permissionMode"] == "dontAsk"
-    assert expected <= set(init["tools"]) <= expected | discovery, init["tools"]
-    assert len(requests) == len(calls) + 1, len(requests)
-    for request in requests:
-        assert {tool["name"] for tool in request["tools"]} <= expected | discovery
     results = {item["tool_use_id"]: item for message in requests[-1]["messages"]
                if isinstance(message["content"], list) for item in message["content"]
                if item.get("type") == "tool_result"}
-    assert results["tool_0"].get("is_error") and project.read_text() == "shared project fixture\n"
-    assert "shared project fixture" in str(results["tool_1"]) and not results["tool_1"].get("is_error")
-    assert "proposal-observed" in str(results["tool_2"]) and not results["tool_2"].get("is_error")
-    assert results["tool_3"].get("is_error") and "outside project fixture" not in str(results["tool_3"])
-    assert not any("personal" in t for t in init["tools"]), init["tools"]
-    assert set(models) == {"claude-opus-5-5"}, models
-    check_sign_in_passthrough(home, runtime, adapter)
+    return init, requests, models, results
+
+
+def check_supervisor(home, workspace, adapter):
+    """In a channel supervisor's folder (agent.conf role=supervisor) its model also sees the channel tools,
+    and a call reaches the CLI as one fixed argument list. The runtime finds its folder as in production:
+    PROJECT_BUZZ_AGENT_DIR is unset, so it is the folder around runtime/."""
+    folder = home / "supervisor"
+    runtime = folder / "runtime"
+    shutil.copytree(SKILL / "runtime", runtime)
+    (folder / "agent.conf").write_text("format=4\nid=supervisor\nrole=supervisor\n")
+    (folder / "identity.key").write_text("1".zfill(64))
+    (folder / ".env.buzz-acp.local").write_text("BUZZ_RELAY_URL=ws://127.0.0.1\nBUZZ_AUTH_TAG=[]\n")
+    name = '--temporary "Q4" it\'s'
+    argv = ["--format", "agent", "channels", "create", "--name=" + name, "--type", "stream",
+            "--visibility", "private", "--ttl", "3600"]
+    cli = home / "buzz-channels"
+    cli.write_text("#!" + sys.executable + " -I\nimport sys\n"
+                   f"if sys.argv[1:] != {argv!r}:\n    sys.exit(1)\nprint('channel-created')\n")
+    cli.chmod(0o700)
+    calls = [("mcp__buzz__create_channel", {"name": name, "ttl_seconds": 3600})]
+    init, requests, _, results = session(home, runtime, workspace, adapter, cli, calls)
+    expected = {"Read", "Glob", "Grep"} | {"mcp__buzz__" + tool for tool in BUZZ_TOOLS | CHANNEL_TOOLS}
+    assert expected <= set(init["tools"]) <= expected | DISCOVERY, init["tools"]
+    for request in requests:
+        assert {tool["name"] for tool in request["tools"]} <= expected | DISCOVERY
+    assert "channel-created" in str(results["tool_0"]) and not results["tool_0"].get("is_error"), results
 
 
 def check_sign_in_passthrough(home, runtime, adapter):
@@ -190,4 +231,5 @@ if __name__ == "__main__":
     with tempfile.TemporaryDirectory(prefix="buzz-partner-") as tmp:
         exercise(Path(tmp))
     print("Verified the tool list, workspace read, denied write and external read, no personal MCP tool, "
-          "the chosen model over the user's setting, the sign-in passthrough, and the Buzz proposal.")
+          "the chosen model over the user's setting, the sign-in passthrough, and the Buzz proposal; "
+          "a channel supervisor's model also sees the channel tools, and creating a channel reaches the CLI.")

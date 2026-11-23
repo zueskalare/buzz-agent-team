@@ -686,6 +686,7 @@ check 'it signs in by subscription only' grep -qx 'BUZZ_SIGN_IN=subscription' "$
 check 'it has no subscription rules file' test ! -e "$R/reviewer/subscriptions.toml"
 check 'its prompt is the reviewer prompt, with its name' test "$(sed -n '1p' "$R/reviewer/prompt.md")" = '# Shop Reviewer' -a "$(grep -c 'independent reviewer' "$R/reviewer/prompt.md")" -ge 1
 check 'the prompt has no unfilled placeholder' hasnt "$R/reviewer/prompt.md" '{{'
+check 'and no Channels rule: channel tools are the channel supervisor'"'"'s alone' hasnt "$R/reviewer/prompt.md" '## Channels'
 check 'the team has its own command' cmp -s "$TEMPLATE" "$R/team.sh"
 check 'create says which channel supervisor to refresh' has "$OUT/rv.out" 'the channel supervisor of workspace "shop" in this channel takes turns for these new agents until'
 RV_KEY=$(sed -n 's/^pubkey=//p' "$R/reviewer/agent.conf")

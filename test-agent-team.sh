@@ -436,6 +436,7 @@ check 'the settings are the ones the helper shows, and create named the file bef
 check 'next steps name the Buzz Desktop step' has "$OUT/create-shop.out" 'Authorize external identity'
 check 'the two public keys differ' eval '[ "$(grep ^pubkey= "$ROOT/shop/shop/agent.conf")" != "$(grep ^pubkey= "$ROOT/shop/supervisor/agent.conf")" ]'
 check 'the workspace agent'"'"'s folder is named after the team and recorded in team.conf; its role is agent' eval '[ "$(LC_ALL=C ls "$ROOT/shop" | grep -v -e "\.py$" -e "^team" -e VERSION | tr "\n" " ")" = "shop supervisor " ] && grep -qx agent_folder=shop "$ROOT/shop/team.conf" && [ "$(grep -E "^(id|role)=" "$ROOT/shop/shop/agent.conf" | tr "\n" " ")" = "id=agent role=agent " ]'
+check 'the channel supervisor'"'"'s record says role=supervisor, the line its runtime reads to add the channel tools' eval '[ "$(grep -E "^(id|role)=" "$ROOT/shop/supervisor/agent.conf" | tr "\n" " ")" = "id=supervisor role=supervisor " ]'
 check 'its env file'"'"'s paths point into that folder' eval 'grep -qx "RUN_BUZZ_ACP_KEY_FILE=$ROOT/shop/shop/identity.key" "$ROOT/shop/shop/.env.buzz-acp.local" && grep -qx "BUZZ_ACP_SYSTEM_PROMPT_FILE=$ROOT/shop/shop/prompt.md" "$ROOT/shop/shop/.env.buzz-acp.local"'
 check 'create lists each agent by its folder, the name to type' eval 'grep -q "^  shop  *Shop  *claude" "$OUT/create-shop.out" && grep -q "^  supervisor  *Shop Supervisor  *claude" "$OUT/create-shop.out"'
 # The folder takes the team's name exactly as written, unless a team folder already uses that name.
@@ -495,6 +496,8 @@ check 'workspace agent: the project'"'"'s agent in the workspace, a supervisor i
 check 'channel supervisor: talks with anyone, runs brainstorms, brings decisions to the owner' has "$S" "You are the project’s channel supervisor. You talk with anyone in the channel, run brainstorms to a decision, propose todos, and bring decisions to the owner."
 check 'each names the other by display name' eval 'has "$A" "The channel supervisor (Shop Supervisor) talks with everyone in the channel" && has "$S" "The workspace agent (Shop) works in the project folder"'
 check 'channel supervisor decides when to speak' has "$S" "Stay silent"
+check 'channel supervisor: a Channels rule, acting on the owner'"'"'s signed request, private by default, no delete; the workspace agent has none' \
+    eval 'has "$S" "## Channels" && has "$S" "Do it when the owner asks, and check that the asking message is signed by the owner." && has "$S" "Make a channel private unless the owner says open" && has "$S" "You cannot delete a channel." && hasnt "$A" "## Channels"'
 check 'channel supervisor proposes todos in their Buzz thread' has "$S" "propose a todo in its Buzz thread"
 check 'hand-off: it mentions the workspace agent only for accepted work (naming the acceptance) or a question, never to acknowledge' has "$S" "Mention the workspace agent only to hand it work the owner accepted, naming the owner’s accepting message, or to ask it something you need answered. Never mention it to acknowledge a message."
 check 'hand-off: its mention never stands in for the owner'"'"'s decision' has "$S" "It starts work only on the owner’s own accepting message, which it checks itself, so your mention never stands in for the owner’s decision."
@@ -575,9 +578,21 @@ for tool in claude-agent-acp restricted-claude buzz-tools codex-acp; do
     check "the channel supervisor's runtime $tool is executable and matches the source" eval '[ "$(mode_of "$sp/runtime/$tool")" = 700 ] && cmp "$sp/runtime/$tool" "$SKILL_DIR/runtime/$tool"'
 done
 if [ -n "$REAL_BUZZ" ]; then
-    for cmd in 'messages get' 'messages thread' 'messages search' 'messages send' 'canvas get' 'issues list' 'issues get' 'mem ls' 'mem get' 'mem set'; do
+    for cmd in 'messages get' 'messages thread' 'messages search' 'messages send' 'canvas get' 'issues list' 'issues get' 'mem ls' 'mem get' 'mem set' \
+        'channels list' 'channels get' 'channels members' 'channels create' 'channels update' 'channels topic' 'channels purpose' \
+        'channels add-member' 'channels remove-member' 'channels archive' 'channels unarchive'; do
         check "Buzz CLI supports the restricted runtime operation: $cmd" "$REAL_BUZZ" $cmd --help >/dev/null
     done
+    # The options the channel supervisor's channel tools pass (runtime/buzz-tools).
+    cli_options() { # SUBCOMMAND OPTION...: the CLI's help for "channels SUBCOMMAND" lists each option
+        local help o
+        help=$("$REAL_BUZZ" channels "$1" --help) || return 1
+        shift
+        for o in "$@"; do printf '%s\n' "$help" | grep -Eq -- "^ +$o( |\$)" || return 1; done
+    }
+    check 'Buzz CLI has every option the channel tools pass' eval 'cli_options create --name --type --visibility --description --ttl --unlisted &&
+        cli_options update --channel --name --description --visibility --ttl --no-ttl && cli_options add-member --channel --pubkey --role &&
+        cli_options topic --channel --topic && cli_options purpose --channel --purpose && cli_options remove-member --channel --pubkey'
 fi
 
 scenario 'Running create again changes nothing and reports what exists (C2)'
