@@ -1,7 +1,8 @@
-# Which events start a turn for the discussion partner (harness: crates/buzz-acp/src/filter.rs).
+# Which events start a turn for the channel supervisor (harness: crates/buzz-acp/src/filter.rs).
 # Rules are tried in order and the first match wins. Each filter is an evalexpr expression on the
-# event's author (hex public key): the partner takes no turn for this team's own agents, and none
-# for other local agents of this channel unless they mention it. agent-team.sh writes the keys.
+# event's author (hex public key): the channel supervisor takes no turn for this team's own agents
+# (its workspace agent included, so their mentions cannot set each other off), and none for other
+# local agents of this channel unless they mention it. agent-team.sh writes the keys.
 [[rules]]
 name = "Project discussion"
 channels = ["{{CHANNEL_ID}}"]

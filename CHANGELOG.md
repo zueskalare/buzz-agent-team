@@ -2,6 +2,28 @@
 
 Versions of the buzz-agent-team skill, newest first. The version is the one line of `buzz-agent-team/VERSION`, and each one is the Git tag `v<version>` of this repository. What the three numbers mean is in the [README](README.md#versions).
 
+## 3.0.0 (2026-11-22)
+
+The two agents of a team swap their jobs. The agent named after the project (id `assistant`) becomes the workspace agent, with all the tools. The agent named "<Project> Supervisor" (id `supervisor`) becomes the channel supervisor, which talks with everyone in the channel. A team made by 2.0.0 does not start until it is upgraded (team folder format 3).
+
+What changes for a 2.0.0 team, after `agent-team.sh upgrade <team>`:
+
+- **The assistant, "<Project>", is the workspace agent.** It runs the stock adapter with all its tools and worker subagents, in `bypass-permissions`, as the supervisor did. It gets the supervisor's prompt rules, the "Your workspace" rule word for word, the sandbox settings in the project folder on Claude, and the workspace-write mode pin on Codex. It plans the work, dispatches worker subagents, reviews their evidence, and keeps `PROJECT.md` and the tracker.
+- **It answers the owner and its channel supervisor.** Its env file says `BUZZ_ACP_RESPOND_TO=allowlist` and names the channel supervisor's public key in `BUZZ_ACP_RESPOND_TO_ALLOWLIST`. With no channel supervisor known on this machine it says `owner-only`.
+- **The supervisor, "<Project> Supervisor", is the channel supervisor.** It runs the restricted runtime in its own folder (it reads the project folder; no edits, no commands, no web) and takes a turn on every ordinary message in its channel, as the discussion partner did. It runs brainstorms to a decision, proposes todos, brings decisions to the owner, and hands work the owner accepted to the workspace agent by mentioning it.
+- **The channel supervisor still takes no turn for its own team's agents.** So a mention starts a turn in one direction only, from the channel supervisor to the workspace agent, and the two cannot set each other off.
+- **Each agent keeps its folder, key, proof, display name, backend, models and effort.** Its saved model was chosen for its earlier job: the cheaper model usually sat on the discussion partner, which is now the workspace agent. The upgrade plan names each agent's new job and the model it keeps; `--assistant-model` and `--supervisor-model` pick new ones in the same run.
+- **Files move with the jobs.** The runtime and `subscriptions.toml` move from the assistant's folder to the supervisor's. Each replaced or removed file is kept beside itself as `<file>.bak-<time>`. Each agent's profile description follows its new job; Buzz shows the old one until `finish` runs again.
+- **Security.** The agent with every tool now takes a turn when an agent that listens to anyone in the channel mentions it. Before, its env file named only the owner. Starting work still needs the owner's own accepting message, signed by the owner. That is a rule in the workspace agent's prompt, and the harness does not enforce it. (Read in the harness's source, not tested: its owner-only mode also admits an agent whose Buzz profile carries a proof from the same owner. So in 2.0.0 the discussion partner may already have been able to reach the supervisor by mentioning it, and a reviewer of the same owner can reach the workspace agent the same way. 3.0.0 names the channel supervisor in the env file, so that path no longer depends on the profile.)
+
+Changed:
+
+- `create --roles supervisor` is refused. Its counterpart is `--roles assistant`: a workspace agent for a channel that already has a channel supervisor in another team. `--supervisor-name` names that channel supervisor, or the first one found on this machine is used; `team.conf` records it as `external_supervisor`.
+- `create` and `start` refuse a team in format 2, as they refuse format 1, and name `upgrade`; `preflight NAME` marks it as a problem. `status` lists such a team and says what to do. `team.sh` refuses to start an agent whose record is not format 3.
+- `agent-team.sh status`, `team.sh check` and `team.sh status` say whom each agent answers.
+- `models` without `--role` lists the workspace agent's models (`assistant`), on the stock adapter as before.
+- The prompts: `templates/assistant.md` is the workspace agent's, `templates/supervisor.md` the channel supervisor's. Their placeholders are `{{SUPERVISOR_NAME}}` and `{{WORKSPACE_AGENTS}}`. `project.md` and one sentence of `reviewer.md` name the new jobs.
+
 ## 2.0.0 (2026-11-22)
 
 What holds the supervisor to its project folder changed: from programs placed in front of its adapter, to a rule in its prompt backed by plain settings. A team made by 1.0.0 keeps running as it is until it is upgraded.

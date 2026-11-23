@@ -11,7 +11,18 @@
 # the provider it runs on (claude-agent-acp or codex-acp), signed in through your own subscription.
 # "team.sh check" verifies all of it and starts nothing; start runs the same check first.
 # python3 is used to retrieve a provider's model list for the model menu (acp-models.py here) and to
-# put the sandbox settings of a supervisor on Claude into the project folder (workspace-settings.py here).
+# put the sandbox settings of the workspace agent on Claude into the project folder (workspace-settings.py
+# here).
+#
+# THE TWO JOBS of a team (their ids are assistant and supervisor; since format 3):
+#   assistant    the workspace agent: the stock adapter with all its tools and worker subagents. It
+#                answers the owner and its channel supervisor, and starts work only on the owner's
+#                own acceptance.
+#   supervisor   the channel supervisor: the restricted runtime. It takes a turn on every ordinary
+#                message in its channel, talks with anyone there, and hands accepted work to the
+#                workspace agent.
+# A reviewer's own team has one agent, reviewer, on the restricted runtime. This command derives how
+# each agent is held, and whom it answers, from that agent's settings file.
 #
 # THE PROJECT FOLDER the agents work in is the folder this command is started from, or --workspace DIR:
 #   cd ~/code/shop && ~/.buzz-agents/shop/team.sh
@@ -73,8 +84,8 @@ start and check:
                             ultra). default sets none for this run, whatever is saved.
   --yes                     ask nothing: every agent keeps its saved provider and model
   --no-wall                 do not put the sandbox settings into the project folder at this
-                            start, and start a supervisor on Claude in a folder that has none.
-                            Only the rule in its prompt then holds it. Settings that are
+                            start, and start the workspace agent on Claude in a folder that has
+                            none. Only the rule in its prompt then holds it. Settings that are
                             already in the folder stay there and apply.
   --verbose                 also print the launcher's own check of each agent
   --check                   with start: the same as "team.sh check"
@@ -98,10 +109,15 @@ One agent at a time: each agent folder holds its own start command.
                                       provider, model and reasoning effort, as this command does;
                                       --yes asks nothing (start.sh --help)
 
+The jobs: the assistant is the workspace agent, with all the tools of its adapter and worker
+subagents; it answers the owner and its channel supervisor. The supervisor is the channel supervisor:
+it takes a turn on every ordinary message in its channel and hands accepted work to the workspace
+agent. check and status say whom each agent answers.
+
 What holds each agent to the project folder:
-  - The discussion partner and the reviewer run a restricted runtime: they read only the project
+  - The channel supervisor and the reviewer run a restricted runtime: they read only the project
     folder, and they cannot edit files or run commands at all.
-  - A supervisor on Claude is held by plain Claude Code settings in the project folder,
+  - The workspace agent on Claude is held by plain Claude Code settings in the project folder,
     .claude/settings.json, which Claude Code reads itself. Before a start this command puts them
     there with workspace-settings.py from this folder, and an existing file keeps everything else
     it holds. With them its file tools read and write only inside the project folder, and its
@@ -109,10 +125,10 @@ What holds each agent to the project folder:
     folder, and they read no user folder outside the project folder. A plain buzz command runs
     outside the sandbox, which has no direct network. Every Claude Code session started in that
     folder, your own included, runs under the same settings.
-  - A supervisor on Codex runs its commands in Codex's workspace-write sandbox, which the stock
+  - The workspace agent on Codex runs its commands in Codex's workspace-write sandbox, which the stock
     adapter sets on every turn: they write only inside the project folder and temporary folders,
     and they have no network. They can read the whole disk. No file is written for it.
-  - The rule in the supervisor's prompt asks for what no setting holds: a command it runs again
+  - The rule in the workspace agent's prompt asks for what no setting holds: a command it runs again
     outside the sandbox, a buzz command given a file outside the project folder, and on Codex
     what it reads. Folders your own Claude settings add as working folders count as inside.
 
@@ -130,8 +146,10 @@ Before anything starts, the check must pass:
 
 The version: VERSION in this folder is the version of the buzz-agent-team skill that created the
 folder or last upgraded it (agent-team.sh upgrade), and so the version this command, each
-start.sh, acp-models.py and wall/ come from. "team.sh version" prints it; status shows it too. A
-folder made before the skill had versions has none until it is upgraded.
+start.sh, acp-models.py and workspace-settings.py come from. "team.sh version" prints it; status
+shows it too. A folder made before the skill had versions has none until it is upgraded. An agent
+whose record is in an earlier format than 3 (made by version 2.0.0 or earlier of the skill, when
+the two jobs were assigned the other way round) does not start until the skill upgrades it.
 
 Moving the team: stop the agents, copy this whole folder (it holds the secret keys, so copy it
 privately), install the commands above on the new machine, sign in there, then go to the project
@@ -253,7 +271,43 @@ team_agents() { # agent ids present here, in role order
 }
 afield() { conf_get "$T_DIR/$1/agent.conf" "$2" 2>/dev/null || true; } # ID KEY
 label() { local n; n=$(afield "$1" name); printf '%s (%s)' "${n:-$1}" "$1"; }
+# The record format this command starts. An earlier one is from a skill version that assigned the two
+# jobs the other way round (format 2) or from before 20 November (format 1): the skill upgrades it.
+FORMAT=3
 agent_format() { conf_get "$T_DIR/$1/agent.conf" format 2>/dev/null || printf '1'; }
+lower() { printf '%s' "$1" | LC_ALL=C tr 'A-Z' 'a-z'; }
+# An agent of this team folder, or of a team folder beside it, by public key; else the key itself.
+key_label() { # HEX
+    local f k n
+    for f in "$T_DIR"/*/agent.conf "$T_DIR"/../*/*/agent.conf; do
+        [ -f "$f" ] || continue
+        k=$(conf_get "$f" pubkey) || continue
+        [ "$(lower "$k")" = "$(lower "$1")" ] || continue
+        n=$(conf_get "$f" name) || n=''
+        f=${f%/agent.conf}
+        printf '%s (%s of %s)' "${n:-$1}" "${f##*/}" "$(basename -- "${f%/*}")"
+        return 0
+    done
+    printf 'an agent that is not beside this team folder (public key %s)' "$1"
+}
+# Whom an agent answers, as its settings file says (public keys only; the harness always adds the
+# owner). Returns 1 for allowlist mode with no public key, which the harness refuses to start.
+answers() { # ID
+    local env=$T_DIR/$1/$ENV_NAME mode keys k names=''
+    mode=$(env_get "$env" BUZZ_ACP_RESPOND_TO) || mode=owner-only
+    case $mode in
+        anyone)
+            if [ "$(env_get "$env" BUZZ_ACP_SUBSCRIBE || true)" = config ]; then
+                printf 'anyone in its channel (its subscription rules decide which messages start a turn)'
+            else printf 'anyone who mentions it'; fi ;;
+        allowlist)
+            keys=$(env_get "$env" BUZZ_ACP_RESPOND_TO_ALLOWLIST) || keys=''
+            for k in ${keys//,/ }; do names="$names${names:+, }$(key_label "$k")"; done
+            [ -n "$names" ] || { printf 'nobody: allowlist mode with no public key'; return 1; }
+            printf 'the owner and %s' "$names" ;;
+        *) printf 'the owner only' ;;
+    esac
+}
 # The saved provider of an agent: agent.conf's backend=, else the adapter its settings file names.
 saved_backend() {
     local b
@@ -672,13 +726,13 @@ choose_effort() { # ID -> RUN_EFFORT_<id>; on Codex the level also goes into RUN
 
 # ---------------------------------------------------------------- what holds an agent to the project folder
 # How an agent is held for this run:
-#   runtime   its restricted runtime (the discussion partner, the reviewer): reads inside the project
+#   runtime   its restricted runtime (the channel supervisor, the reviewer): reads inside the project
 #             folder only, no edits, no commands
 #   settings  the stock Claude adapter with the sandbox settings in the project folder,
 #             PROJECT/.claude/settings.json (workspace-settings.py in this folder writes and checks them)
 #   codex     the stock Codex adapter, which runs every turn in Codex's workspace-write sandbox
 #   none      the stock Claude adapter in a project folder without those settings (--no-wall)
-# Beside these, the supervisor's prompt carries the rule to stay inside the project folder.
+# Beside these, the workspace agent's prompt carries the rule to stay inside the project folder.
 NO_WALL=no
 WS_APPLY_ERROR=''   # why a start could not put the settings into the project folder
 own_runtime() { # ID: its settings name a runtime of its own folder
@@ -790,13 +844,14 @@ run_checks() { # AGENT...: 0 when everything a start needs is in place
         if [ "$b" = claude ] && [ -z "$e" ] && [ -n "${CLAUDE_CODE_EFFORT_LEVEL:-}" ]; then
             line note 'reasoning effort' "this shell exports CLAUDE_CODE_EFFORT_LEVEL=$CLAUDE_CODE_EFFORT_LEVEL, which this agent will use"
         fi
-        if [ "$(agent_format "$id")" != 2 ]; then
-            line PROBLEM record 'made by an earlier setup (format 1)' 'upgrade it with the skill: agent-team.sh upgrade <team>'
+        f=$(agent_format "$id")
+        if [ "$f" != "$FORMAT" ]; then
+            line PROBLEM record "made by an earlier version of the skill (format $f)" 'upgrade it with the skill: agent-team.sh upgrade <team>'
             continue
         fi
         missing=''
         for f in identity.key "$ENV_NAME" prompt.md; do [ -s "$home/$f" ] || missing="$missing $f"; done
-        # An agent whose settings file names subscription rules (the discussion partner) needs that file.
+        # An agent whose settings file names subscription rules (the channel supervisor) needs that file.
         rules=$(env_get "$home/$ENV_NAME" BUZZ_ACP_CONFIG) || rules=''
         if [ -n "$rules" ] && [ ! -s "$home/${rules##*/}" ]; then missing="$missing ${rules##*/}"; fi
         if [ -n "$missing" ]; then
@@ -808,6 +863,8 @@ run_checks() { # AGENT...: 0 when everything a start needs is in place
         case $perm in 600 | 400) ;; *) line PROBLEM 'key file' "identity.key has mode $perm; other users may read it" "chmod 600 $home/identity.key" ;; esac
         if [ -n "$(env_get "$home/$ENV_NAME" BUZZ_AUTH_TAG || true)" ]; then line ok proof 'ownership proof stored'
         else line MISSING proof 'no ownership proof stored' 'store one with the skill: agent-team.sh proof <team> '"$id"; fi
+        if out=$(answers "$id"); then line ok answers "$out"
+        else line PROBLEM answers "$out, which the harness refuses to start" 'rebuild its settings with the skill: agent-team.sh upgrade <team>'; fi
         old=$(env_get "$home/$ENV_NAME" RUN_BUZZ_ACP_KEY_FILE) || old=''
         if [ -n "$old" ] && [ "$old" != "$home/identity.key" ]; then
             line note 'moved folder' "the settings file names ${old%/identity.key}; this folder's own paths are used instead"
@@ -834,7 +891,7 @@ run_checks() { # AGENT...: 0 when everything a start needs is in place
         esac
         own=$(env_get "$home/$ENV_NAME" BUZZ_ACP_AGENT_COMMAND) || own=''
         if case $own in */runtime/claude-agent-acp | */runtime/codex-acp) true ;; *) false ;; esac; then
-            # The discussion partner and the reviewer run their own restricted runtime; that copy is checked.
+            # The channel supervisor and the reviewer run their own restricted runtime; that copy is checked.
             runtime=$home/runtime/$(backend_command "$b")
             if [ ! -x "$runtime" ]; then
                 line MISSING runtime "runtime/$(backend_command "$b") is not here" 'rebuild it with the skill: agent-team.sh upgrade <team>'
@@ -843,7 +900,7 @@ run_checks() { # AGENT...: 0 when everything a start needs is in place
             rc=0
             out=$("$runtime" --check-runtime 2>&1 < /dev/null) || rc=$?
             if [ "$rc" = 0 ]; then line ok runtime "runtime/$(backend_command "$b") (restricted tools)"
-            else line PROBLEM runtime "the $b discussion runtime check failed:"; printf '%s\n' "$out" | tail -n 12 | indent; fi
+            else line PROBLEM runtime "the $b restricted runtime check failed:"; printf '%s\n' "$out" | tail -n 12 | indent; fi
         else
             need_cmd "$(backend_command "$b")"
         fi
@@ -1088,8 +1145,10 @@ cmd_status() {
         size=0
         if [ -f "$home/agent.log" ]; then size=$(wc -c < "$home/agent.log" | tr -d ' '); fi
         say "  $(label "$id")"
-        if [ "$(agent_format "$id")" = 2 ]; then say "    saved: $b, model ${m:-the runtime default}, reasoning effort ${se:-none set here}"
-        else say '    made by an earlier setup (format 1): upgrade it with the skill before starting'; fi
+        if [ "$(agent_format "$id")" = "$FORMAT" ]; then
+            say "    saved: $b, model ${m:-the runtime default}, reasoning effort ${se:-none set here}"
+            say "    answers $(answers "$id" || true)"
+        else say "    made by an earlier version of the skill (format $(agent_format "$id")): upgrade it with the skill (agent-team.sh upgrade <team>) before starting"; fi
         say "    $run"
         say "    log $home/agent.log ($size bytes)"
         if [ -x "$home/start.sh" ]; then say "    start it alone: $home/start.sh"; fi

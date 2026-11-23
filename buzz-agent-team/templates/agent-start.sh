@@ -5,7 +5,7 @@
 # one folder up and does the work, so the check, the sandbox settings and the launcher are the same:
 #   <team>/<agent>/start.sh        <team>/team.sh
 # Run it from the project folder, as the team's command is:
-#   cd ~/code/shop && ~/.buzz-agents/shop/supervisor/start.sh
+#   cd ~/code/shop && ~/.buzz-agents/shop/assistant/start.sh
 # In a terminal it asks this agent's provider, model and reasoning effort; Enter keeps the saved
 # one. The model menu shows the list the provider's adapter offers at that moment. With --yes, or
 # without a terminal, it asks nothing and the agent starts on its saved choices. A choice lasts for
@@ -34,7 +34,7 @@ saved one. Before the model menu, the provider's adapter is asked which models i
   --backend claude|codex    this provider, for this run (no provider question)
   --effort LEVEL            this reasoning effort, for this run; default sets none
   --workspace DIR           another project folder than the current one
-  --no-wall                 do not put the sandbox settings into the project folder (a supervisor on Claude)
+  --no-wall                 do not put the sandbox settings into the project folder (the workspace agent on Claude)
   --check                   check this agent and start nothing
   --verbose                 also print the launcher's own check
 
