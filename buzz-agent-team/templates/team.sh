@@ -45,11 +45,14 @@
 #   team.sh check             check the environment and every agent's settings
 #   team.sh status            what runs, where, on which provider and model
 #   team.sh stop              stop the agents this command started
+#   team.sh restart           start the agents that run again as they run: asks nothing, changes no choice
 #   team.sh version           the version of the skill that wrote this folder's files (VERSION here)
 #   team.sh help              every command and option
 #
-# Each agent folder also holds start.sh, which starts that one agent through this command:
+# Each agent folder also holds start.sh, which starts that one agent through this command, and
+# restart.sh, which starts it again as its last run was, from any folder:
 #   cd ~/code/shop && ~/.buzz-agents/shop/shop/start.sh
+#   ~/.buzz-agents/shop/shop/restart.sh
 
 set -uo pipefail
 umask 077
@@ -58,7 +61,13 @@ PROG=team.sh
 ENV_NAME=.env.buzz-acp.local
 ALL_ROLES='agent supervisor reviewer'
 
-die() { printf '%s: %s\n' "$PROG" "$*" >&2; exit 1; }
+# DIE_NOTE: a second line for die, set by a restart: what it left as it was, and how to go on.
+DIE_NOTE=''
+die() {
+    printf '%s: %s\n' "$PROG" "$*" >&2
+    if [ -n "$DIE_NOTE" ]; then printf '%s: %s\n' "$PROG" "$DIE_NOTE" >&2; fi
+    exit 1
+}
 say() { printf '%s\n' "$*"; }
 note() { printf '%s\n' "$*" >&2; }
 
@@ -68,6 +77,8 @@ Usage: team.sh [start] [AGENT...] [options]   start agents of this team folder
        team.sh check [AGENT...] [options]     check the environment and settings; starts nothing
        team.sh status                         agents, saved choices and running state
        team.sh stop [AGENT...] [--force]      stop agents this command started
+       team.sh restart [AGENT...] [--all] [--force]
+                                              start agents again as their last run was; asks nothing
        team.sh workspace DIR                  save DIR as the team's project folder in team.conf
        team.sh version                        the version of the skill that wrote this folder's files
 
@@ -137,6 +148,30 @@ One agent at a time: each agent folder holds its own start command.
   <this folder>/<agent>/start.sh      starts that agent only. In a terminal it asks that agent's
                                       provider, model and reasoning effort, as this command does;
                                       --yes asks nothing (start.sh --help)
+  <this folder>/<agent>/restart.sh    starts that agent again as its last run was, whether it runs
+                                      or was stopped; asks nothing (restart.sh --help)
+
+restart starts agents again as their last run was. It asks nothing and changes no choice: the
+provider, the model, the reasoning effort, the project folder and, for the workspace agent, the model
+and the reasoning effort of its workers are those of each agent's last run, whatever is saved and
+whatever folder the command is run from. It is the start those choices would give as options, so the
+same check applies, and it takes no option that changes a choice: to change one, stop the agent and
+start it with the option.
+  team.sh restart             the agents that run now, and those that ended by themselves
+  team.sh restart AGENT...    those agents, running or stopped
+  team.sh restart --all       every agent with a run on record, the stopped ones included
+  --force                     as for stop: end an agent that does not stop in time
+  --verbose                   also print the launcher's own check of each agent
+An agent that runs is stopped first, because the launcher refuses to check one that runs; then come
+the check and the start. The record of a run is agent.pid in the agent's folder; a stop keeps it there
+as agent.last, and a start removes that. So a stopped agent can be started again as it was, also
+after the skill upgraded the team folder: team.sh stop, agent-team.sh upgrade <team>, team.sh restart
+--all. When the check fails or an agent does not start, each agent keeps the record of its last run,
+and the restart can be run again. An agent that was never started, or was last stopped by a version
+before 5.2.0, has no record: start it with its start.sh. Two things follow the project folder as it
+is now, not the last run: an agent gets the browser when the file of its provider names it now
+(nothing is written for it), and the settings of its provider are put there again unless the last
+run had none (--no-wall).
 
 The jobs: the agent is the workspace agent, with worker subagents; it answers the owner and its
 channel supervisor. The supervisor is the channel supervisor: it takes a turn on every ordinary
@@ -516,13 +551,24 @@ resolve_workspace() { # -> RUN_WORKSPACE WORKSPACE_SOURCE
 # The PID is the launcher's, which becomes the harness (exec): one process per agent, however many
 # conversations it runs at a time. The harness starts that many adapter processes itself and stops them
 # when it stops, so stop and status follow the one PID.
-read_pidfile() { # HOME -> PF_PID PF_START PF_BACKEND PF_MODEL PF_WORKSPACE PF_EFFORT PF_WALL PF_WMODEL PF_WEFFORT PF_WREC PF_BROWSER; returns 1 when there is none
+# agent.last (since 5.2.0): the record of an agent's last run, after that run was stopped. A stop keeps
+# agent.pid under that name instead of removing it, and a start removes it, because the run it starts is
+# the last one then. restart repeats the run on record: agent.pid for an agent that runs or that ended by
+# itself, else agent.last. The skill's own stop and start (agent-team.sh) keep it the same way.
+read_runfile() { # FILE -> PF_PID PF_START PF_BACKEND PF_MODEL PF_WORKSPACE PF_EFFORT PF_WALL PF_WMODEL PF_WEFFORT PF_WREC PF_BROWSER; returns 1 when there is none
     PF_PID='' PF_START='' PF_BACKEND='' PF_MODEL='' PF_WORKSPACE='' PF_EFFORT='' PF_WALL='' PF_WMODEL='' PF_WEFFORT='' PF_WREC='' PF_BROWSER=''
-    [ -f "$1/agent.pid" ] || return 1
+    [ -f "$1" ] || return 1
     { IFS= read -r PF_PID && IFS= read -r PF_START && IFS= read -r PF_BACKEND && IFS= read -r PF_MODEL && IFS= read -r PF_WORKSPACE && IFS= read -r PF_EFFORT && IFS= read -r PF_WALL &&
-        IFS= read -r PF_WMODEL && IFS= read -r PF_WEFFORT && PF_WREC=yes && IFS= read -r PF_BROWSER; } < "$1/agent.pid" || true
+        IFS= read -r PF_WMODEL && IFS= read -r PF_WEFFORT && PF_WREC=yes && IFS= read -r PF_BROWSER; } < "$1" || true
     case $PF_PID in '' | *[!0-9]*) PF_PID=''; return 1 ;; esac
 }
+read_pidfile() { read_runfile "$1/agent.pid"; } # HOME: the run that is going on, or that ended by itself
+read_record() { # HOME: the last run on record, agent.pid before agent.last -> PF_*; returns 1 when there is none
+    read_runfile "$1/agent.pid" || read_runfile "$1/agent.last"
+}
+keep_record() { mv -f -- "$1/agent.pid" "$1/agent.last" 2>/dev/null || rm -f -- "$1/agent.pid"; } # HOME: its run is over
+# The run PF_* describes, in words: "claude, model opus, reasoning effort high, in /code/shop".
+record_words() { printf '%s' "${PF_BACKEND:-an unrecorded provider}${PF_MODEL:+, model $PF_MODEL}${PF_EFFORT:+, reasoning effort $PF_EFFORT}${PF_WORKSPACE:+, in $PF_WORKSPACE}"; }
 proc_start() { trim "$(ps -o lstart= -p "$1" 2>/dev/null || true)"; }
 # The recorded process is alive and is the same process (same PID and start time) that was started.
 ours_alive() { # HOME
@@ -1603,7 +1649,7 @@ run_checks() { # AGENT...: 0 when everything a start needs is in place
 
 # ---------------------------------------------------------------- start and check
 cmd_start() { # MODE(start|check) ARGS...
-    local mode=$1 ids='' all=no yes=no id b m e w home log pid protocol wait_s max_bytes size i alive started='' todo='' explicit rc out wm we wk bk br bopt='' cv
+    local mode=$1 ids='' all=no yes=no id b m e w home log pid protocol wait_s max_bytes size i alive started='' todo='' explicit rc out wm we wk bk br bopt='' cv word=start failed=''
     shift
     while [ "$#" -gt 0 ]; do
         case $1 in
@@ -1647,6 +1693,7 @@ cmd_start() { # MODE(start|check) ARGS...
     load_team
     [ -n "$(team_agents)" ] || die "$T_DIR has no agent folders"
     resolve_workspace
+    if [ "$RESTART" = yes ]; then word=restart WORKSPACE_SOURCE='where the last run was'; fi
     # Questions are asked in a terminal, for a start only. TEAM_SH_ASK=1 reads them from standard input.
     if [ "$mode" = start ] && [ "$yes" = no ] && { [ -t 0 ] || [ "${TEAM_SH_ASK:-}" = 1 ]; }; then ASK=yes; fi
     ids=$(trim "$ids")
@@ -1669,6 +1716,9 @@ cmd_start() { # MODE(start|check) ARGS...
     done
     # The browser belongs to the project folder: one question for every agent this start starts.
     choose_browser
+    # A restart stops its agents here: after every choice of the last run was accepted again, and before
+    # the check, because the launcher refuses to check an agent that runs.
+    if [ "$RESTART" = yes ]; then restart_stop; fi
     # A choice that would switch an agent that is already running stops here, before anything starts.
     for id in $SELECTED; do
         eval "b=\$RUN_BACKEND_$id; explicit=\$RUN_EXPLICIT_$id"
@@ -1765,7 +1815,7 @@ cmd_start() { # MODE(start|check) ARGS...
             size=$(wc -c < "$log" | tr -d ' ')
             if [ "$size" -gt "$max_bytes" ]; then mv -f -- "$log" "$log.1"; fi
         fi
-        printf '\n=== %s: team.sh start (%s, provider %s, model %s, reasoning effort %s, %s%sproject folder %s) ===\n' "$(now_utc)" "$LAUNCHER" "$b" "${m:-saved}" "${e:-none set here}" "${wk:+workers: $wk, }" "${bk:+$bk, }" "$RUN_WORKSPACE" >> "$log"
+        printf '\n=== %s: team.sh %s (%s, provider %s, model %s, reasoning effort %s, %s%sproject folder %s) ===\n' "$(now_utc)" "$word" "$LAUNCHER" "$b" "${m:-saved}" "${e:-none set here}" "${wk:+workers: $wk, }" "${bk:+$bk, }" "$RUN_WORKSPACE" >> "$log"
         (
             scrub_env
             agent_env "$id"
@@ -1778,6 +1828,8 @@ cmd_start() { # MODE(start|check) ARGS...
         w=$(hold_kind "$b")
         printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' "$pid" "$(proc_start "$pid")" "$b" "$m" "$RUN_WORKSPACE" "$e" "$w" "$wm" "$we" "$br" > "$home/.new-pid"
         mv -f -- "$home/.new-pid" "$home/agent.pid"
+        # This run is the last one now: the record of the one before it goes.
+        rm -f -- "$home/agent.last"
         alive=yes
         i=0
         while [ "$i" -lt $((wait_s * 5)) ]; do
@@ -1789,6 +1841,8 @@ cmd_start() { # MODE(start|check) ARGS...
             wait "$pid" 2>/dev/null || true
             note "$PROG: $id exited right after starting. Last lines of $log:"
             tail -n 20 "$log" >&2 || true
+            # A restart goes on to its other agents, which it has stopped; agent.pid keeps this run on record.
+            if [ "$RESTART" = yes ]; then failed="$failed${failed:+, }$(adir "$id")"; continue; fi
             [ -z "$started" ] || note "Still running: $started"
             die "$(adir "$id") did not start"
         fi
@@ -1798,7 +1852,117 @@ cmd_start() { # MODE(start|check) ARGS...
         if [ "$w" = none ]; then say "$(adir "$id"): WARNING: started WITHOUT sandbox settings in its project folder; only the rule in its prompt holds it"; fi
         started="$started${started:+, }$id"
     done
+    if [ -n "$failed" ]; then
+        DIE_NOTE="Its record is kept (agent.pid): once the cause is fixed, start each again as it was with its own restart.sh, or: $T_DIR/team.sh restart ${failed//,/}"
+        die "did not start: $failed"
+    fi
     say "Stop them with: $T_DIR/team.sh stop      See them with: $T_DIR/team.sh status"
+}
+
+# ---------------------------------------------------------------- restart
+# restart starts agents again as their last run was. It reads the record of that run (read_record) and
+# hands it to the start as the options that would give that run: the provider, the model, the reasoning
+# effort, the project folder and, for the workspace agent, its workers. So every check of a start applies,
+# nothing is asked, and no option that changes a choice is taken. An agent that runs is stopped first
+# (restart_stop, inside the start), because the launcher refuses to check one that runs. Every exit that
+# starts nothing leaves each agent's record in place, so the restart can be run again:
+#   - before anything is stopped, when a recorded choice is refused or a record cannot be used;
+#   - after the stop, when the check fails: the stop kept each record as agent.last;
+#   - when an agent ends right after starting: its new agent.pid is the same run on record.
+# Two things follow the project folder as it is now, not the record: an agent gets the browser when the
+# file of its provider names it now (nothing is written for it), and the settings of its provider are
+# put there again unless the last run had none (--no-wall).
+RESTART=no RESTART_FORCE=no RESTART_LEFT=''
+REC_BROWSER_agent='' REC_BROWSER_supervisor='' REC_BROWSER_reviewer=''   # each agent's browser in the run on record
+stop_grace() { # -> GRACE: the seconds a stop waits after SIGTERM
+    GRACE=${AGENT_TEAM_STOP_GRACE:-30}
+    case $GRACE in '' | *[!0-9]*) die 'AGENT_TEAM_STOP_GRACE must be whole seconds' ;; esac
+    [ "$GRACE" -le 600 ] || die 'AGENT_TEAM_STOP_GRACE is capped at 600 seconds'
+}
+restart_stop() { # stops the agents of a restart that run -> SELECTED: those that are down now; RESTART_LEFT: the others
+    local id home keep='' rb nb names=''
+    stop_grace
+    for id in $SELECTED; do
+        eval "rb=\$REC_BROWSER_$id; nb=\$RUN_BROWSER_$id"
+        [ -n "$rb" ] && [ -n "$nb" ] && [ "$rb" != "$nb" ] || continue
+        if [ "$nb" = on ]; then say "note: $(adir "$id") had no browser in its last run; the project folder names one now, so it starts with it"
+        else say "note: $(adir "$id") had a browser in its last run; the project folder names none now, so it starts without one ($(ahome "$id")/start.sh --browser names it again)"; fi
+    done
+    for id in $SELECTED; do
+        home=$(ahome "$id")
+        if [ ! -f "$home/agent.pid" ] || stop_one "$id" "$RESTART_FORCE" "$GRACE"; then keep="$keep $id" names="$names $(adir "$id")"
+        else RESTART_LEFT="$RESTART_LEFT $(adir "$id")"; fi
+    done
+    SELECTED=$(trim "$keep")
+    DIE_NOTE=''
+    [ -n "$SELECTED" ] || die "still running as before, and not restarted:$RESTART_LEFT (team.sh stop NAME --force ends an agent that does not stop in time)"
+    DIE_NOTE="Each of these agents is stopped now and keeps the record of its last run. Once the cause is fixed, start them again as they were: $T_DIR/team.sh restart$names"
+}
+cmd_restart() {
+    local ids='' all=no id home ws='' wsof='' state
+    while [ "$#" -gt 0 ]; do
+        case $1 in
+            --all) all=yes ;;
+            --force) RESTART_FORCE=yes ;;
+            --verbose | -v) VERBOSE=yes ;;
+            -h | --help) usage; exit 0 ;;
+            -*) die "restart: unknown option: $1. A restart changes no choice: each agent starts again as its last run was. To change one, stop the agent (team.sh stop NAME) and start it with the option (team.sh help)" ;;
+            *)
+                id=$(role_of "$1") || die "$(unknown_agent "$1")"
+                [ -f "$(ahome "$id")/agent.conf" ] || die "this team has no agent \"$1\""
+                case " $ids " in *" $id "*) ;; *) ids="$ids $id" ;; esac ;;
+        esac
+        shift
+    done
+    load_team
+    [ -n "$(team_agents)" ] || die "$T_DIR has no agent folders"
+    ids=$(trim "$ids")
+    [ -z "$ids" ] || [ "$all" = no ] || die 'restart: name the agents or pass --all, not both; nothing was stopped or started'
+    if [ -z "$ids" ]; then
+        # Without a name: the agents that run and those that ended by themselves; with --all, every agent
+        # with a run on record, the stopped ones included.
+        for id in $(team_agents); do
+            home=$(ahome "$id")
+            if [ "$all" = yes ]; then read_record "$home" || continue
+            else read_pidfile "$home" || continue; fi
+            ids="$ids $id"
+        done
+        ids=$(trim "$ids")
+        if [ -z "$ids" ] && [ "$all" = yes ]; then
+            die "no agent of this team has a run on record, so there is none to repeat. Start them with $T_DIR/team.sh, or one with its own start.sh"
+        elif [ -z "$ids" ]; then
+            die "no agent of this team is running. To start the stopped ones again as they last ran: $T_DIR/team.sh restart --all, or one with its own restart.sh"
+        fi
+    fi
+    say 'Restart: each agent starts again as its last run was. Nothing is asked and no choice changes.'
+    for id in $ids; do
+        home=$(ahome "$id")
+        if ours_alive "$home"; then state=running; else state='not running'; fi
+        read_record "$home" || die "$(adir "$id") has no run on record to repeat: it was not started yet, or it was last stopped by a version before 5.2.0. Start it with $home/start.sh; nothing was stopped or started"
+        case $PF_BACKEND in
+            claude | codex) ;;
+            *) die "the record of the last run of $(adir "$id") does not name its provider; start it with $home/start.sh; nothing was stopped or started" ;;
+        esac
+        if [ -z "$PF_WORKSPACE" ] || [ ! -d "$PF_WORKSPACE" ]; then
+            die "$(adir "$id") last ran in ${PF_WORKSPACE:-a folder its record does not name}, which is not a folder on this machine; start it in another one with $home/start.sh --workspace DIR; nothing was stopped or started"
+        fi
+        if [ -n "$ws" ] && [ "$ws" != "$PF_WORKSPACE" ]; then
+            die "$wsof last ran in $ws and $(adir "$id") in $PF_WORKSPACE, and a team works in one project folder at a time; restart them one at a time; nothing was stopped or started"
+        fi
+        ws=$PF_WORKSPACE wsof=$(adir "$id")
+        # The run on record, as the options that give it. default sets none, whatever is saved.
+        eval "OPT_BACKEND_$id=\$PF_BACKEND; OPT_MODEL_$id=\$PF_MODEL; OPT_EFFORT_$id=\${PF_EFFORT:-default}; REC_BROWSER_$id=\$PF_BROWSER"
+        if [ "$id" = agent ] && [ "$PF_WREC" = yes ]; then OPT_WMODEL=${PF_WMODEL:-default} OPT_WEFFORT=${PF_WEFFORT:-default}; fi
+        if [ "$PF_WALL" = none ]; then NO_WALL=yes; fi
+        say "  $(adir "$id"): $(label "$id"), $state: $(record_words)$(if [ "$id" = agent ] && [ "$PF_WREC" = yes ]; then printf '; its workers: %s' "$(workers_words "$PF_WMODEL" "$PF_WEFFORT")"; fi)"
+    done
+    OPT_WORKSPACE=$ws
+    RESTART=yes
+    DIE_NOTE='Nothing was stopped: each agent is as it was.'
+    # shellcheck disable=SC2086
+    cmd_start start --yes $ids
+    DIE_NOTE=''
+    [ -z "$RESTART_LEFT" ] || die "still running as before, and not restarted:$RESTART_LEFT (team.sh stop NAME --force ends an agent that does not stop in time)"
 }
 
 # ---------------------------------------------------------------- stop and status
@@ -1806,10 +1970,10 @@ stop_one() { # ID FORCE GRACE -> 0 stopped or not running, 1 still running
     local id=$1 home i
     home=$(ahome "$1")
     if ! read_pidfile "$home"; then say "$(adir "$id"): not started by this command; nothing to stop"; return 0; fi
-    if ! kill -0 "$PF_PID" 2>/dev/null; then say "$(adir "$id"): not running"; rm -f -- "$home/agent.pid"; return 0; fi
+    if ! kill -0 "$PF_PID" 2>/dev/null; then say "$(adir "$id"): not running"; keep_record "$home"; return 0; fi
     if [ "$(proc_start "$PF_PID")" != "$PF_START" ]; then
         say "$(adir "$id"): PID $PF_PID now belongs to another process; it was not touched"
-        rm -f -- "$home/agent.pid"
+        keep_record "$home"
         return 0
     fi
     kill -TERM "$PF_PID" 2>/dev/null || true
@@ -1824,12 +1988,12 @@ stop_one() { # ID FORCE GRACE -> 0 stopped or not running, 1 still running
         note "$(adir "$id"): still running as PID $PF_PID after ${3}s; run stop again, or stop --force"
         return 1
     fi
-    rm -f -- "$home/agent.pid"
+    keep_record "$home"
     say "$(adir "$id"): stopped (PID $PF_PID)"
 }
 
 cmd_stop() {
-    local force=no grace ids='' id failed=0
+    local force=no ids='' id failed=0
     while [ "$#" -gt 0 ]; do
         case $1 in
             --force) force=yes ;;
@@ -1843,12 +2007,10 @@ cmd_stop() {
         esac
         shift
     done
-    grace=${AGENT_TEAM_STOP_GRACE:-30}
-    case $grace in '' | *[!0-9]*) die 'AGENT_TEAM_STOP_GRACE must be whole seconds' ;; esac
-    [ "$grace" -le 600 ] || die 'AGENT_TEAM_STOP_GRACE is capped at 600 seconds'
+    stop_grace
     load_team
     [ -n "$ids" ] || ids=$(team_agents | tr '\n' ' ')
-    for id in $ids; do stop_one "$id" "$force" "$grace" || failed=1; done
+    for id in $ids; do stop_one "$id" "$force" "$GRACE" || failed=1; done
     [ "$failed" = 0 ] || die 'some agents are still running (see above)'
 }
 
@@ -1868,7 +2030,7 @@ cmd_status() {
         b=$(saved_backend "$id")
         m=$(saved_model "$id" "$b")
         se=$(saved_effort "$id" "$b")
-        if ours_alive "$home"; then run="running on ${PF_BACKEND:-an unrecorded provider}${PF_MODEL:+, model $PF_MODEL}${PF_EFFORT:+, reasoning effort $PF_EFFORT}${PF_WORKSPACE:+, in $PF_WORKSPACE}; PID $PF_PID since $PF_START"
+        if ours_alive "$home"; then run="running on $(record_words); PID $PF_PID since $PF_START"
             case $PF_WALL in
                 settings) run="$run; held by the sandbox settings in its project folder" ;;
                 codex) run="$run; in Codex's workspace-write sandbox" ;;
@@ -1894,6 +2056,11 @@ cmd_status() {
         say "    $run"
         say "    log $home/agent.log ($size bytes)"
         if [ -x "$home/start.sh" ]; then say "    start it alone: $home/start.sh"; fi
+        # Its restart command, with the run it would repeat when the agent is down.
+        if [ -x "$home/restart.sh" ]; then
+            if ours_alive "$home"; then say "    restart it as it runs: $home/restart.sh"
+            elif read_record "$home"; then say "    start it again as it last ran ($(record_words)): $home/restart.sh"; fi
+        fi
     done
 }
 
@@ -1941,6 +2108,7 @@ case $cmd in
     start) shift; cmd_start start "$@" ;;
     check) shift; cmd_start check "$@" ;;
     stop) shift; cmd_stop "$@" ;;
+    restart) shift; cmd_restart "$@" ;;
     status) shift; cmd_status ;;
     workspace) shift; cmd_workspace "$@" ;;
     version | --version) shift; cmd_version "$@" ;;

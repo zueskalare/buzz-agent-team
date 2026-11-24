@@ -82,6 +82,7 @@ if [ "$mode" = install ]; then
     [ -f "$SRC/templates/subscriptions.toml" ] || die "missing $SRC/templates/subscriptions.toml"
     [ -f "$SRC/templates/team.sh" ] || die "missing $SRC/templates/team.sh"
     [ -f "$SRC/templates/agent-start.sh" ] || die "missing $SRC/templates/agent-start.sh"
+    [ -f "$SRC/templates/agent-restart.sh" ] || die "missing $SRC/templates/agent-restart.sh"
     for t in workspace-settings.py workspace-browser.py acp-models.py; do
         [ -f "$SRC/scripts/$t" ] || die "missing $SRC/scripts/$t"
     done

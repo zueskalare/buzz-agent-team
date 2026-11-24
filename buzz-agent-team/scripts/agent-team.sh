@@ -14,6 +14,8 @@
 #     subscriptions.toml   the channel supervisor's rules that decide which messages start its turn
 #     start.sh             that agent's own start command, a copy of templates/agent-start.sh: it
 #                          starts this agent only, through team.sh
+#     restart.sh           that agent's own restart command, a copy of templates/agent-restart.sh:
+#                          it starts this agent again as its last run was, through team.sh
 # and, beside the agent folders, brief.md: the user's optional note about the workspace, and
 # team.sh: that team's own command (check, start, stop, status), a copy of templates/team.sh. It
 # finds everything from its own location, so a team folder runs and moves without this skill.
@@ -1065,12 +1067,14 @@ publish_file() {
 # and, in each agent folder:
 #   start.sh   that agent's own start command (templates/agent-start.sh): it starts this agent only,
 #              through team.sh; in a terminal it asks that agent's provider, model and effort.
+#   restart.sh that agent's own restart command (templates/agent-restart.sh, since 5.2.0): it starts
+#              this agent again as its last run was, through team.sh; it asks nothing.
 TEAM_FILES='team.sh acp-models.py workspace-settings.py workspace-browser.py'
-team_files() { # every such file of this team: TEAM_FILES, one start.sh per agent, then VERSION
+team_files() { # every such file of this team: TEAM_FILES, one start.sh and one restart.sh per agent, then VERSION
     local id
     # shellcheck disable=SC2086
     printf '%s\n' $TEAM_FILES
-    for id in $(team_agents); do printf '%s/start.sh\n' "$(adir "$id")"; done
+    for id in $(team_agents); do printf '%s/start.sh\n%s/restart.sh\n' "$(adir "$id")" "$(adir "$id")"; done
     printf 'VERSION\n'
 }
 team_file_source() { # REL
@@ -1078,6 +1082,7 @@ team_file_source() { # REL
     case $1 in
         team.sh) name=team.sh ;;
         */start.sh) name=agent-start.sh ;;
+        */restart.sh) name=agent-restart.sh ;;
     esac
     if [ -n "$name" ]; then
         f=$(template_dir)/$name
@@ -1514,8 +1519,8 @@ Usage: agent-team.sh <command> [options]
            a second run changes nothing. Each agent keeps its saved model per backend;
            the model options set the model of the new backend (checked as create
            checks them). A format-1 agent's single model is not carried. --dry-run
-           prints the plan. The team's own files (team.sh, each start.sh, acp-models.py,
-           workspace-settings.py, workspace-browser.py) are refreshed the same way. The wall programs of a
+           prints the plan. The team's own files (team.sh, each start.sh and restart.sh,
+           acp-models.py, workspace-settings.py, workspace-browser.py) are refreshed the same way. The wall programs of a
            team made before 2.0.0 (wall/) are removed. The sandbox settings of an agent on
            Claude are put into the project folder (.claude/settings.json), and the buzz rule
            of an agent on Codex (.codex/rules/buzz.rules); an existing file keeps everything
@@ -1575,6 +1580,12 @@ Usage: agent-team.sh <command> [options]
            (prompt.run.md: its prompt.md followed by a section that names them), and so is the
            browser of each agent whose backend's file in the project folder names it; this
            start does not switch the browser.
+           Every agent folder also has its own restart command, <root>/NAME/AGENT/restart.sh
+           (and the team's: <root>/NAME/team.sh restart): it starts that agent again as its
+           last run was, with the provider, model, reasoning effort, project folder and
+           workers of that run, whether the agent runs or was stopped. It asks nothing and
+           can be run from any folder. A stop keeps the record of the run for it
+           (agent.last), also across an upgrade: stop, upgrade, then team.sh restart --all.
   stop     NAME [AGENT...] [--force]
            stop agents this tool started (SIGTERM, then wait; --force: SIGKILL after)
   status   [NAME]            show agents, backends, sign-in, proofs, whom each agent
@@ -2157,6 +2168,8 @@ EOF
     say '     which agents to start, then the provider and the model of each.'
     say "     One agent at a time: $T_DIR/<agent>/start.sh starts that agent only. In a terminal it"
     say '     asks its provider, model and reasoning effort (Enter keeps the saved one; --yes asks nothing).'
+    say "     Later, $T_DIR/<agent>/restart.sh starts that agent again as its last run was, and"
+    say "     $T_DIR/team.sh restart does it for every agent that runs; neither asks anything."
 }
 
 # ---------------------------------------------------------------- proof
@@ -2369,6 +2382,10 @@ read_pidfile() { # HOME -> PF_PID PF_START PF_BACKEND PF_WMODEL PF_WEFFORT PF_WR
     case $PF_PID in '' | *[!0-9]*) PF_PID=''; return 1 ;; esac
 }
 proc_start() { trim "$(ps -o lstart= -p "$1" 2>/dev/null || true)"; }
+# The record of a run that is over is kept as agent.last, for team.sh restart, which starts an agent
+# again as its last run was; a start removes it, because the run it starts is the last one then. Keep
+# this as team.sh has it.
+keep_record() { mv -f -- "$1/agent.pid" "$1/agent.last" 2>/dev/null || rm -f -- "$1/agent.pid"; } # HOME: its run is over
 # The recorded process is alive and is the same process (same PID and start time) this tool started.
 ours_alive() { # HOME
     read_pidfile "$1" || return 1
@@ -2538,6 +2555,7 @@ cmd_start() {
         pid=$!
         printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' "$pid" "$(proc_start "$pid")" "$b" "${am:-$(agent_model "$id" "$b")}" "$T_WORKSPACE" "$eff" "$hold" "$wm" "$we" "$br" > "$home/.new-pid"
         mv -f -- "$home/.new-pid" "$home/agent.pid"
+        rm -f -- "$home/agent.last"   # this run is the last one now
         alive=yes
         i=0
         while [ "$i" -lt $((wait_s * 5)) ]; do
@@ -2561,10 +2579,10 @@ stop_one() { # ID FORCE GRACE -> 0 stopped or not running, 1 still running
     local id=$1 home i
     home=$(ahome "$1")
     if ! read_pidfile "$home"; then say "$(adir "$id"): not started by this tool; nothing to stop"; return 0; fi
-    if ! kill -0 "$PF_PID" 2>/dev/null; then say "$(adir "$id"): not running"; rm -f -- "$home/agent.pid"; return 0; fi
+    if ! kill -0 "$PF_PID" 2>/dev/null; then say "$(adir "$id"): not running"; keep_record "$home"; return 0; fi
     if [ "$(proc_start "$PF_PID")" != "$PF_START" ]; then
         say "$(adir "$id"): PID $PF_PID now belongs to another process; it was not touched"
-        rm -f -- "$home/agent.pid"
+        keep_record "$home"
         return 0
     fi
     kill -TERM "$PF_PID" 2>/dev/null || true
@@ -2579,7 +2597,7 @@ stop_one() { # ID FORCE GRACE -> 0 stopped or not running, 1 still running
         say "$(adir "$id"): still running as PID $PF_PID after ${3}s; run stop again, or stop --force" >&2
         return 1
     fi
-    rm -f -- "$home/agent.pid"
+    keep_record "$home"
     say "$(adir "$id"): stopped (PID $PF_PID)"
 }
 

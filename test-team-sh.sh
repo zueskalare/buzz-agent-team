@@ -18,6 +18,7 @@ SKILL_DIR=$HERE/buzz-agent-team
 SCRIPT=$SKILL_DIR/scripts/agent-team.sh
 TEMPLATE=$SKILL_DIR/templates/team.sh
 START_TEMPLATE=$SKILL_DIR/templates/agent-start.sh
+RESTART_TEMPLATE=$SKILL_DIR/templates/agent-restart.sh
 : "${AGENT_TEAM_TEST_DIR:?set AGENT_TEAM_TEST_DIR to an absolute scratch folder}"
 : "${AGENT_TEAM_KEYGEN:?set AGENT_TEAM_KEYGEN to the buzz-admin binary (it runs generate-key only)}"
 case $AGENT_TEAM_TEST_DIR in /*) ;; *) echo 'AGENT_TEAM_TEST_DIR must be absolute' >&2; exit 2 ;; esac
@@ -27,7 +28,7 @@ mkdir -p -- "$AGENT_TEAM_TEST_DIR"
 TOP=$(cd -P -- "$AGENT_TEAM_TEST_DIR" && pwd)
 TD=$TOP/team-sh
 rm -rf -- "$TD"
-mkdir -p -- "$TD"/{bin,out,home,ws/shop,ws/moved-shop,elsewhere}
+mkdir -p -- "$TD"/{bin,out,home,ws/shop,ws/moved-shop,ws/rshop,elsewhere}
 OUT=$TD/out BIN=$TD/bin ROOT=$TD/root
 export GIT_CEILING_DIRECTORIES=$TOP
 export HOME=$TD/home
@@ -100,7 +101,7 @@ ask_agent() {
     printf '%b' "$answers" | (cd -- "$RUN_CWD" && env TEAM_SH_ASK=1 ${assigns[@]+"${assigns[@]}"} /bin/bash "$dir/$agent/start.sh" "$@") > "$OUT/$name.out" 2>&1 || RC=$?
 }
 stop_all() { local d; for d in "$@"; do [ -f "$d/team.sh" ] && /bin/bash "$d/team.sh" stop --force > /dev/null 2>&1; done; return 0; }
-trap 'stop_all "$ROOT/shop" "$TD/elsewhere/shop" "$ROOT/shop-reviewer"' EXIT
+trap 'stop_all "$ROOT/shop" "$TD/elsewhere/shop" "$ROOT/shop-reviewer" "$ROOT/rshop"' EXIT
 
 # ---------------------------------------------------------------- stand-ins
 cat > "$BIN/buzz" <<'EOF'
@@ -111,6 +112,8 @@ cat > "$BIN/buzz-acp" <<'EOF'
 #!/bin/bash
 echo "stand-in harness: pid $$"
 trap 'echo "stand-in harness: stopping"; exit 0' TERM INT
+# STANDIN_DEAF names an agent folder whose harness does not stop on SIGTERM.
+if [ "${STANDIN_DEAF:-}" = "$(basename "$(pwd -P)")" ]; then trap '' TERM; fi
 i=0
 while [ "$i" -lt 600 ]; do sleep 1 & wait $!; i=$((i + 1)); done
 EOF
@@ -203,8 +206,19 @@ if [ "${STANDIN_SKIP_PATHS:-}" != yes ]; then
 [ -d "${RUN_BUZZ_ACP_WORKDIR:-/nonexistent}" ] || { echo 'stand-in launcher: the project folder it was given is missing' >&2; exit 2; }
 fi
 case ${1:-} in
-    --check) [ "${STANDIN_CHECK_FAIL:-}" != yes ] || { echo 'stand-in launcher: not signed in by subscription' >&2; exit 1; }; echo 'stand-in launcher: check passed'; exit 0 ;;
-    --run) exec buzz-acp ;;
+    --check)
+        [ "${STANDIN_CHECK_FAIL:-}" != yes ] || { echo 'stand-in launcher: not signed in by subscription' >&2; exit 1; }
+        # With STANDIN_REFUSE_RUNNING=yes it does as the real launcher, which holds a lock per agent key:
+        # an agent that runs is not checked.
+        if [ "${STANDIN_REFUSE_RUNNING:-}" = yes ]; then
+            p=$(sed -n '1p' ./agent.pid 2>/dev/null)
+            if [ -n "$p" ] && kill -0 "$p" 2>/dev/null; then echo "stand-in launcher: this agent is already running as PID $p; a run would be refused" >&2; exit 1; fi
+        fi
+        echo 'stand-in launcher: check passed'; exit 0 ;;
+    --run)
+        # STANDIN_RUN_FAIL names an agent folder whose harness ends at once.
+        [ "${STANDIN_RUN_FAIL:-}" != "$(basename "$(pwd -P)")" ] || { echo 'stand-in launcher: the harness could not start' >&2; exit 1; }
+        exec buzz-acp ;;
     *) echo "stand-in launcher: unexpected arguments: $*" >&2; exit 2 ;;
 esac
 EOF
@@ -254,6 +268,10 @@ check 'its mode is 700' test "$(mode_of "$T/shop/start.sh")$(mode_of "$T/supervi
 check 'the workspace agent'"'"'s folder is named after the team, as team.conf records it' test "$(grep -c -x 'agent_folder=shop' "$T/team.conf")$(grep -c -x -e 'id=agent' -e 'role=agent' "$T/shop/agent.conf")$([ -e "$T/assistant" ] && echo old)" = 12
 check 'create names it' has "$OUT/create.out" "$T/<agent>/start.sh starts that agent only."
 hasnt "$START_TEMPLATE" 'skills/' && hasnt "$START_TEMPLATE" '.cc-switch' && hasnt "$START_TEMPLATE" 'CLAUDE_SKILL_DIR'
+check 'it names no skill folder' test $? = 0
+check 'each agent folder has its own restart command too, the template byte for byte, mode 700' test "$(cmp -s "$RESTART_TEMPLATE" "$T/shop/restart.sh"; echo $?)$(cmp -s "$RESTART_TEMPLATE" "$T/supervisor/restart.sh"; echo $?)$(mode_of "$T/shop/restart.sh")$(mode_of "$T/supervisor/restart.sh")" = 00700700
+check 'create names it' has "$OUT/create.out" "$T/<agent>/restart.sh starts that agent again as its last run was"
+hasnt "$RESTART_TEMPLATE" 'skills/' && hasnt "$RESTART_TEMPLATE" '.cc-switch' && hasnt "$RESTART_TEMPLATE" 'CLAUDE_SKILL_DIR'
 check 'it names no skill folder' test $? = 0
 
 scenario 'start refuses an agent without a proof, and names the fix'
@@ -1890,12 +1908,175 @@ for bad in '1.0' 'v1.0.0' '01.0.0' ''; do
 done
 check 'the team folder is byte-identical after them' test "$(cd "$T" && find . -type f ! -name 'agent.log*' | LC_ALL=C sort | xargs shasum -a 256 | shasum -a 256)" = "$BEFORE"
 
+scenario 'restart: each agent starts again as its last run was, with nothing asked and no choice changed'
+# A team of its own, in a project folder and a channel of its own, so that no earlier scenario decides
+# what is saved. Its saved choices are the defaults; each run below is started on other ones.
+X=$ROOT/rshop RW=$TD/ws/rshop
+rec_of() { sed -n '3,10p' "$1" 2>/dev/null; } # the choices a record holds: all but the PID and its start time
+own_restart() { # NAME AGENT [ARGS...]: that agent's restart.sh, with no terminal, run from another folder
+    local name=$1 agent=$2
+    shift 2
+    RC=0
+    (cd -- "$TD/elsewhere" && /bin/bash "$X/$agent/restart.sh" "$@") > "$OUT/$name.out" 2>&1 < /dev/null || RC=$?
+}
+printf 'off' > "$ACP_MODE"
+mkdir -p "$ROOT/models"
+printf '# retrieved 2026-11-21T00:00:00Z stand-in\ndefault\tDefault (recommended)\nopus\tOpus 5.5\nsonnet\tSonnet 5.5\n' > "$ROOT/models/claude-supervisor.list"
+printf '# retrieved 2026-11-21T00:00:00Z stand-in\ngpt-example-sol\tExample Sol\ngpt-example-astra\tExample Astra\n' > "$ROOT/models/codex-agent.list"
+run_skill rs-create -- create --workspace "$RW" --channel 1b1c2d3e-4f50-6172-8394-a5b6c7d8e9f1
+check 'a new team has a restart command in each agent folder' test "$RC$(cmp -s "$RESTART_TEMPLATE" "$X/rshop/restart.sh"; echo $?)$(cmp -s "$RESTART_TEMPLATE" "$X/supervisor/restart.sh"; echo $?)" = 000
+store_proof rshop rshop; store_proof rshop supervisor
+RUN_CWD=$RW
+# A run without the sandbox settings (--no-wall, in a folder that has none) is repeated without them.
+rm -f "$RW/.claude/settings.json"
+run_team rs-nowall "$X" -- start supervisor --no-wall
+check 'a start with --no-wall in a folder without the settings records that nothing holds the agent' test "$RC$(sed -n '7p' "$X/supervisor/agent.pid")" = 0none
+run_team rs-nowall-re "$X" -- restart supervisor
+check 'its restart keeps it so, and writes no settings into the project folder' test "$RC$(sed -n '7p' "$X/supervisor/agent.pid")$([ -e "$RW/.claude/settings.json" ] && echo written)" = 0none
+stop_all "$X"
+# Two agents on choices that are not the saved ones: provider, model, reasoning effort, workers.
+: > "$STANDIN_RECORD"
+run_team rs-start "$X" -- start --agent-backend codex --agent-model gpt-example-astra --worker-model gpt-example-sol --supervisor-model sonnet --supervisor-effort high
+check 'two agents run on choices of that run' test "$RC$(sed -n '3,4p' "$X/rshop/agent.pid" | tr '\n' ' ')$(sed -n '3,4p;6p' "$X/supervisor/agent.pid" | tr '\n' ' ')" = '0codex gpt-example-astra claude sonnet high '
+P_A=$(pid_of "$X/rshop") P_S=$(pid_of "$X/supervisor")
+REC_A=$(rec_of "$X/rshop/agent.pid") REC_S=$(rec_of "$X/supervisor/agent.pid")
+run_team rs-check-running "$X" STANDIN_REFUSE_RUNNING=yes -- check
+check 'the launcher refuses to check an agent that runs (the stand-in does as the real one)' test "$RC$(grep -c 'a run would be refused' "$OUT/rs-check-running.out")" = 12
+: > "$STANDIN_RECORD"
+RUN_CWD=$TD/elsewhere
+run_team rs "$X" TEAM_SH_ASK=1 STANDIN_REFUSE_RUNNING=yes -- restart
+RUN_CWD=$RW
+check 'restart succeeds all the same: it stops each agent before the check' test "$RC$(grep -c -e "^rshop: stopped (PID $P_A)\$" -e "^supervisor: stopped (PID $P_S)\$" "$OUT/rs.out")$(grep -c 'Check passed.' "$OUT/rs.out")" = 021
+check 'it asks nothing, in a terminal too' test "$(grep -c -e 'provider?' -e 'model on ' -e 'reasoning effort on ' -e 'for its workers' -e 'A browser for the agents' -e 'Start which agents?' "$OUT/rs.out")" = 0
+check 'both run again, as new processes' test "$(alive "$X/rshop" && echo up)$(alive "$X/supervisor" && echo up)$([ "$(pid_of "$X/rshop")" != "$P_A" ] && echo new)$([ "$(pid_of "$X/supervisor")" != "$P_S" ] && echo new)" = upupnewnew
+check 'on the provider and the model of the last run, not the saved ones' test "$(grep -c -e '^call: --run --backend codex --model gpt-example-astra$' -e '^call: --run --backend claude --model sonnet$' "$STANDIN_RECORD")$(grep -c '^call: --run' "$STANDIN_RECORD")" = 22
+last_call '--run --backend claude' > "$OUT/rs-sup.rec"
+check 'at the reasoning effort of the last run' grep -qx 'CLAUDE_CODE_EFFORT_LEVEL=high' "$OUT/rs-sup.rec"
+check 'in the project folder of the last run, not the folder the command was run from' test "$(grep -c "^RUN_BUZZ_ACP_WORKDIR=$RW\$" "$STANDIN_RECORD")$(grep -c "elsewhere" "$STANDIN_RECORD")" = 40
+check 'the workspace agent'"'"'s workers are named in its prompt again' has "$X/rshop/prompt.run.md" 'Start each worker on the model `gpt-example-sol`.'
+check 'the record of each run holds the same choices as before, line for line' test "$(rec_of "$X/rshop/agent.pid")|$(rec_of "$X/supervisor/agent.pid")" = "$REC_A|$REC_S"
+check 'it says what it repeats, for each agent' test "$(grep -c -e "^  rshop: Rshop, running: codex, model gpt-example-astra, in $RW; its workers: model gpt-example-sol, " -e "^  supervisor: Rshop Supervisor, running: claude, model sonnet, reasoning effort high, in $RW\$" "$OUT/rs.out")" = 2
+check 'and where the project folder comes from' has "$OUT/rs.out" "Project folder: $RW (where the last run was)"
+check 'the log of each agent names the restart, where a start names a start' test "$(grep '^=== ' "$X/rshop/agent.log" | tail -n 1 | grep -c 'team.sh restart (')$(grep '^=== ' "$X/supervisor/agent.log" | tail -n 1 | grep -c 'team.sh restart (')$(grep '^=== ' "$X/rshop/agent.log" | sed -n '1p' | grep -c 'team.sh start (')" = 111
+# One agent at a time: its own restart.sh, from any folder.
+P_A=$(pid_of "$X/rshop") P_S=$(pid_of "$X/supervisor")
+own_restart rs-own supervisor
+check 'an agent'"'"'s own restart.sh restarts that agent only, from any folder, on the same choices' test "$RC$([ "$(pid_of "$X/supervisor")" != "$P_S" ] && alive "$X/supervisor" && echo new)$([ "$(pid_of "$X/rshop")" = "$P_A" ] && echo same)|$(rec_of "$X/supervisor/agent.pid")" = "0newsame|$REC_S"
+P_S=$(pid_of "$X/supervisor")
+for extra in '--model opus' rshop --all --yes; do
+    # shellcheck disable=SC2086
+    own_restart rs-own-extra supervisor $extra
+    check "it takes no choice and no other agent: $extra" test "$RC$(grep -c 'starts Rshop Supervisor again as its last run was and takes no choice' "$OUT/rs-own-extra.out")" = 11
+done
+run_team rs-opt "$X" -- restart --model opus
+run_team rs-both "$X" -- restart supervisor --all
+check 'the team'"'"'s restart takes no option that changes a choice, nor names with --all' test "$(grep -c 'A restart changes no choice' "$OUT/rs-opt.out")$(grep -c 'name the agents or pass --all, not both' "$OUT/rs-both.out")" = 11
+check 'and none of these stopped anything' test "$(pid_of "$X/supervisor")$(alive "$X/supervisor" && echo up)" = "${P_S}up"
+own_restart rs-own-help supervisor --help
+check 'its help names the agent, and start.sh for a change' test "$RC$(grep -c -e 'start Rshop Supervisor, the agent of this folder, again as its last run was' -e "$X/supervisor/start.sh --help" "$OUT/rs-own-help.out")" = 02
+# A stop keeps the record of the run, so a stopped agent starts again as it was.
+P_A=$(pid_of "$X/rshop")
+run_team rs-stop "$X" -- stop supervisor
+check 'a stop keeps the record of the run as agent.last' test "$([ -e "$X/supervisor/agent.pid" ] && echo pid)$(rec_of "$X/supervisor/agent.last")" = "$REC_S"
+run_team rs-status "$X" -- status
+check 'status names each restart command, and for the stopped agent the run it would repeat' test "$(grep -c -x -e "    restart it as it runs: $X/rshop/restart.sh" -e "    start it again as it last ran (claude, model sonnet, reasoning effort high, in $RW): $X/supervisor/restart.sh" "$OUT/rs-status.out")" = 2
+run_team rs-bare "$X" -- restart
+check 'restart without a name restarts the agents that run, and leaves a stopped one stopped' test "$RC$([ "$(pid_of "$X/rshop")" != "$P_A" ] && alive "$X/rshop" && echo new)$([ -e "$X/supervisor/agent.pid" ] && echo started)" = 0new
+own_restart rs-own-stopped supervisor
+check 'its own restart.sh starts a stopped agent again as it last ran' test "$RC$(alive "$X/supervisor" && echo up)|$(rec_of "$X/supervisor/agent.pid")" = "0up|$REC_S"
+check 'and says that it was not running' has "$OUT/rs-own-stopped.out" '  supervisor: Rshop Supervisor, not running: claude, model sonnet, reasoning effort high'
+check 'the start removes agent.last: the new run is the last one' test ! -e "$X/supervisor/agent.last"
+run_team rs-stop-all "$X" -- stop
+run_team rs-none "$X" -- restart
+check 'with no agent running, restart without a name starts nothing and names --all' test "$RC$(grep -c "no agent of this team is running. To start the stopped ones again as they last ran: $X/team.sh restart --all" "$OUT/rs-none.out")$([ -e "$X/rshop/agent.pid" ] || [ -e "$X/supervisor/agent.pid" ] && echo started)" = 11
+# Across an upgrade: stop, upgrade, restart --all. The upgrade here saves another model for the supervisor.
+run_skill rs-up -- upgrade rshop --supervisor-model opus
+check 'an upgrade keeps the record of each agent'"'"'s last run' test "$RC$(grep -c -x 'model_claude=opus' "$X/supervisor/agent.conf")|$(rec_of "$X/rshop/agent.last")|$(rec_of "$X/supervisor/agent.last")" = "01|$REC_A|$REC_S"
+: > "$STANDIN_RECORD"
+run_team rs-all "$X" -- restart --all
+check 'restart --all then starts every agent again as it last ran: on that run'"'"'s model, not the one saved since' test "$RC$(alive "$X/rshop" && echo up)$(alive "$X/supervisor" && echo up)$(grep -c -e '^call: --run --backend codex --model gpt-example-astra$' -e '^call: --run --backend claude --model sonnet$' "$STANDIN_RECORD")|$(rec_of "$X/rshop/agent.pid")|$(rec_of "$X/supervisor/agent.pid")" = "0upup2|$REC_A|$REC_S"
+# A recorded choice that is refused now: nothing is stopped.
+P_A=$(pid_of "$X/rshop") P_S=$(pid_of "$X/supervisor")
+printf '# retrieved 2026-11-21T00:00:00Z stand-in\ngpt-example-sol\tExample Sol\n' > "$ROOT/models/codex-agent.list"
+run_team rs-refused "$X" -- restart
+check 'a recorded model the provider no longer offers is refused, and says that nothing was stopped' test "$RC$(grep -c 'gpt-example-astra is not a codex model offered for Rshop' "$OUT/rs-refused.out")$(grep -c 'Nothing was stopped: each agent is as it was.' "$OUT/rs-refused.out")" = 111
+check 'both agents run on, the same processes' test "$(pid_of "$X/rshop")$(alive "$X/rshop" && echo up)$(pid_of "$X/supervisor")$(alive "$X/supervisor" && echo up)" = "${P_A}up${P_S}up"
+printf '# retrieved 2026-11-21T00:00:00Z stand-in\ngpt-example-sol\tExample Sol\ngpt-example-astra\tExample Astra\n' > "$ROOT/models/codex-agent.list"
+# The check fails after the stop: nothing starts, each record is kept, and the restart can be run again.
+run_team rs-checkfail "$X" STANDIN_CHECK_FAIL=yes -- restart
+check 'when the check fails after the stop, nothing starts' test "$RC$(grep -c 'the check failed; nothing was started' "$OUT/rs-checkfail.out")$([ -e "$X/rshop/agent.pid" ] || [ -e "$X/supervisor/agent.pid" ] && echo started)" = 11
+check 'each agent keeps the record of its last run' test "$(rec_of "$X/rshop/agent.last")|$(rec_of "$X/supervisor/agent.last")" = "$REC_A|$REC_S"
+check 'and the command that starts them again is named' has "$OUT/rs-checkfail.out" "Once the cause is fixed, start them again as they were: $X/team.sh restart rshop supervisor"
+run_team rs-again "$X" -- restart rshop supervisor
+check 'that command starts both again as they were' test "$RC$(alive "$X/rshop" && echo up)$(alive "$X/supervisor" && echo up)|$(rec_of "$X/rshop/agent.pid")|$(rec_of "$X/supervisor/agent.pid")" = "0upup|$REC_A|$REC_S"
+# An agent that ends right after starting does not keep the others down.
+P_S=$(pid_of "$X/supervisor")
+run_team rs-runfail "$X" STANDIN_RUN_FAIL=rshop -- restart
+check 'when one agent ends right after starting, the restart fails and names it' test "$RC$(grep -c 'did not start: rshop' "$OUT/rs-runfail.out")$(alive "$X/rshop" && echo up)" = 11
+check 'the agents after it are started all the same' test "$(alive "$X/supervisor" && [ "$(pid_of "$X/supervisor")" != "$P_S" ] && echo up)" = up
+own_restart rs-runfail-again rshop
+check 'the run that failed stays on record: its own restart.sh starts it again as it was' test "$RC$(alive "$X/rshop" && echo up)|$(rec_of "$X/rshop/agent.pid")" = "0up|$REC_A"
+# An agent that does not stop in time stays as it is; the others are restarted; --force ends it.
+run_team rs-deaf-stop "$X" -- stop supervisor
+run_team rs-deaf-start "$X" STANDIN_DEAF=supervisor -- start supervisor --supervisor-model sonnet --supervisor-effort high
+P_A=$(pid_of "$X/rshop") P_S=$(pid_of "$X/supervisor")
+run_team rs-deaf "$X" AGENT_TEAM_STOP_GRACE=1 -- restart
+check 'an agent that does not stop in time stays as it is and is named' test "$RC$(grep -c 'still running as before, and not restarted: supervisor' "$OUT/rs-deaf.out")$([ "$(pid_of "$X/supervisor")" = "$P_S" ] && alive "$X/supervisor" && echo same)" = 11same
+check 'the others are restarted' test "$([ "$(pid_of "$X/rshop")" != "$P_A" ] && alive "$X/rshop" && echo new)|$(rec_of "$X/rshop/agent.pid")" = "new|$REC_A"
+run_team rs-deaf-force "$X" AGENT_TEAM_STOP_GRACE=1 -- restart supervisor --force
+check '--force ends it, and it starts again as it was' test "$RC$([ "$(pid_of "$X/supervisor")" != "$P_S" ] && alive "$X/supervisor" && echo new)|$(rec_of "$X/supervisor/agent.pid")" = "0new|$REC_S"
+# The way to this version for a team made by 5.1.0 whose agents run: the skill's own stop keeps each
+# record (the team command of 5.1.0 removes it), the upgrade adds the restart commands, and restart --all
+# brings the agents back as they ran. The folder is made to look like one of 5.1.0 while they run.
+rm -f "$X/rshop/restart.sh" "$X/supervisor/restart.sh"
+printf '\n# the team command of 5.1.0\n' >> "$X/team.sh"
+printf '5.1.0\n' > "$X/VERSION"
+run_skill rs-51-stop -- stop rshop
+check 'the skill'"'"'s own stop keeps each record as agent.last too' test "$RC$([ -e "$X/rshop/agent.pid" ] || [ -e "$X/supervisor/agent.pid" ] && echo pid)|$(rec_of "$X/rshop/agent.last")|$(rec_of "$X/supervisor/agent.last")" = "0|$REC_A|$REC_S"
+run_skill rs-51-dry -- upgrade rshop --dry-run
+check 'the plan for a team made by 5.1.0: the team command, a restart command per agent, the version' test "$(grep -c -e 'team.sh: replace' -e 'rshop/restart.sh: add' -e 'supervisor/restart.sh: add' -e "^  VERSION: 5.1.0 -> $(cat "$SKILL_DIR/VERSION")\$" "$OUT/rs-51-dry.out")" = 4
+run_skill rs-51-up -- upgrade rshop
+run_team rs-51-all "$X" -- restart --all
+check 'after the upgrade, restart --all starts both agents again as they ran' test "$RC$(alive "$X/rshop" && echo up)$(alive "$X/supervisor" && echo up)|$(rec_of "$X/rshop/agent.pid")|$(rec_of "$X/supervisor/agent.pid")" = "0upup|$REC_A|$REC_S"
+run_skill rs-51-skill-stop -- stop rshop supervisor
+check 'stopped by the skill, the agent has its record as agent.last' test "$RC$(rec_of "$X/supervisor/agent.last")" = "0$REC_S"
+RC=0; env STANDIN_SKIP_PATHS=yes /bin/bash "$SCRIPT" start rshop supervisor > "$OUT/rs-51-skill-start.out" 2>&1 < /dev/null || RC=$?
+check 'the skill'"'"'s own start removes agent.last as well: its run is the last one then' test "$RC$(alive "$X/supervisor" && echo up)$([ -e "$X/supervisor/agent.last" ] && echo last)" = 0up
+# The browser follows the project folder as it is now: a restart writes nothing for it, and says so.
+run_team rs-br-stop "$X" -- stop
+run_team rs-br "$X" -- start supervisor --browser
+check 'a start with --browser records that the agent has it' test "$RC$(sed -n '10p' "$X/supervisor/agent.pid")$(grep -q playwright "$RW/.mcp.json" && echo named)" = 0onnamed
+rm -f "$RW/.mcp.json"
+run_team rs-br-re "$X" -- restart supervisor
+check 'when the project folder names no browser any more, the restart says so and starts without one' test "$RC$(grep -c 'supervisor had a browser in its last run; the project folder names none now, so it starts without one' "$OUT/rs-br-re.out")$(sed -n '10p' "$X/supervisor/agent.pid")$([ -e "$RW/.mcp.json" ] && echo written)" = 01off
+# Records that cannot be repeated.
+run_team rs-rec-stop "$X" -- stop
+sed "5s|.*|$TD/ws/gone|" "$X/rshop/agent.last" > "$X/rshop/.edit" && mv -f "$X/rshop/.edit" "$X/rshop/agent.last"
+own_restart rs-gone rshop
+check 'a last run in a folder that is gone is not repeated: start.sh --workspace is named' test "$RC$(grep -c "rshop last ran in $TD/ws/gone, which is not a folder on this machine; start it in another one with $X/rshop/start.sh --workspace DIR" "$OUT/rs-gone.out")$([ -e "$X/rshop/agent.pid" ] && echo started)" = 11
+rm -f "$X/supervisor/agent.last"
+own_restart rs-norec supervisor
+check 'an agent with no run on record is not started: its start.sh is named' test "$RC$(grep -c "supervisor has no run on record to repeat" "$OUT/rs-norec.out")$(grep -c "Start it with $X/supervisor/start.sh" "$OUT/rs-norec.out")$([ -e "$X/supervisor/agent.pid" ] && echo started)" = 111
+run_team rs-all-none "$X" -- restart --all
+check 'restart --all goes on with the agents that have one, and fails on the folder that is gone' test "$RC$(grep -c 'which is not a folder on this machine' "$OUT/rs-all-none.out")" = 11
+# An upgrade adds a restart command that is missing, as it does for a team made before 5.2.0.
+rm -f "$X/supervisor/restart.sh" "$X/rshop/restart.sh"
+run_skill rs-up-dry -- upgrade rshop --dry-run
+check 'the upgrade plan names each missing restart command' test "$(grep -c -e 'rshop/restart.sh: add' -e 'supervisor/restart.sh: add' "$OUT/rs-up-dry.out")" = 2
+run_skill rs-up-add -- upgrade rshop
+check 'upgrade adds them: the template, mode 700' test "$RC$(cmp -s "$RESTART_TEMPLATE" "$X/rshop/restart.sh"; echo $?)$(cmp -s "$RESTART_TEMPLATE" "$X/supervisor/restart.sh"; echo $?)$(mode_of "$X/supervisor/restart.sh")" = 000700
+run_skill rs-up-again -- upgrade rshop
+check 'a second upgrade changes nothing' has "$OUT/rs-up-again.out" 'up to date; nothing was changed'
+stop_all "$X"
+RUN_CWD=$TD/ws/shop
+
 scenario 'help and unknown commands'
 run_team help "$T" -- help
 check 'help lists the commands' has "$OUT/help.out" 'team.sh check [AGENT...]'
 check 'and the version command' has "$OUT/help.out" 'team.sh version'
-run_team unknown "$T" -- restart
-check 'an unknown command is refused' has "$OUT/unknown.out" 'unknown command: restart'
+check 'and restart, with what it repeats and the record it reads' test "$(grep -c -e 'team.sh restart \[AGENT...\] \[--all\] \[--force\]' -e 'a stop keeps it there' -e 'team.sh restart --all       every agent with a run on record' "$OUT/help.out")" = 3
+run_team unknown "$T" -- frobnicate
+check 'an unknown command is refused' has "$OUT/unknown.out" 'unknown command: frobnicate'
 
 printf '\n%d scenarios, %d passed, %d failed\n' "$SCEN" "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

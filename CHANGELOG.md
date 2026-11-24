@@ -2,6 +2,41 @@
 
 Versions of the buzz-agent-team skill, newest first. The version is the one line of `buzz-agent-team/VERSION`, and each one is the Git tag `v<version>` of this repository. What the three numbers mean is in the [README](README.md#versions).
 
+## 5.2.0 (2026-11-24)
+
+A restart: an agent starts again as its last run was, with nothing asked and no choice changed. The team folder format does not change: a team made by 5.1.0 keeps starting as it is, and gets the restart after `agent-team.sh upgrade <team>`.
+
+What a 5.1.0 user sees change, after `agent-team.sh upgrade <team>`:
+
+- **`restart.sh` in each agent folder,** beside `start.sh`: `~/.buzz-agents/<team>/<agent>/restart.sh`. It starts that agent again as its last run was: the provider, the model, the reasoning effort, the project folder and, for the workspace agent, the model and the reasoning effort of its workers. They are those of the last run, whatever is saved in `agent.conf` and whatever folder the command is run from, so it needs no `cd`. It asks nothing, in a terminal too.
+- **`team.sh restart`** does the same for the team. Without a name it takes the agents that run now and those that ended by themselves, and leaves a stopped one stopped. `team.sh restart <agent>...` takes those agents, running or stopped, and `team.sh restart --all` every agent with a run on record.
+- **No option changes a choice.** `--force` ends an agent that does not stop in time, as for `stop`, and `--verbose` prints the launcher's own check. Any other option is refused with the way to change a choice: stop the agent, then start it with `start.sh` and the option.
+- **A stop keeps the record of the run.** `agent.pid` holds the choices of a run. `team.sh stop` now keeps that file as `agent.last` in the agent folder instead of removing it, and a start removes `agent.last`, because the run it starts is the last one then. The skill's own `agent-team.sh stop` and `start` do the same. So a stopped agent can be started again as it last ran.
+- **Across an upgrade.** An upgrade carries `agent.last` over with the rest of the agent folder. The agents come back as they ran with three commands: `team.sh stop`, `agent-team.sh upgrade <team>`, `team.sh restart --all`. A model that the upgrade saves does not change that: a restart repeats the last run, and `start.sh --yes` starts on the saved choices.
+- **Status** prints one more line per agent: `restart it as it runs: <agent folder>/restart.sh` for an agent that runs, and `start it again as it last ran (<provider, model, effort, project folder>): <agent folder>/restart.sh` for one that is down with a run on record.
+- **The agent's log** names a restart as `team.sh restart (...)`, where a start says `team.sh start (...)`.
+
+How a restart works:
+
+- It reads the record of each agent's last run and hands it to the start as the options that would give that run. So every check of a start applies, and a recorded choice that is refused now stops it before anything is stopped: a model the provider no longer offers, a project folder that is gone, a record that does not name its provider. The message then ends with `Nothing was stopped: each agent is as it was.`
+- **An agent that runs is stopped before the check.** The launcher holds a lock for each running agent and refuses to check one that runs, so a restart cannot check first. The agent is down for the stop, the check and the start.
+- **A failure after the stop leaves every record in place.** When the check fails, nothing starts, each agent keeps the record of its last run as `agent.last`, and the message names the command that starts them again, `team.sh restart <the same agents>`. When one agent ends right after starting, the other agents of the restart are still started; the failed run stays on record in its `agent.pid`, and its own `restart.sh` starts it again.
+- **An agent that does not stop in time** stays as it is and is named at the end; the others are restarted. `--force` ends it.
+- **Two things follow the project folder as it is now,** not the last run. An agent gets the browser when the file of its provider names it now: a restart writes nothing for the browser, and says so when that differs from the last run. And the settings of its provider (the sandbox settings on Claude, the buzz rule on Codex) are put into the project folder again, unless the last run had none (`--no-wall`).
+
+How the upgrade does it:
+
+- With the agents stopped, `agent-team.sh upgrade <team> --dry-run` names `<agent>/restart.sh: add` for each agent, `team.sh: replace` and `VERSION: 5.1.0 -> 5.2.0`. No env file, prompt or record changes. A second run says it is up to date.
+- **Stop a 5.1.0 team with the skill's own stop, and nothing has to be chosen again.** The `team.sh` of 5.1.0 removes each record when it stops an agent; `agent-team.sh stop <team>` of this version keeps it. So for a team whose agents run: `agent-team.sh stop <team>`, `agent-team.sh upgrade <team>`, then `<team folder>/team.sh restart --all`, and every agent runs again as it ran before.
+- **A team that was stopped by its own 5.1.0 `team.sh` has no records.** Start each agent once with its `start.sh`; from then on `restart.sh` works, and so does `team.sh restart --all` after a stop.
+- `create` puts `restart.sh` into each agent folder of a new team, and `install.sh` requires `templates/agent-restart.sh`.
+
+What was measured and what was only read:
+
+- **Measured, offline:** the scenario "restart" of `test-team-sh.sh`, with stand-ins for the launcher, the harness and the adapters. Its stand-in launcher refuses to check an agent that runs, as the real one does, and a check of two running agents fails there while their restart passes. It covers a running agent, a stopped one, a run without the sandbox settings, both agents across an upgrade that saves another model, each agent's own `restart.sh` from another folder, the refused options, each failure above, and the way to this version for a team made by 5.1.0 (the skill's own stop, the upgrade, `restart --all`).
+- **Read in the launcher,** `run-buzz-acp.sh`: `--check` ends with "a run would be refused" when the agent's lock is held by a live process.
+- **Not measured:** a restart of a real agent with the real launcher.
+
 ## 5.1.0 (2026-11-24)
 
 Three things: a live view for you in Buzz Desktop, parallel conversations for the channel supervisor, and the newest models again for agents on Codex. The team folder format does not change: a team made by 5.0.0 keeps starting as it is, and gets all three after `agent-team.sh upgrade <team>`.
