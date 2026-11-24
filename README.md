@@ -55,6 +55,7 @@ diff -rq "$src" "$dst" && echo "up to date"
 - **Where:** it replaces the `run-buzz-acp.sh` that `PATH` finds now. When there is none, it installs it into `~/.local/bin` and says so if that folder is not on `PATH`. `--dir DIR` names another folder.
 - **The earlier file is kept** beside the new one as `run-buzz-acp.sh.bak-<UTC time>`. The same file is left as it is. A symbolic link is refused.
 - **Agents that already run are not affected.** The launcher has become the harness by then; they get the new one at their next start.
+- **The assistant checks it at the start of every use of the skill.** `SKILL.md` (Rules) tells Claude or Codex to run `agent-team.sh launcher --dry-run` before anything else, whether it creates, upgrades, starts, restarts or only checks a team, and to run `agent-team.sh launcher` when that says it would install or replace.
 - **It is the only command that writes there.** `preflight`, `status`, `create` and `upgrade` only say when the launcher a start would use is not the skill's: `preflight` as a `note` line with the command as its fix, the others as one line that starts `Launcher:`.
 - **A launcher named in the settings** (`agent-team.sh settings --launcher <path>`, or `AGENT_TEAM_LAUNCHER`) still wins for this skill's own `start`. A team's own command uses the one on `PATH`.
 

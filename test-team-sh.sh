@@ -478,10 +478,10 @@ scenario 'the model menu shows what the provider offers now'
 rm -f "$ACP_CALLS"
 fn_body() { awk -v f="$2" '$0 ~ "^" f "\\(\\)" { on = 1 } on { print } on && /^}/ { exit }' "$1"; }
 check 'the credential names removed first are the setup script'"'"'s, line for line' test -n "$(fn_body "$TEMPLATE" credential_name)" -a "$(fn_body "$TEMPLATE" credential_name)" = "$(fn_body "$SCRIPT" credential_name)"
-LAUNCHER_SRC=$HERE/../../buzz-acp/run-buzz-acp.sh
-if [ -f "$LAUNCHER_SRC" ]; then
-    check 'and the launcher'"'"'s' test "$(fn_body "$TEMPLATE" credential_name | sed 1d)" = "$(fn_body "$LAUNCHER_SRC" credential_name | sed 1d)"
-fi
+# The launcher is the skill's own since 5.4.0 (it used to be read from a Buzz checkout, where the path
+# now holds only a pointer).
+LAUNCHER_SRC=$SKILL_DIR/scripts/run-buzz-acp.sh
+check 'and the launcher'"'"'s' test -n "$(fn_body "$LAUNCHER_SRC" credential_name | sed 1d)" -a "$(fn_body "$TEMPLATE" credential_name | sed 1d)" = "$(fn_body "$LAUNCHER_SRC" credential_name | sed 1d)"
 # The workspace agent runs the stock adapter: its kept list starts as the channel supervisor's above.
 KEPT=$ROOT/models/claude-agent.list
 cp -p "$ROOT/models/claude-supervisor.list" "$KEPT"

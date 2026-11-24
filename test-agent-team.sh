@@ -1791,7 +1791,8 @@ for phrase in 'agent-team.sh create' 'agent-team.sh proof' 'agent-team.sh start'
     'right after the first preflight, before any command writes' '`<agent>` is the agent'"'"'s folder name' \
     'paired the CLI with Buzz Desktop already' 'team.sh check`' "Agents are started with the team's own command" 'show the values it printed' 'agent-team.sh settings --from-env' 'Authorize external identity' \
     'signature: FAILED' '--no-signature-check' 'Never read, print, copy, move or upload a key file' '.env.buzz-acp.local' \
-    'agent-team.sh finish <name> --dry-run' 'in their own terminal' 'chmod +x' '${CLAUDE_SKILL_DIR}' 'buzz-agent-team/SKILL.md'; do
+    'agent-team.sh finish <name> --dry-run' 'in their own terminal' 'chmod +x' '${CLAUDE_SKILL_DIR}' 'buzz-agent-team/SKILL.md' \
+    'Before anything else in every use of this skill' 'run `agent-team.sh launcher --dry-run`'; do
     check "skill covers: $phrase" has "$SK" "$phrase"
 done
 for tool in 'Claude Code' 'Codex'; do

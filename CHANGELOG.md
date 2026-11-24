@@ -2,6 +2,18 @@
 
 Versions of the buzz-agent-team skill, newest first. The version is the one line of `buzz-agent-team/VERSION`, and each one is the Git tag `v<version>` of this repository. What the three numbers mean is in the [README](README.md#versions).
 
+## 5.4.1 (2026-11-24)
+
+The assistant checks the launcher at the start of every use of the skill. Only `SKILL.md` and the documents change: no script, no template and no team file.
+
+- **A rule of its own.** In 5.4.0 the instruction to keep the launcher on `PATH` level with the skill sat inside step 1 of the setup flow, so an assistant that only upgraded, started or checked a team met it late or not at all. It is now one of the Rules: before anything else in every use of the skill, run `agent-team.sh launcher --dry-run`; when it would install or replace, say so in one line and run `agent-team.sh launcher`; when the same file is there, go on without a word.
+- **A leftover sentence is gone.** Step 1 still told the assistant to ask the user to confirm "the accepted launcher". It now says what the `launcher` line of a passed preflight reads: `(the one this skill brings)`.
+- What the script does is unchanged from 5.4.0: `preflight`, `status`, `create` and `upgrade` compare and report, and only `agent-team.sh launcher` writes. A team's own command, `team.sh`, still does not compare: it knows no skill.
+
+- **One test read the launcher from its old place.** `test-team-sh.sh` compared the team command's list of credential names with the launcher in a Buzz checkout, `local/buzz-acp/run-buzz-acp.sh`, which holds only a pointer since the launcher moved. It now reads the skill's own launcher, and fails when that function is not found instead of skipping.
+
+Checked: both suites; the `SKILL.md` scenario of `test-agent-team.sh` now requires the rule's two phrases.
+
 ## 5.4.0 (2026-11-24)
 
 The launcher comes with the skill. `run-buzz-acp.sh`, the program that starts one agent, changes together with the skill, so the skill now carries the copy that fits it and one command puts it on `PATH`. No team file changes: a team made by 5.3.0 needs no upgrade for this.
