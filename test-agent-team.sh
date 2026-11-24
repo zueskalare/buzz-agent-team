@@ -173,10 +173,6 @@ cat > "$BIN/claude-agent-acp" <<'EOF'
 #!/bin/bash
 [ "$#" -gt 0 ] || exec python3 -I "$(dirname "$0")/acp-models-stub.py" claude
 case "$*" in
-    "--cli --help") echo '--restricted --tools --strict-mcp-config --disable-slash-commands'; exit 0 ;;
-    "--cli env-check"*)   # which agent secrets reach the adapter's CLI (none may)
-        for v in BUZZ_PRIVATE_KEY BUZZ_AUTH_TAG RUN_BUZZ_ACP_KEY_FILE; do [ -z "${!v+x}" ] || echo "leaked $v"; done
-        echo 'env-check done'; exit 0 ;;
     "--cli auth status"*)
         m=$(cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fake-auth" 2>/dev/null || echo none)
         # As the real CLI reports it: an exported key or token outranks the subscription sign-in.
@@ -250,17 +246,6 @@ for line in sys.stdin:
             "currentModelId": entries[0][0] if entries else "default",
             "availableModels": [{"modelId": i, "name": n} for i, n in entries]}}}), flush=True)
 EOF
-# A minimal stand-in for the MCP SDK and zod, so the restricted runtime's buzz-tools --check-runtime can load.
-mkdir -p "$BIN/node_modules/@modelcontextprotocol/sdk/server" "$BIN/node_modules/zod"
-printf 'class McpServer {}\nmodule.exports = { McpServer };\n' > "$BIN/node_modules/@modelcontextprotocol/sdk/server/mcp.js"
-printf 'class StdioServerTransport {}\nmodule.exports = { StdioServerTransport };\n' > "$BIN/node_modules/@modelcontextprotocol/sdk/server/stdio.js"
-printf '{"name": "@modelcontextprotocol/sdk", "version": "0.0.0-stand-in"}\n' > "$BIN/node_modules/@modelcontextprotocol/sdk/package.json"
-printf 'module.exports = { z: {} };\n' > "$BIN/node_modules/zod/index.js"
-printf '{"name": "zod", "version": "0.0.0-stand-in", "main": "index.js"}\n' > "$BIN/node_modules/zod/package.json"
-# The restricted runtime's own check runs buzz-tools with node; the tests need node, as a channel supervisor does.
-NODE=$(command -v node 2>/dev/null || true)
-[ -n "$NODE" ] || { echo 'node is needed for these tests (the restricted runtime runs on it)' >&2; exit 2; }
-ln -s "$NODE" "$BIN/node"
 mkdir -p "$HOME/.claude" "$HOME/.codex"
 echo claude.ai > "$HOME/.claude/fake-auth"
 echo chatgpt > "$HOME/.codex/fake-login"
@@ -436,7 +421,7 @@ check 'the settings are the ones the helper shows, and create named the file bef
 check 'next steps name the Buzz Desktop step' has "$OUT/create-shop.out" 'Authorize external identity'
 check 'the two public keys differ' eval '[ "$(grep ^pubkey= "$ROOT/shop/shop/agent.conf")" != "$(grep ^pubkey= "$ROOT/shop/supervisor/agent.conf")" ]'
 check 'the workspace agent'"'"'s folder is named after the team and recorded in team.conf; its role is agent' eval '[ "$(LC_ALL=C ls "$ROOT/shop" | grep -v -e "\.py$" -e "^team" -e VERSION | tr "\n" " ")" = "shop supervisor " ] && grep -qx agent_folder=shop "$ROOT/shop/team.conf" && [ "$(grep -E "^(id|role)=" "$ROOT/shop/shop/agent.conf" | tr "\n" " ")" = "id=agent role=agent " ]'
-check 'the channel supervisor'"'"'s record says role=supervisor, the line its runtime reads to add the channel tools' eval '[ "$(grep -E "^(id|role)=" "$ROOT/shop/supervisor/agent.conf" | tr "\n" " ")" = "id=supervisor role=supervisor " ]'
+check 'the channel supervisor'"'"'s record says role=supervisor' eval '[ "$(grep -E "^(id|role)=" "$ROOT/shop/supervisor/agent.conf" | tr "\n" " ")" = "id=supervisor role=supervisor " ]'
 check 'its env file'"'"'s paths point into that folder' eval 'grep -qx "RUN_BUZZ_ACP_KEY_FILE=$ROOT/shop/shop/identity.key" "$ROOT/shop/shop/.env.buzz-acp.local" && grep -qx "BUZZ_ACP_SYSTEM_PROMPT_FILE=$ROOT/shop/shop/prompt.md" "$ROOT/shop/shop/.env.buzz-acp.local"'
 check 'create lists each agent by its folder, the name to type' eval 'grep -q "^  shop  *Shop  *claude" "$OUT/create-shop.out" && grep -q "^  supervisor  *Shop Supervisor  *claude" "$OUT/create-shop.out"'
 # The folder takes the team's name exactly as written, unless a team folder already uses that name.
@@ -494,10 +479,15 @@ done
 check 'the workspace agent takes the project name, the channel supervisor "<Name> Supervisor"' eval 'grep -qxF "# Shop" "$A" && grep -qxF "# Shop Supervisor" "$S"'
 check 'workspace agent: the project'"'"'s agent in the workspace, a supervisor in subagent mode' has "$A" "You are the project’s agent in the workspace: a supervisor in subagent mode. You plan the work, dispatch bounded work to worker subagents, review their evidence, and keep PROJECT.md and the tracker."
 check 'channel supervisor: talks with anyone, runs brainstorms, brings decisions to the owner' has "$S" "You are the project’s channel supervisor. You talk with anyone in the channel, run brainstorms to a decision, propose todos, and bring decisions to the owner."
-check 'each names the other by display name' eval 'has "$A" "The channel supervisor (Shop Supervisor) talks with everyone in the channel" && has "$S" "The workspace agent (Shop) works in the project folder"'
+check 'each names the other by display name' eval 'has "$A" "The channel supervisor (Shop Supervisor) talks with everyone in the channel" && has "$S" "The workspace agent (Shop) works in the same project folder"'
+check 'the workspace agent knows the channel supervisor may make a small change the owner asked for' has "$A" "It works in the same project folder and may make a small change the owner asked it for; larger work comes to you."
 check 'channel supervisor decides when to speak' has "$S" "Stay silent"
-check 'channel supervisor: a Channels rule, acting on the owner'"'"'s signed request, private by default, no delete; the workspace agent has none' \
-    eval 'has "$S" "## Channels" && has "$S" "Do it when the owner asks, and check that the asking message is signed by the owner." && has "$S" "Make a channel private unless the owner says open" && has "$S" "You cannot delete a channel." && hasnt "$A" "## Channels"'
+check 'channel supervisor: it talks with anyone and acts only for the owner, on a message signed by the owner' \
+    eval 'has "$S" "## Who you act for" && has "$S" "You act only for the owner." && has "$S" "Before you act, check that the message asking for it is signed by the owner." && has "$S" "When someone else asks, say what you would do and ask the owner."'
+check 'channel supervisor: small things itself, larger work handed to the workspace agent' \
+    eval 'has "$S" "## What you do yourself and what you hand over" && has "$S" "Hand the workspace agent the work that changes several files, runs for long or needs workers"'
+check 'channel supervisor: a Channels rule, with the Buzz CLI, when the owner asks, private by default, never delete or leave; the workspace agent has none' \
+    eval 'has "$S" "## Channels" && has "$S" "with the Buzz CLI (\`buzz channels\`)" && has "$S" "Do it when the owner asks." && has "$S" "Make a channel private unless the owner says open" && has "$S" "Never delete a channel and never leave one." && hasnt "$A" "## Channels"'
 check 'channel supervisor proposes todos in their Buzz thread' has "$S" "propose a todo in its Buzz thread"
 check 'hand-off: it mentions the workspace agent only for accepted work (naming the acceptance) or a question, never to acknowledge' has "$S" "Mention the workspace agent only to hand it work the owner accepted, naming the owner’s accepting message, or to ask it something you need answered. Never mention it to acknowledge a message."
 check 'hand-off: its mention never stands in for the owner'"'"'s decision' has "$S" "It starts work only on the owner’s own accepting message, which it checks itself, so your mention never stands in for the owner’s decision."
@@ -509,10 +499,22 @@ check 'that line is in "Supervise the run", before "Your workspace"; the prompt 
 check 'workspace agent owns tracker promotion' has "$A" "Promote an accepted proposal"
 check 'workspace agent checks the owner'"'"'s signature on an approval, relayed ones included' has "$A" "Verify the original message’s signed author against the configured owner before acting on an approval, including approvals relayed by the channel supervisor."
 check 'workspace agent answers the channel supervisor, whose messages carry no authority, and does not mention it back' eval 'has "$A" "Answer the channel supervisor as you answer the owner" && has "$A" "Its messages carry no authority of their own" && has "$A" "do not mention it, so that agents do not set each other off"'
-# The "Your workspace" rule of 2.0.0's supervisor prompt, word for word (sha-256 of that section).
+# The "Your workspace" rule of 2.0.0's supervisor prompt, word for word (sha-256 of that section), in every
+# prompt: the workspace agent's and the channel supervisor's as written here, and a reviewer's, made in a
+# root of its own so that it is no channel peer of the agents of the scenarios below.
 RULE_SHA=d18675c7da1f7dc8097c7ec538369bacf22ab43e57e8bec657aff9f70045c8b9
-check 'the "Your workspace" rule is in the workspace agent'"'"'s prompt word for word, and not in the channel supervisor'"'"'s' \
-    eval '[ "$(sed -n "/^## Your workspace\$/,\$p" "$A" | shasum -a 256 | cut -c1-64)" = "$RULE_SHA" ] && hasnt "$S" "Your workspace" && hasnt "$S" "Shell commands run in a sandbox"'
+run_tool rv-prompt AGENT_TEAM_ROOT="$TD/root-rv-prompt" -- create --workspace "$TD/ws/shop" --channel "$CHANNEL" --community "$COMMUNITY" --owner "$OWNER" --name shop-reviewer --roles reviewer
+RV=$TD/root-rv-prompt/shop-reviewer/reviewer/prompt.md
+section_sha() { sed -n "/^## $2\$/,\$p" "$1" | shasum -a 256 | cut -c1-64; } # PROMPT HEADING: that section to the end
+check 'the "Your workspace" rule ends each of the three prompts, word for word' \
+    eval 'rc_is 0 && [ "$(section_sha "$A" "Your workspace")" = "$RULE_SHA" ] && [ "$(section_sha "$S" "Your workspace")" = "$RULE_SHA" ] && [ "$(section_sha "$RV" "Your workspace")" = "$RULE_SHA" ]'
+pictures() { awk '/^## Pictures in messages$/ { on = 1; next } on && /^## / { exit } on' "$1"; } # PROMPT: the body of that section
+check 'and so does "Pictures in messages": the same section in all three, with buzz media get' \
+    eval '[ -n "$(pictures "$A")" ] && [ "$(pictures "$A")" = "$(pictures "$S")" ] && [ "$(pictures "$A")" = "$(pictures "$RV")" ] && has "$A" "buzz media get <link> --output .buzz-media/<name>"'
+check 'the reviewer: it may run checks for anyone who asks, and never changes the work it reviews' \
+    eval 'has "$RV" "For anyone who asks you for a review you may read the project, run a check such as the project’s tests" && has "$RV" "You never change the work you review"'
+no_restriction_words() { local f; for f in "$@"; do if grep -qi -e restricted -e read-only -e 'cannot edit' -e 'run commands' -e 'reading tools' -e 'posting tool' "$f"; then return 1; fi; done; }
+check 'no prompt says an agent is restricted or read-only, or names a tool it lacks' no_restriction_words "$A" "$S" "$RV"
 check 'no prompt still describes the 2.0.0 jobs' eval 'hasnt "$A" "discussion partner" && hasnt "$S" "discussion partner" && hasnt "$A" "workspace supervisor" && hasnt "$S" "workspace supervisor"'
 for id in shop supervisor; do
     check "$id uses its role prompt without conflicting built-in instructions" has "$ROOT/shop/$id/.env.buzz-acp.local" 'BUZZ_ACP_NO_BASE_PROMPT=true'
@@ -526,8 +528,11 @@ check 'workspace agent: the stock adapter in bypass-permissions, no runtime and 
     eval 'grep -qx BUZZ_ACP_AGENT_COMMAND=claude-agent-acp "$ap/.env.buzz-acp.local" && grep -qx BUZZ_ACP_PERMISSION_MODE=bypass-permissions "$ap/.env.buzz-acp.local" && hasnt "$ap/.env.buzz-acp.local" BUZZ_ACP_SUBSCRIBE && hasnt "$ap/.env.buzz-acp.local" BUZZ_ACP_CONFIG && [ ! -e "$ap/runtime" ] && [ ! -e "$ap/subscriptions.toml" ]'
 check 'channel supervisor accepts events from all members' has "$sp/.env.buzz-acp.local" 'BUZZ_ACP_RESPOND_TO=anyone'
 check 'channel supervisor uses its generated subscription rules' eval 'has "$sp/.env.buzz-acp.local" "BUZZ_ACP_SUBSCRIBE=config" && has "$sp/.env.buzz-acp.local" "BUZZ_ACP_CONFIG=$sp/subscriptions.toml"'
-check 'channel supervisor starts through its own restricted adapter, with no harness permission mode and no allowlist' \
-    eval 'has "$sp/.env.buzz-acp.local" "BUZZ_ACP_AGENT_COMMAND=$sp/runtime/claude-agent-acp" && has "$sp/.env.buzz-acp.local" "BUZZ_ACP_PERMISSION_MODE=default" && hasnt "$sp/.env.buzz-acp.local" "dont-ask" && hasnt "$sp/.env.buzz-acp.local" bypass && hasnt "$sp/.env.buzz-acp.local" ALLOWLIST'
+check 'channel supervisor: the stock adapter in bypass-permissions, as the workspace agent, with no allowlist and no runtime' \
+    eval 'grep -qx BUZZ_ACP_AGENT_COMMAND=claude-agent-acp "$sp/.env.buzz-acp.local" && grep -qx BUZZ_ACP_PERMISSION_MODE=bypass-permissions "$sp/.env.buzz-acp.local" && [ "$(grep -c "^BUZZ_ACP_PERMISSION_MODE=" "$sp/.env.buzz-acp.local")" = 1 ] && hasnt "$sp/.env.buzz-acp.local" ALLOWLIST && [ ! -e "$sp/runtime" ]'
+RE=$TD/root-rv-prompt/shop-reviewer/reviewer/.env.buzz-acp.local
+check 'reviewer: the stock adapter in bypass-permissions, answering anyone who mentions it, with no subscription rules' \
+    eval 'grep -qx BUZZ_ACP_AGENT_COMMAND=claude-agent-acp "$RE" && grep -qx BUZZ_ACP_PERMISSION_MODE=bypass-permissions "$RE" && grep -qx BUZZ_ACP_RESPOND_TO=anyone "$RE" && hasnt "$RE" BUZZ_ACP_SUBSCRIBE && hasnt "$RE" BUZZ_ACP_CONFIG && [ ! -e "$TD/root-rv-prompt/shop-reviewer/reviewer/runtime" ]'
 # What the rules select, evaluated as the harness does (buzz-acp filter.rs match_event: rules in order,
 # channel scope, kinds, a p tag naming the channel supervisor when require_mention, then the author filter).
 SELECT=$TD/rules_select.py
@@ -577,25 +582,20 @@ check 'loop guard: the team'"'"'s workspace agent posting in the channel starts 
 check 'loop guard: nor does the workspace agent mentioning the channel supervisor, in any channel' eval '[ "$(sel "$CHANNEL" 9 "$WK" "$CK")" = none ] && [ "$(sel "$OTHERCH" 40002 "$WK" "$CK")" = none ]'
 check 'rules: each filter names exactly the team'"'"'s other agent, the workspace agent' eval '[ "$(grep -c "^filter = '"'"'author != \"$WK\"'"'"'$" "$sp/subscriptions.toml")" = 2 ]'
 
-for tool in claude-agent-acp restricted-claude buzz-tools codex-acp; do
-    check "the channel supervisor's runtime $tool is executable and matches the source" eval '[ "$(mode_of "$sp/runtime/$tool")" = 700 ] && cmp "$sp/runtime/$tool" "$SKILL_DIR/runtime/$tool"'
-done
 if [ -n "$REAL_BUZZ" ]; then
-    for cmd in 'messages get' 'messages thread' 'messages search' 'messages send' 'canvas get' 'issues list' 'issues get' 'mem ls' 'mem get' 'mem set' \
-        'channels list' 'channels get' 'channels members' 'channels create' 'channels update' 'channels topic' 'channels purpose' \
+    # The commands the prompts name: buzz media get for a picture, buzz channels for the channel supervisor's channels.
+    for cmd in 'media get' 'messages send' 'channels create' 'channels update' 'channels topic' 'channels purpose' \
         'channels add-member' 'channels remove-member' 'channels archive' 'channels unarchive'; do
-        check "Buzz CLI supports the restricted runtime operation: $cmd" "$REAL_BUZZ" $cmd --help >/dev/null
+        check "Buzz CLI has the command a prompt names: $cmd" "$REAL_BUZZ" $cmd --help >/dev/null
     done
-    # The options the channel supervisor's channel tools pass (runtime/buzz-tools).
-    cli_options() { # SUBCOMMAND OPTION...: the CLI's help for "channels SUBCOMMAND" lists each option
-        local help o
-        help=$("$REAL_BUZZ" channels "$1" --help) || return 1
+    cli_options() { # COMMAND... -- OPTION...: the CLI's help for that command lists each option
+        local help o cmd=()
+        while [ "$1" != -- ]; do cmd+=("$1"); shift; done
         shift
-        for o in "$@"; do printf '%s\n' "$help" | grep -Eq -- "^ +$o( |\$)" || return 1; done
+        help=$("$REAL_BUZZ" "${cmd[@]}" --help) || return 1
+        for o in "$@"; do printf '%s\n' "$help" | grep -Eq -- "^ +(-[a-z], )?$o( |\$)" || return 1; done
     }
-    check 'Buzz CLI has every option the channel tools pass' eval 'cli_options create --name --type --visibility --description --ttl --unlisted &&
-        cli_options update --channel --name --description --visibility --ttl --no-ttl && cli_options add-member --channel --pubkey --role &&
-        cli_options topic --channel --topic && cli_options purpose --channel --purpose && cli_options remove-member --channel --pubkey'
+    check 'Buzz CLI has the options the prompts rely on' eval 'cli_options media get -- --output && cli_options channels create -- --visibility --description --ttl && cli_options channels add-member -- --role'
 fi
 
 scenario 'Running create again changes nothing and reports what exists (C2)'
@@ -610,26 +610,38 @@ check 'team record byte-identical' eval '[ "$(sha "$ROOT/shop/team.conf")" = "$S
 check 'no secret key in the output' no_key_in "$OUT/create-again.out"
 
 check 'existing project record is preserved' grep -qxF 'An existing decision by the owner.' "$TD/ws/shop/PROJECT.md"
-rm -- "$sp/runtime/buzz-tools"
-run_tool restore-runtime -- create --workspace "$TD/ws/shop" --channel "$CHANNEL" --community "$COMMUNITY" --owner "$OWNER"
-check 'a missing channel supervisor tool is restored with the original identity' eval 'rc_is 0 && [ "$(tree_sha "$sp")" = "$SHA_S" ]'
+rm -- "$sp/subscriptions.toml"
+run_tool restore-rules -- create --workspace "$TD/ws/shop" --channel "$CHANNEL" --community "$COMMUNITY" --owner "$OWNER"
+check 'missing channel supervisor rules are restored with the original identity' eval 'rc_is 0 && [ "$(tree_sha "$sp")" = "$SHA_S" ]'
 
 scenario 'A team in an earlier format (1, 2 or 3) is refused, and upgrade converts it keeping its identity'
+# Before format 5 the channel supervisor and the reviewer ran a restricted runtime from runtime/ in their
+# folders, which their env files named, with no permission mode of the harness's own.
+give_runtime() { # AGENT_DIR: runtime/ and the env lines, as 4.3.0 wrote them
+    local d=$1 f
+    case $d in "$TD"/*) ;; *) return 1 ;; esac
+    mkdir -p "$d/runtime"; chmod 700 "$d/runtime"
+    for f in claude-agent-acp restricted-claude buzz-tools codex-acp; do printf '#!/bin/sh\necho "the restricted runtime: %s"\n' "$f" > "$d/runtime/$f"; chmod 700 "$d/runtime/$f"; done
+    sed -e "s|^BUZZ_ACP_AGENT_COMMAND=.*|BUZZ_ACP_AGENT_COMMAND=$d/runtime/$(if grep -qx backend=codex "$d/agent.conf"; then echo codex-acp; else echo claude-agent-acp; fi)|" \
+        -e 's/^BUZZ_ACP_PERMISSION_MODE=.*/BUZZ_ACP_PERMISSION_MODE=default/' "$d/.env.buzz-acp.local" > "$d/env.new" && mv "$d/env.new" "$d/.env.buzz-acp.local"
+    chmod 600 "$d/.env.buzz-acp.local"
+}
 # Before format 4 the workspace agent's role was "assistant" and its folder assistant/. This writes a
 # team made by this skill back into that layout, as the earlier versions wrote it.
 to_old_layout() { # TEAM_DIR FORMAT
     local t=$1 f
     case $t in "$TD"/*) ;; *) return 1 ;; esac
     mv "$t/shop" "$t/assistant"
-    sed -e "s/^format=4\$/format=$2/" -e '/^agent_folder=/d' "$t/team.conf" > "$t/team.conf.new" && mv "$t/team.conf.new" "$t/team.conf"
-    sed -e "s/^format=4\$/format=$2/" -e 's/^id=agent$/id=assistant/' -e 's/^role=agent$/role=assistant/' "$t/assistant/agent.conf" > "$t/a.new" && mv "$t/a.new" "$t/assistant/agent.conf"
-    sed -e "s/^format=4\$/format=$2/" "$t/supervisor/agent.conf" > "$t/s.new" && mv "$t/s.new" "$t/supervisor/agent.conf"
+    sed -e "s/^format=5\$/format=$2/" -e '/^agent_folder=/d' "$t/team.conf" > "$t/team.conf.new" && mv "$t/team.conf.new" "$t/team.conf"
+    sed -e "s/^format=5\$/format=$2/" -e 's/^id=agent$/id=assistant/' -e 's/^role=agent$/role=assistant/' "$t/assistant/agent.conf" > "$t/a.new" && mv "$t/a.new" "$t/assistant/agent.conf"
+    sed -e "s/^format=5\$/format=$2/" "$t/supervisor/agent.conf" > "$t/s.new" && mv "$t/s.new" "$t/supervisor/agent.conf"
     # The env files name their own folders, as a team made in this place would (the copy came from $ROOT/shop).
     for f in assistant supervisor; do
         sed -e "s|$ROOT/shop/shop/|$t/assistant/|g" -e "s|$ROOT/shop/|$t/|g" "$t/$f/.env.buzz-acp.local" > "$t/$f/env.new" && mv "$t/$f/env.new" "$t/$f/.env.buzz-acp.local"
         rm -f -- "$t/$f/agent.pid" "$t/$f/agent.log" "$t/$f/agent.log.1"
     done
     chmod 600 "$t/team.conf" "$t/assistant/agent.conf" "$t/supervisor/agent.conf" "$t/assistant/.env.buzz-acp.local" "$t/supervisor/.env.buzz-acp.local"
+    give_runtime "$t/supervisor"
 }
 legacy=$TD/legacy
 mkdir -p "$legacy/shop"
@@ -654,11 +666,12 @@ check 'upgrade refuses while an agent runs and changes nothing' eval 'rc_is 1 &&
 kill "$SLEEPER" 2>/dev/null; wait "$SLEEPER" 2>/dev/null; rm -f -- "$legacy/shop/supervisor/agent.pid"
 SHA_LEG=$(tree_sha "$legacy/shop")
 run_tool upgrade-dry AGENT_TEAM_ROOT="$legacy" -- upgrade shop --dry-run
-check 'upgrade --dry-run prints the plan and changes nothing' eval 'rc_is 0 && has "$OUT/upgrade-dry.out" "format 1 -> 4" && has "$OUT/upgrade-dry.out" "ANTHROPIC_BASE_URL" && hasnt "$OUT/upgrade-dry.out" "gateway.example.org" && [ "$(tree_sha "$legacy/shop")" = "$SHA_LEG" ]'
+check 'upgrade --dry-run prints the plan and changes nothing' eval 'rc_is 0 && has "$OUT/upgrade-dry.out" "format 1 -> 5" && has "$OUT/upgrade-dry.out" "ANTHROPIC_BASE_URL" && hasnt "$OUT/upgrade-dry.out" "gateway.example.org" && [ "$(tree_sha "$legacy/shop")" = "$SHA_LEG" ]'
 run_tool upgrade-1 AGENT_TEAM_ROOT="$legacy" -- upgrade shop --supervisor-backend codex
 LA=$legacy/shop/shop LS=$legacy/shop/supervisor
-check 'upgrade: format 4, the folder moved, keys and proof byte-identical, no gateway, backups beside the files' eval 'rc_is 0 && grep -qx format=4 "$legacy/shop/team.conf" && grep -qx format=4 "$LA/agent.conf" && [ ! -e "$legacy/shop/assistant" ] && cmp "$LA/identity.key" "$ap/identity.key" && grep -qxF "$LEG_TAG" "$LA/.env.buzz-acp.local" && hasnt "$LA/.env.buzz-acp.local" ANTHROPIC_ && has "$LA/.env.buzz-acp.local" BUZZ_SIGN_IN=subscription && ls "$LA"/.env.buzz-acp.local.bak-* >/dev/null'
-check 'upgrade: the chosen backend is saved for the supervisor, which gets the restricted runtime; the workspace agent gets none' eval 'grep -qx backend=codex "$LS/agent.conf" && grep -qx "BUZZ_ACP_AGENT_COMMAND=$LS/runtime/codex-acp" "$LS/.env.buzz-acp.local" && [ -x "$LS/runtime/codex-acp" ] && [ -s "$LS/subscriptions.toml" ] && [ ! -e "$LA/runtime" ]'
+check 'upgrade: format 5, the folder moved, keys and proof byte-identical, no gateway, backups beside the files' eval 'rc_is 0 && grep -qx format=5 "$legacy/shop/team.conf" && grep -qx format=5 "$LA/agent.conf" && [ ! -e "$legacy/shop/assistant" ] && cmp "$LA/identity.key" "$ap/identity.key" && grep -qxF "$LEG_TAG" "$LA/.env.buzz-acp.local" && hasnt "$LA/.env.buzz-acp.local" ANTHROPIC_ && has "$LA/.env.buzz-acp.local" BUZZ_SIGN_IN=subscription && ls "$LA"/.env.buzz-acp.local.bak-* >/dev/null'
+check 'upgrade: the chosen backend is saved for the supervisor, on the stock Codex adapter; no agent has a runtime' eval 'grep -qx backend=codex "$LS/agent.conf" && grep -qx BUZZ_ACP_AGENT_COMMAND=codex-acp "$LS/.env.buzz-acp.local" && grep -qx BUZZ_ACP_PERMISSION_MODE=bypass-permissions "$LS/.env.buzz-acp.local" && [ ! -e "$LS/runtime" ] && [ -s "$LS/subscriptions.toml" ] && [ ! -e "$LA/runtime" ]'
+check 'and the buzz rule is put into the project folder for it' eval 'has "$OUT/upgrade-1.out" "added: $TD/ws/shop/.codex/rules/buzz.rules" && [ -s "$TD/ws/shop/.codex/rules/buzz.rules" ]'
 check 'upgrade: the workspace agent answers the owner and its channel supervisor' eval 'grep -qx BUZZ_ACP_RESPOND_TO=allowlist "$LA/.env.buzz-acp.local" && grep -qx "BUZZ_ACP_RESPOND_TO_ALLOWLIST=$CK" "$LA/.env.buzz-acp.local"'
 SHA_LEG=$(tree_sha "$legacy/shop")
 run_tool upgrade-2 AGENT_TEAM_ROOT="$legacy" -- upgrade shop
@@ -690,10 +703,10 @@ check 'create and start refuse a format-3 team, name upgrade and the new folder,
 RC=0; (cd "$TD/ws/shop" && /bin/bash "$L3/shop/team.sh" check) > "$OUT/l3-teamsh.out" 2>&1 < /dev/null || RC=$?
 check 'the team command finds the agent in assistant/ and refuses it until it is upgraded' eval 'rc_is 1 && [ "$(grep -c "made by an earlier version of the skill (format 3)" "$OUT/l3-teamsh.out")" = 2 ]'
 run_tool l3-list AGENT_TEAM_ROOT="$L3" -- status
-check 'status lists a format-3 team and says what to do' has "$OUT/l3-list.out" "format 3, earlier than 4: agent-team.sh upgrade shop --dry-run"
+check 'status lists a format-3 team and says what to do' has "$OUT/l3-list.out" "format 3, earlier than 5: agent-team.sh upgrade shop --dry-run"
 run_tool l3-dry AGENT_TEAM_ROOT="$L3" -- upgrade shop --dry-run
 check 'the plan says in one line that assistant/ becomes shop/, with the start command from now on' eval 'rc_is 0 && grep -qxF "    folder: assistant/ becomes shop/; its start command from now on: $L3A/start.sh" "$OUT/l3-dry.out"'
-check 'and that team.conf records it; a dry run changes nothing' eval 'has "$OUT/l3-dry.out" "team.conf: format 3 -> 4, agent_folder=shop" && [ "$(tree_sha "$L3/shop")" = "$SHA_L3" ]'
+check 'and that team.conf records it; a dry run changes nothing' eval 'has "$OUT/l3-dry.out" "team.conf: format 3 -> 5, agent_folder=shop" && [ "$(tree_sha "$L3/shop")" = "$SHA_L3" ]'
 check 'nothing about jobs changes, so the plan names none' eval 'hasnt "$OUT/l3-dry.out" "job:" && hasnt "$OUT/l3-dry.out" "keeps its saved model"'
 # What must come through unchanged: keys, proofs, names, backends, models, efforts, allowlist, rules.
 l3_state() { # TEAM_DIR AGENT_FOLDER (one file at a time, so the order is fixed)
@@ -701,13 +714,14 @@ l3_state() { # TEAM_DIR AGENT_FOLDER (one file at a time, so the order is fixed)
     sha "$1/$2/identity.key" "$1/supervisor/identity.key" "$1/supervisor/subscriptions.toml" "$1/$2/prompt.md" "$1/supervisor/prompt.md" | cut -c1-12 | tr '\n' ' '
     for d in "$2" supervisor; do
         grep -E "$f" "$1/$d/agent.conf"
-        grep -E '^BUZZ_(AUTH_TAG|ACP_RESPOND_TO|ACP_RESPOND_TO_ALLOWLIST|MODEL_CLAUDE|MODEL_CODEX|ACP_AGENT_COMMAND|ACP_PERMISSION_MODE)=' "$1/$d/.env.buzz-acp.local"
+        grep -E '^BUZZ_(AUTH_TAG|ACP_RESPOND_TO|ACP_RESPOND_TO_ALLOWLIST|MODEL_CLAUDE|MODEL_CODEX)=' "$1/$d/.env.buzz-acp.local"
     done
 }
 L3_BEFORE=$(l3_state "$TD/l3-before" assistant)
 run_tool l3-up AGENT_TEAM_ROOT="$L3" -- upgrade shop
-check 'upgrade moves assistant/ to shop/ and records it in team.conf, format 4' eval 'rc_is 0 && [ ! -e "$L3/shop/assistant" ] && [ -d "$L3A" ] && grep -qx format=4 "$L3/shop/team.conf" && grep -qx agent_folder=shop "$L3/shop/team.conf" && has "$OUT/l3-up.out" "assistant/: moved to shop/"'
-check 'agent.conf says format 4 and the role agent' eval '[ "$(grep -E "^(format|id|role)=" "$L3A/agent.conf" | tr "\n" " ")" = "format=4 id=agent role=agent " ]'
+check 'upgrade moves assistant/ to shop/ and records it in team.conf, format 5' eval 'rc_is 0 && [ ! -e "$L3/shop/assistant" ] && [ -d "$L3A" ] && grep -qx format=5 "$L3/shop/team.conf" && grep -qx agent_folder=shop "$L3/shop/team.conf" && has "$OUT/l3-up.out" "assistant/: moved to shop/"'
+check 'agent.conf says format 5 and the role agent' eval '[ "$(grep -E "^(format|id|role)=" "$L3A/agent.conf" | tr "\n" " ")" = "format=5 id=agent role=agent " ]'
+check 'the channel supervisor leaves its restricted runtime in the same run: the stock adapter, bypass-permissions, runtime.bak' eval 'grep -qx BUZZ_ACP_AGENT_COMMAND=claude-agent-acp "$L3/shop/supervisor/.env.buzz-acp.local" && grep -qx BUZZ_ACP_PERMISSION_MODE=bypass-permissions "$L3/shop/supervisor/.env.buzz-acp.local" && [ ! -e "$L3/shop/supervisor/runtime" ] && [ -x "$(ls -d "$L3/shop/supervisor"/runtime.bak-* | head -n 1)/codex-acp" ]'
 check 'the env file'"'"'s paths point into the new folder, and nowhere into assistant/' eval 'grep -qx "RUN_BUZZ_ACP_KEY_FILE=$L3A/identity.key" "$L3A/.env.buzz-acp.local" && grep -qx "BUZZ_ACP_SYSTEM_PROMPT_FILE=$L3A/prompt.md" "$L3A/.env.buzz-acp.local" && hasnt "$L3A/.env.buzz-acp.local" /assistant/'
 check 'keys, proofs, names, backends, models, efforts, its workers'"'"' settings, the allowlist, the rules and the prompts are unchanged' eval '[ "$(l3_state "$L3/shop" shop)" = "$L3_BEFORE" ] && [ "$(grep -c -x -e worker_model_claude=sonnet -e worker_effort_codex=high "$L3A/agent.conf")" = 2 ]'
 check 'the agent'"'"'s start command is the template, in its new folder' eval 'cmp -s "$SKILL_DIR/templates/agent-start.sh" "$L3A/start.sh" && [ -x "$L3A/start.sh" ]'
@@ -773,15 +787,15 @@ RC=0; (cd "$TD/ws/shop" && /bin/bash "$L2/shop/team.sh" check) > "$OUT/l2-teamsh
 check 'the team command refuses its format-2 agents too' eval 'rc_is 1 && [ "$(grep -c "made by an earlier version of the skill (format 2)" "$OUT/l2-teamsh.out")" = 2 ]'
 run_tool l2-status AGENT_TEAM_ROOT="$L2" -- status shop
 run_tool l2-list AGENT_TEAM_ROOT="$L2" -- status
-check 'status lists a format-2 team and says what to do' eval 'has "$OUT/l2-status.out" "it starts only after: agent-team.sh upgrade shop --dry-run" && has "$OUT/l2-list.out" "format 2, earlier than 4: agent-team.sh upgrade shop --dry-run"'
+check 'status lists a format-2 team and says what to do' eval 'has "$OUT/l2-status.out" "it starts only after: agent-team.sh upgrade shop --dry-run" && has "$OUT/l2-list.out" "format 2, earlier than 5: agent-team.sh upgrade shop --dry-run"'
 run_tool l2-dry AGENT_TEAM_ROOT="$L2" -- upgrade shop --dry-run
 plan_of() { awk -v who="  $2 (" 'index($0, who) == 1 { f = 1; next } /^  [a-z]+ \(|^  [a-z.]+: / { f = 0 } f' "$1"; } # PLAN AGENT: that agent's lines
 plan_of "$OUT/l2-dry.out" assistant > "$OUT/l2-dry-a.txt"; plan_of "$OUT/l2-dry.out" supervisor > "$OUT/l2-dry-s.txt"
 check 'the plan names each agent'"'"'s job until now and from now on' eval 'rc_is 0 && has "$OUT/l2-dry-a.txt" "job: the discussion partner until now; from now on the workspace agent" && has "$OUT/l2-dry-s.txt" "job: the workspace supervisor until now; from now on the channel supervisor"'
 check 'and whom the workspace agent will answer, and its new folder' eval 'has "$OUT/l2-dry-a.txt" "it answers the owner and Shop Supervisor of workspace shop" && has "$OUT/l2-dry-a.txt" "folder: assistant/ becomes shop/"'
 check 'and the saved model each one keeps, for each to be chosen again' eval 'has "$OUT/l2-dry-a.txt" "keeps its saved model on claude: sonnet, reasoning effort low" && has "$OUT/l2-dry-s.txt" "keeps its saved model on codex: gpt-example-sol" && has "$OUT/l2-dry-a.txt" "to choose another: --agent-model ID"'
-check 'the runtime and the rules leave the workspace agent and come to the supervisor' eval 'grep -q "^    remove (each kept as <file>.bak-[0-9TZ]*): runtime/buzz-tools runtime/claude-agent-acp runtime/codex-acp runtime/restricted-claude subscriptions.toml$" "$OUT/l2-dry-a.txt" && grep -qx "    add: runtime/claude-agent-acp runtime/restricted-claude runtime/buzz-tools runtime/codex-acp subscriptions.toml" "$OUT/l2-dry-s.txt"'
-check 'the plan converts team.conf, records the version last, and changes nothing' eval 'has "$OUT/l2-dry.out" "team.conf: format 2 -> 4" && has "$OUT/l2-dry.out" "VERSION: 2.0.0 -> $(cat "$SKILL_DIR/VERSION")" && [ "$(tree_sha "$L2/shop")" = "$SHA_L2" ]'
+check 'the rules leave the workspace agent and come to the supervisor; the runtime is moved aside' eval 'grep -q "^    remove (each kept as <file>.bak-[0-9TZ]*): subscriptions.toml$" "$OUT/l2-dry-a.txt" && grep -q "^    runtime/: move aside (kept as runtime.bak-[0-9TZ]*); the stock adapter, claude-agent-acp, takes its place$" "$OUT/l2-dry-a.txt" && grep -qx "    add: subscriptions.toml" "$OUT/l2-dry-s.txt"'
+check 'the plan converts team.conf, records the version last, and changes nothing' eval 'has "$OUT/l2-dry.out" "team.conf: format 2 -> 5" && has "$OUT/l2-dry.out" "VERSION: 2.0.0 -> $(cat "$SKILL_DIR/VERSION")" && [ "$(tree_sha "$L2/shop")" = "$SHA_L2" ]'
 run_tool l2-dry-model AGENT_TEAM_ROOT="$L2" -- upgrade shop --dry-run --agent-model opus
 check 'a model option in the same run takes the place of the kept one' eval 'rc_is 0 && has "$OUT/l2-dry-model.out" "model (claude): sonnet -> opus" && hasnt "$OUT/l2-dry-model.out" "keeps its saved model on claude" && has "$OUT/l2-dry-model.out" "Run it: agent-team.sh upgrade shop --agent-model opus"'
 run_tool l2-up AGENT_TEAM_ROOT="$L2" -- upgrade shop
@@ -794,15 +808,108 @@ l2_kept() { # keys, proofs, names, backends, saved models and effort byte-identi
         [ "$(grep -E "$f" "$TD/l2-$a.conf")" = "$(grep -E "$f" "$L2/shop/$d/agent.conf")" ] || return 1
     done
 }
-check 'upgrade converts it to format 4, the workspace agent in its own folder' eval 'rc_is 0 && grep -qx format=4 "$L2/shop/team.conf" && grep -qx format=4 "$L2A/agent.conf" && grep -qx format=4 "$L2S/agent.conf" && [ ! -e "$L2/shop/assistant" ]'
+check 'upgrade converts it to format 5, the workspace agent in its own folder' eval 'rc_is 0 && grep -qx format=5 "$L2/shop/team.conf" && grep -qx format=5 "$L2A/agent.conf" && grep -qx format=5 "$L2S/agent.conf" && [ ! -e "$L2/shop/assistant" ]'
 check 'keys, proofs, display names, backends, saved models and effort are byte-identical' l2_kept
-check 'the runtime and the rules moved to the channel supervisor; the earlier ones are kept beside themselves' eval '[ -x "$L2S/runtime/codex-acp" ] && cmp -s "$L2S/runtime/codex-acp" "$SKILL_DIR/runtime/codex-acp" && [ -s "$L2S/subscriptions.toml" ] && [ -z "$(find "$L2A/runtime" -type f ! -name "*.bak-*")" ] && [ ! -e "$L2A/subscriptions.toml" ] && ls "$L2A"/runtime/codex-acp.bak-* "$L2A"/subscriptions.toml.bak-* >/dev/null'
+check 'the rules moved to the channel supervisor; the runtime is kept aside as runtime.bak, and no agent has one' eval '[ ! -e "$L2S/runtime" ] && [ -s "$L2S/subscriptions.toml" ] && [ ! -e "$L2A/runtime" ] && [ -x "$(ls -d "$L2A"/runtime.bak-* | head -n 1)/codex-acp" ] && [ ! -e "$L2A/subscriptions.toml" ] && ls "$L2A"/subscriptions.toml.bak-* >/dev/null'
 check 'the workspace agent: the stock adapter, bypass-permissions, answering the owner and exactly its channel supervisor' eval 'grep -qx BUZZ_ACP_AGENT_COMMAND=claude-agent-acp "$L2A/.env.buzz-acp.local" && grep -qx BUZZ_ACP_PERMISSION_MODE=bypass-permissions "$L2A/.env.buzz-acp.local" && grep -qx BUZZ_ACP_RESPOND_TO=allowlist "$L2A/.env.buzz-acp.local" && grep -qx "BUZZ_ACP_RESPOND_TO_ALLOWLIST=$CK" "$L2A/.env.buzz-acp.local" && hasnt "$L2A/.env.buzz-acp.local" BUZZ_ACP_SUBSCRIBE && grep -qx BUZZ_MODEL_CLAUDE=sonnet "$L2A/.env.buzz-acp.local"'
-check 'the channel supervisor: its own Codex runtime, anyone, its rules excluding the workspace agent' eval 'grep -qx "BUZZ_ACP_AGENT_COMMAND=$L2S/runtime/codex-acp" "$L2S/.env.buzz-acp.local" && grep -qx BUZZ_ACP_RESPOND_TO=anyone "$L2S/.env.buzz-acp.local" && grep -qx "BUZZ_ACP_CONFIG=$L2S/subscriptions.toml" "$L2S/.env.buzz-acp.local" && grep -qx BUZZ_ACP_PERMISSION_MODE=default "$L2S/.env.buzz-acp.local" && [ "$(grep -c "author != \"$WK\"" "$L2S/subscriptions.toml")" = 2 ] && grep -qx BUZZ_MODEL_CODEX=gpt-example-sol "$L2S/.env.buzz-acp.local"'
+check 'the channel supervisor: the stock Codex adapter, anyone, its rules excluding the workspace agent' eval 'grep -qx BUZZ_ACP_AGENT_COMMAND=codex-acp "$L2S/.env.buzz-acp.local" && grep -qx BUZZ_ACP_RESPOND_TO=anyone "$L2S/.env.buzz-acp.local" && grep -qx "BUZZ_ACP_CONFIG=$L2S/subscriptions.toml" "$L2S/.env.buzz-acp.local" && grep -qx BUZZ_ACP_PERMISSION_MODE=bypass-permissions "$L2S/.env.buzz-acp.local" && [ "$(grep -c "author != \"$WK\"" "$L2S/subscriptions.toml")" = 2 ] && grep -qx BUZZ_MODEL_CODEX=gpt-example-sol "$L2S/.env.buzz-acp.local"'
 check 'each prompt and profile description is its new job'"'"'s; the earlier prompts are kept' eval 'has "$L2A/prompt.md" "a supervisor in subagent mode" && has "$L2S/prompt.md" "You are the project’s channel supervisor" && ls "$L2A"/prompt.md.bak-* "$L2S"/prompt.md.bak-* >/dev/null && grep -q "^about=Workspace agent for shop" "$L2A/agent.conf" && grep -q "^about=Channel supervisor for shop" "$L2S/agent.conf"'
 SHA_L2=$(tree_sha "$L2/shop")
 run_tool l2-up2 AGENT_TEAM_ROOT="$L2" -- upgrade shop
 check 'a second upgrade says "up to date" and changes nothing' eval 'rc_is 0 && has "$OUT/l2-up2.out" "is up to date" && [ "$(tree_sha "$L2/shop")" = "$SHA_L2" ]'
+scenario 'A team made by 4.x (format 4) is refused until upgrade, which moves the restricted runtime aside'
+# A team as 4.0.0 to 4.3.0 wrote it: the jobs and the folders as now; the channel supervisor on its restricted
+# runtime, here on Codex, with a model only the runtime's own engine offered and a model list kept from that
+# runtime; its 4.x prompt; VERSION 4.3.0. Its project folder is one of its own.
+L4=$TD/legacy4 L4T=$TD/legacy4/shop L4A=$TD/legacy4/shop/shop L4S=$TD/legacy4/shop/supervisor L4W=$TD/ws/l4
+make_format4() {
+    local f
+    rm -rf -- "$L4" "$L4W"
+    mkdir -p "$L4T" "$L4/models" "$L4W"
+    cp -R "$ROOT/shop/." "$L4T/"
+    for f in team.conf shop/agent.conf supervisor/agent.conf; do
+        sed -e 's/^format=5$/format=4/' -e "s|^workspace=.*|workspace=$L4W|" "$L4T/$f" > "$L4T/$f.new" && mv "$L4T/$f.new" "$L4T/$f"
+    done
+    sed -e 's/^backend=.*/backend=codex/' -e 's/^model_codex=.*/model_codex=gpt-runtime-only/' "$L4S/agent.conf" > "$L4S/a.new" && mv "$L4S/a.new" "$L4S/agent.conf"
+    for f in shop supervisor; do
+        sed -e "s|$ROOT/shop/|$L4T/|g" -e "s|^RUN_BUZZ_ACP_WORKDIR=.*|RUN_BUZZ_ACP_WORKDIR=$L4W|" \
+            -e 's/^BUZZ_AUTH_TAG=.*/BUZZ_AUTH_TAG=["auth","'"$OWNER"'","created_at<9999999999","'"$(printf '%0128d' 4)"'"]/' "$L4T/$f/.env.buzz-acp.local" > "$L4T/$f/e.new" && mv "$L4T/$f/e.new" "$L4T/$f/.env.buzz-acp.local"
+        rm -f -- "$L4T/$f/agent.pid" "$L4T/$f/agent.log"
+    done
+    sed -e 's/^BUZZ_MODEL_CODEX=.*/BUZZ_MODEL_CODEX=gpt-runtime-only/' "$L4S/.env.buzz-acp.local" > "$L4S/e.new" && mv "$L4S/e.new" "$L4S/.env.buzz-acp.local"
+    give_runtime "$L4S"
+    printf '# Shop Supervisor\n\nYou are the project’s channel supervisor. Use the workspace reading tools and the Buzz tools available to you.\n' > "$L4S/prompt.md"
+    printf '4.3.0\n' > "$L4T/VERSION"
+    printf '# retrieved 2026-11-23T00:00:00Z from %s/runtime/codex-acp\ngpt-runtime-only\tFrom the engine of the runtime\n' "$L4S" > "$L4/models/codex-supervisor.list"
+    chmod 600 "$L4T/team.conf" "$L4T/VERSION" "$L4A/agent.conf" "$L4S/agent.conf" "$L4A/.env.buzz-acp.local" "$L4S/.env.buzz-acp.local" "$L4S/prompt.md"
+}
+make_format4
+rm -rf -- "$TD/l4-before"
+cp -Rp "$L4T" "$TD/l4-before"
+SHA_L4=$(tree_sha "$L4T")
+run_tool l4-create AGENT_TEAM_ROOT="$L4" -- create --workspace "$L4W" --name shop --channel "$CHANNEL" --community "$COMMUNITY" --owner "$OWNER"
+RC_CREATE=$RC
+run_tool l4-start AGENT_TEAM_ROOT="$L4" -- start shop --check
+check 'create and start refuse a format-4 team, name upgrade and what format 5 changes, and change nothing' eval '[ "$RC_CREATE" = 1 ] && rc_is 1 && has "$OUT/l4-create.out" "format 4, made by version 4.0.0 to 4.3.0" && has "$OUT/l4-create.out" "upgrade shop --dry-run" && has "$OUT/l4-create.out" "Since format 5 the channel supervisor and the reviewer run on the stock adapter with every tool, and what they may do is a rule in their prompts." && hasnt "$OUT/l4-create.out" "assistant/ becomes" && has "$OUT/l4-start.out" "format 4" && has "$OUT/l4-start.out" "Nothing was started" && [ "$(tree_sha "$L4T")" = "$SHA_L4" ]'
+RC=0; (cd "$L4W" && /bin/bash "$L4T/team.sh" check) > "$OUT/l4-teamsh.out" 2>&1 < /dev/null || RC=$?
+check 'the team command of this version refuses its format-4 agents' eval 'rc_is 1 && [ "$(grep -c "made by an earlier version of the skill (format 4)" "$OUT/l4-teamsh.out")" = 2 ]'
+run_tool l4-list AGENT_TEAM_ROOT="$L4" -- status
+check 'status lists a format-4 team and says what to do' has "$OUT/l4-list.out" "format 4, earlier than 5: agent-team.sh upgrade shop --dry-run"
+run_tool l4-dry AGENT_TEAM_ROOT="$L4" -- upgrade shop --dry-run
+plan_of "$OUT/l4-dry.out" supervisor > "$OUT/l4-dry-s.txt"; plan_of "$OUT/l4-dry.out" shop > "$OUT/l4-dry-a.txt"
+check 'the plan says in plain words that the channel supervisor gets every tool from now on and that its limits are prompt rules' eval 'rc_is 0 && grep -qx "    tools: from now on every tool of the stock adapter, in bypass-permissions, as the workspace agent has: it can edit files, run commands and use your connected services. What it may do is a rule in its prompt, which nothing enforces" "$OUT/l4-dry-s.txt" && hasnt "$OUT/l4-dry-a.txt" "tools:"'
+check 'that its runtime is moved aside and its files replaced, and that its saved model is not one the stock adapter offers' eval 'grep -q "^    runtime/: move aside (kept as runtime.bak-[0-9TZ]*); the stock adapter, codex-acp, takes its place$" "$OUT/l4-dry-s.txt" && grep -q "^    replace (each kept as <file>.bak-[0-9TZ]*): agent.conf .env.buzz-acp.local prompt.md$" "$OUT/l4-dry-s.txt" && has "$OUT/l4-dry-s.txt" "model (codex): gpt-runtime-only is not one the stock adapter offers for the channel supervisor; it is kept, and a start uses it as saved. To choose another: --supervisor-model ID"'
+check 'and for the team: format 4 -> 5, the buzz rule for the agent on Codex, VERSION; a dry run changes nothing' eval 'has "$OUT/l4-dry.out" "team.conf: format 4 -> 5" && has "$OUT/l4-dry.out" "  $L4W/.codex/rules/buzz.rules: add (the buzz rule of the agents on Codex)" && has "$OUT/l4-dry.out" "  $L4W/.claude/settings.json: add (the sandbox settings of the agents on Claude)" && has "$OUT/l4-dry.out" "  VERSION: 4.3.0 -> $(cat "$SKILL_DIR/VERSION")" && [ "$(tree_sha "$L4T")" = "$SHA_L4" ] && [ -z "$(ls -A "$L4W")" ]'
+run_tool l4-up AGENT_TEAM_ROOT="$L4" -- upgrade shop
+RTB=$(ls -d "$L4S"/runtime.bak-* 2>/dev/null | head -n 1)
+check 'upgrade moves the runtime aside, whole and byte for byte, as runtime.bak-<time>' eval 'rc_is 0 && [ ! -e "$L4S/runtime" ] && [ -n "$RTB" ] && diff -r "$TD/l4-before/supervisor/runtime" "$RTB" > /dev/null && [ "$(mode_of "$RTB")" = 700 ]'
+check 'its env file: the stock adapter in bypass-permissions; whom it answers, its rules and its model as they were' eval 'grep -qx BUZZ_ACP_AGENT_COMMAND=codex-acp "$L4S/.env.buzz-acp.local" && grep -qx BUZZ_ACP_PERMISSION_MODE=bypass-permissions "$L4S/.env.buzz-acp.local" && grep -qx BUZZ_ACP_RESPOND_TO=anyone "$L4S/.env.buzz-acp.local" && grep -qx BUZZ_ACP_SUBSCRIBE=config "$L4S/.env.buzz-acp.local" && grep -qx "BUZZ_ACP_CONFIG=$L4S/subscriptions.toml" "$L4S/.env.buzz-acp.local" && grep -qx BUZZ_MODEL_CODEX=gpt-runtime-only "$L4S/.env.buzz-acp.local" && ls "$L4S"/.env.buzz-acp.local.bak-* > /dev/null'
+check 'its prompt is this version'"'"'s, and the 4.x prompt is kept beside it' eval 'has "$L4S/prompt.md" "## Who you act for" && cmp -s "$TD/l4-before/supervisor/prompt.md" "$(ls "$L4S"/prompt.md.bak-* | head -n 1)"'
+check 'keys, proofs and saved models are byte-identical; the records and team.conf say format 5' eval 'cmp -s "$TD/l4-before/shop/identity.key" "$L4A/identity.key" && cmp -s "$TD/l4-before/supervisor/identity.key" "$L4S/identity.key" && [ "$(grep "^BUZZ_AUTH_TAG=" "$L4S/.env.buzz-acp.local")" = "$(grep "^BUZZ_AUTH_TAG=" "$TD/l4-before/supervisor/.env.buzz-acp.local")" ] && grep -qx model_codex=gpt-runtime-only "$L4S/agent.conf" && grep -qx format=5 "$L4T/team.conf" && grep -qx format=5 "$L4A/agent.conf" && grep -qx format=5 "$L4S/agent.conf"'
+check 'the buzz rule and the sandbox settings are in the project folder, and VERSION is written last' eval '[ -s "$L4W/.codex/rules/buzz.rules" ] && [ -s "$L4W/.claude/settings.json" ] && cmp -s "$SKILL_DIR/VERSION" "$L4T/VERSION" && [ "$(grep -n -e "^  team.conf: upgraded$" -e "^  supervisor: upgraded$" -e "^  shop: upgraded$" -e "^  VERSION: " "$OUT/l4-up.out" | tail -n 1 | cut -d: -f2-)" = "  VERSION: $(cat "$SKILL_DIR/VERSION")" ]'
+l4_state() { # the upgraded team, without the times it records
+    local d
+    for d in shop supervisor; do grep -v '^upgraded=' "$L4T/$d/agent.conf"; cat "$L4T/$d/.env.buzz-acp.local" "$L4T/$d/prompt.md"; done
+    cat "$L4T/team.conf" "$L4T/VERSION"
+    if [ -e "$L4S/runtime" ]; then echo 'runtime/ left'; fi
+    if diff -r "$TD/l4-before/supervisor/runtime" "$(ls -d "$L4S"/runtime.bak-* | head -n 1)" > /dev/null; then echo 'runtime aside'; fi
+    ls -a "$L4T" | grep -e '^\.agent\.' -e '^\.supervisor\.' || true
+}
+L4_DONE=$(l4_state)
+SHA_L4=$(tree_sha "$L4T")
+run_tool l4-up2 AGENT_TEAM_ROOT="$L4" -- upgrade shop
+check 'a second upgrade says "up to date" and changes nothing' eval 'rc_is 0 && has "$OUT/l4-up2.out" "is up to date" && [ "$(tree_sha "$L4T")" = "$SHA_L4" ]'
+run_tool l4-start2 AGENT_TEAM_ROOT="$L4" -- start shop --check
+check 'and it starts: both launcher checks pass' eval 'rc_is 0 && has "$OUT/l4-start2.out" "Launcher checks passed."'
+# Cut short before its last write, and between the two renames of a folder: the next run finishes it.
+make_format4
+run_tool l4-cut AGENT_TEAM_ROOT="$L4" AGENT_TEAM_UPGRADE_FAULT=before-version -- upgrade shop
+check 'an upgrade killed before its last write leaves VERSION 4.3.0, with the agents already upgraded' eval '[ "$RC" != 0 ] && [ "$(cat "$L4T/VERSION")" = 4.3.0 ] && grep -qx format=5 "$L4T/team.conf" && grep -qx BUZZ_ACP_AGENT_COMMAND=codex-acp "$L4S/.env.buzz-acp.local"'
+run_tool l4-cut-up AGENT_TEAM_ROOT="$L4" -- upgrade shop
+check 'the next upgrade writes VERSION, and the team is the same as after an upgrade that was not cut' eval 'rc_is 0 && has "$OUT/l4-cut-up.out" "  VERSION: $(cat "$SKILL_DIR/VERSION")" && [ "$(l4_state)" = "$L4_DONE" ]'
+make_format4
+run_tool l4-swap AGENT_TEAM_ROOT="$L4" AGENT_TEAM_UPGRADE_FAULT=between-renames -- upgrade shop
+check 'an upgrade cut between the two renames of a folder leaves the two copies beside it' eval '[ "$RC" != 0 ] && ls -d "$L4T"/.agent.prev.* "$L4T"/.agent.upgrade.* > /dev/null'
+run_tool l4-swap-start AGENT_TEAM_ROOT="$L4" -- start shop --check
+run_tool l4-swap-up AGENT_TEAM_ROOT="$L4" -- upgrade shop
+check 'nothing starts meanwhile, and the next upgrade finishes it, as if it had not been cut' eval 'has "$OUT/l4-swap-start.out" "was interrupted" && rc_is 0 && has "$OUT/l4-swap-up.out" "shop: finished an interrupted upgrade" && [ "$(l4_state)" = "$L4_DONE" ]'
+# A reviewer, a team of its own, upgrades the same way.
+L4R=$TD/legacy4r L4RV=$TD/legacy4r/shop-reviewer/reviewer
+rm -rf -- "$L4R"
+mkdir -p "$L4R/shop-reviewer"
+cp -R "$TD/root-rv-prompt/shop-reviewer/." "$L4R/shop-reviewer/"
+for f in team.conf reviewer/agent.conf; do sed -e 's/^format=5$/format=4/' "$L4R/shop-reviewer/$f" > "$L4R/f.new" && mv "$L4R/f.new" "$L4R/shop-reviewer/$f"; done
+sed -e "s|$TD/root-rv-prompt/|$L4R/|g" "$L4RV/.env.buzz-acp.local" > "$L4R/e.new" && mv "$L4R/e.new" "$L4RV/.env.buzz-acp.local"
+give_runtime "$L4RV"
+printf '# Shop Reviewer\n\nYou read and you comment. You cannot edit files, run commands, or reach the web.\n' > "$L4RV/prompt.md"
+printf '4.3.0\n' > "$L4R/shop-reviewer/VERSION"
+chmod 600 "$L4R/shop-reviewer/team.conf" "$L4R/shop-reviewer/VERSION" "$L4RV/agent.conf" "$L4RV/prompt.md"
+run_tool l4r-dry AGENT_TEAM_ROOT="$L4R" -- upgrade shop-reviewer --dry-run
+check 'a reviewer'"'"'s own team: the same plan, every tool from now on and its limits a prompt rule' eval 'rc_is 0 && has "$OUT/l4r-dry.out" "    tools: from now on every tool of the stock adapter, in bypass-permissions" && has "$OUT/l4r-dry.out" "What it may do is a rule in its prompt, which nothing enforces" && grep -q "^    runtime/: move aside (kept as runtime.bak-" "$OUT/l4r-dry.out" && has "$OUT/l4r-dry.out" "team.conf: format 4 -> 5"'
+run_tool l4r-up AGENT_TEAM_ROOT="$L4R" -- upgrade shop-reviewer
+check 'and the same upgrade: the runtime aside, the stock adapter in bypass-permissions, its prompt, format 5' eval 'rc_is 0 && [ ! -e "$L4RV/runtime" ] && ls -d "$L4RV"/runtime.bak-* > /dev/null && grep -qx BUZZ_ACP_AGENT_COMMAND=claude-agent-acp "$L4RV/.env.buzz-acp.local" && grep -qx BUZZ_ACP_PERMISSION_MODE=bypass-permissions "$L4RV/.env.buzz-acp.local" && grep -qx BUZZ_ACP_RESPOND_TO=anyone "$L4RV/.env.buzz-acp.local" && has "$L4RV/prompt.md" "You never change the work you review" && grep -qx format=5 "$L4RV/agent.conf" && grep -qx format=5 "$L4R/shop-reviewer/team.conf"'
+run_tool l4r-up2 AGENT_TEAM_ROOT="$L4R" -- upgrade shop-reviewer
+check 'a second run says "up to date"' eval 'rc_is 0 && has "$OUT/l4r-up2.out" "is up to date"'
 scenario 'A missing prompt is recreated; the key is never regenerated (C2)'
 SHA_KEY=$(sha "$ROOT/shop/supervisor/identity.key") SHA_P=$(sha "$ROOT/shop/supervisor/prompt.md")
 rm -f "$ROOT/shop/supervisor/prompt.md"
@@ -1280,8 +1387,8 @@ check 'create refuses --base-url (subscription only)' eval 'rc_is 1 && has "$OUT
 mkdir -p "$TD/ws/backend-choice"
 run_tool backend-create AGENT_TEAM_ROOT="$RS" -- create --workspace "$TD/ws/backend-choice" --channel "$CHANNEL2" --backend codex
 codex_pair=$RS/backend-choice
-check 'Codex creation selects the stock adapter for the workspace agent and the restricted runtime for the channel supervisor' eval 'rc_is 0 && grep -qx BUZZ_ACP_AGENT_COMMAND=codex-acp "$codex_pair/backend-choice/.env.buzz-acp.local" && grep -qx "BUZZ_ACP_AGENT_COMMAND=$codex_pair/supervisor/runtime/codex-acp" "$codex_pair/supervisor/.env.buzz-acp.local"'
-check 'a workspace agent on Codex gets no settings file in the project folder' eval '[ ! -e "$TD/ws/backend-choice/.claude" ] && [ ! -e "$TD/ws/backend-choice/.codex" ]'
+check 'Codex creation selects the stock Codex adapter for both agents' eval 'rc_is 0 && grep -qx BUZZ_ACP_AGENT_COMMAND=codex-acp "$codex_pair/backend-choice/.env.buzz-acp.local" && grep -qx BUZZ_ACP_AGENT_COMMAND=codex-acp "$codex_pair/supervisor/.env.buzz-acp.local"'
+check 'agents on Codex get the buzz rule in the project folder, and no Claude settings' eval '[ ! -e "$TD/ws/backend-choice/.claude" ] && [ "$(cat "$TD/ws/backend-choice/.codex/rules/buzz.rules")" = "prefix_rule(pattern = [\"buzz\"], decision = \"allow\")" ] && has "$OUT/backend-create.out" "Project folder settings: added: $TD/ws/backend-choice/.codex/rules/buzz.rules"'
 check 'Codex ignores the saved Claude model; both agents record codex' eval 'grep -qx BUZZ_MODEL_CODEX= "$codex_pair/backend-choice/.env.buzz-acp.local" && grep -qx BUZZ_MODEL_CLAUDE= "$codex_pair/backend-choice/.env.buzz-acp.local" && ! grep -q ANTHROPIC_ "$codex_pair/backend-choice/.env.buzz-acp.local" && grep -qx backend=codex "$codex_pair/supervisor/agent.conf"'
 codex_key_sha=$(sha "$codex_pair/backend-choice/identity.key")
 rm -- "$codex_pair/backend-choice/.env.buzz-acp.local"
@@ -1338,7 +1445,6 @@ scenario 'Preflight: one fix line per missing item, non-zero exit, prints the la
 MB=$TD/minbin
 mkdir -p "$MB"
 ln -s "$BIN/buzz" "$MB/buzz"; ln -s "$BIN/buzz-acp" "$MB/buzz-acp"; ln -s "$BIN/claude-agent-acp" "$MB/claude-agent-acp"
-ln -s "$BIN/node" "$MB/node"   # the restricted runtime check runs buzz-tools with node
 MINPATH=$MB:/usr/bin:/bin:/usr/sbin:/sbin
 RP=$TD/root-preflight
 pre() { # NAME [VAR=value ...]: preflight with a controlled PATH and no tool variables
@@ -1576,13 +1682,13 @@ scenario 'A backend per role, saved per agent; one-run override; a switch for a 
 RB=$TD/root-backend
 mkdir -p "$TD/ws/mixed"
 run_tool mix-create AGENT_TEAM_ROOT="$RB" -- create --workspace "$TD/ws/mixed" --channel "$CHANNEL" --community "$COMMUNITY" --owner "$OWNER" --supervisor-backend codex --agent-model claude-opus-5-5
-# MW: the workspace agent (folder mixed), on the stock Claude adapter; MC: the channel supervisor, on its Codex runtime.
+# MW: the workspace agent (folder mixed), on the stock Claude adapter; MC: the channel supervisor, on the stock Codex adapter.
 MW=$RB/mixed/mixed MC=$RB/mixed/supervisor
-check 'per-role backends: agent.conf and the env file agree' eval 'rc_is 0 && grep -qx backend=codex "$MC/agent.conf" && grep -qx "BUZZ_ACP_AGENT_COMMAND=$MC/runtime/codex-acp" "$MC/.env.buzz-acp.local" && grep -qx backend=claude "$MW/agent.conf" && grep -qx BUZZ_ACP_AGENT_COMMAND=claude-agent-acp "$MW/.env.buzz-acp.local"'
-check 'the sandbox settings are written for the workspace agent on Claude' test -s "$TD/ws/mixed/.claude/settings.json"
+check 'per-role backends: agent.conf and the env file agree' eval 'rc_is 0 && grep -qx backend=codex "$MC/agent.conf" && grep -qx BUZZ_ACP_AGENT_COMMAND=codex-acp "$MC/.env.buzz-acp.local" && grep -qx backend=claude "$MW/agent.conf" && grep -qx BUZZ_ACP_AGENT_COMMAND=claude-agent-acp "$MW/.env.buzz-acp.local"'
+check 'the sandbox settings are written for the agent on Claude, the buzz rule for the agent on Codex' eval '[ -s "$TD/ws/mixed/.claude/settings.json" ] && [ -s "$TD/ws/mixed/.codex/rules/buzz.rules" ]'
 mkdir -p "$TD/ws/mixed-codex"
 run_tool mix-codex AGENT_TEAM_ROOT="$TD/root-mixed-codex" -- create --workspace "$TD/ws/mixed-codex" --channel "$CHANNEL" --community "$COMMUNITY" --owner "$OWNER" --agent-backend codex
-check 'and not when the workspace agent is on Codex, though the channel supervisor is on Claude' eval 'rc_is 0 && grep -qx backend=claude "$TD/root-mixed-codex/mixed-codex/supervisor/agent.conf" && [ ! -e "$TD/ws/mixed-codex/.claude" ]'
+check 'they follow the backends, not the jobs: the workspace agent on Codex, the channel supervisor on Claude' eval 'rc_is 0 && grep -qx backend=claude "$TD/root-mixed-codex/mixed-codex/supervisor/agent.conf" && [ -s "$TD/ws/mixed-codex/.claude/settings.json" ] && [ -s "$TD/ws/mixed-codex/.codex/rules/buzz.rules" ]'
 check 'per-role model saved for its backend only' eval 'grep -qx model_claude=claude-opus-5-5 "$MW/agent.conf" && grep -qx model_codex= "$MW/agent.conf" && grep -qx BUZZ_MODEL_CLAUDE=claude-opus-5-5 "$MW/.env.buzz-acp.local"'
 for a in mixed supervisor; do f=$RB/mixed/$a/.env.buzz-acp.local; sed "s/^BUZZ_AUTH_TAG=.*/BUZZ_AUTH_TAG=[\"auth\",\"$OWNER\",\"created_at<9999999999\",\"$(printf '%0128d' 1)\"]/" "$f" > "$f.t" && mv "$f.t" "$f"; done
 run_tool mix-status AGENT_TEAM_ROOT="$RB" -- status mixed
@@ -1655,12 +1761,12 @@ if [ -n "$REAL_LAUNCHER" ]; then
     LC_ARGS='--backend codex' lc "$MW"
     check 'switching the workspace agent to codex sends no Claude model (its codex model: runtime default)' eval 'rc_is 0 && has "$OUT/lc.out" "Model:        runtime default" && has "$OUT/lc.out" "Sign-in:      Codex with your ChatGPT sign-in" && has "$OUT/lc.out" "Runtime:      $BIN/codex-acp"'
     LC_ARGS='--backend claude' lc "$MC"
-    check 'the channel supervisor switches inside its own runtime folder (SEL2)' eval 'rc_is 0 && has "$OUT/lc.out" "Runtime:      $MC/runtime/claude-agent-acp"'
-    (env BUZZ_PRIVATE_KEY=example-not-a-key BUZZ_AUTH_TAG=example-tag RUN_BUZZ_ACP_KEY_FILE=/nonexistent "$MC/runtime/claude-agent-acp" --cli env-check) > "$OUT/rt-env.out" 2>&1; RC=$?
-    check 'the restricted runtime passes no agent secret to the model runtime' eval 'rc_is 0 && has "$OUT/rt-env.out" "env-check done" && hasnt "$OUT/rt-env.out" leaked'
+    check 'the channel supervisor switches to the stock Claude adapter (SEL2)' eval 'rc_is 0 && has "$OUT/lc.out" "Runtime:      $BIN/claude-agent-acp"'
+    LC_ARGS='' lc "$MC"
+    check 'on its saved backend, the stock Codex adapter, in bypass-permissions' eval 'rc_is 0 && has "$OUT/lc.out" "Runtime:      $BIN/codex-acp" && has "$OUT/lc.out" "Permissions:  BUZZ_ACP_PERMISSION_MODE=bypass-permissions" && has "$OUT/lc.out" "Access:       BUZZ_ACP_RESPOND_TO=anyone"'
     mkdir -p "$TD/oldacp"; printf '#!/bin/bash\necho "@agentclientprotocol/codex-acp 1.12.0"\n' > "$TD/oldacp/codex-acp"; chmod 755 "$TD/oldacp/codex-acp"
-    (PATH="$TD/oldacp:$PATH" "$MC/runtime/codex-acp" --check-runtime) > "$OUT/rt-oldacp.out" 2>&1; RC=$?
-    check 'the restricted Codex runtime refuses an untested codex-acp version' eval '[ "$RC" != 0 ] && has "$OUT/rt-oldacp.out" "requires @agentclientprotocol/codex-acp@1.13.1"'
+    LC_ARGS='' lc "$MC" PATH="$TD/oldacp:$PATH"
+    check 'the launcher refuses an untested codex-acp version for the channel supervisor too' eval '[ "$RC" != 0 ] && has "$OUT/lc.out" "needs @agentclientprotocol/codex-acp@1.13.1"'
     LC_ARGS='' lc "$MW" ANTHROPIC_API_KEY=example-not-a-key CLAUDE_CODE_OAUTH_TOKEN=example-not-a-token
     check 'exported credentials are removed for the agent (names only)' eval 'rc_is 0 && has "$OUT/lc.out" "Removed:      ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN" && hasnt "$OUT/lc.out" example-not-a'
     LC_ARGS='--backend codex' lc "$MW" CODEX_CONFIG='{"openai_base_url": "https://gateway.example.org"}' OPENAI_API_KEY=example-not-a-key
@@ -1694,7 +1800,7 @@ fi
 
 scenario 'Preflight per role: subscription sign-in and settings overrides (F2, F3)'
 run_tool pf-mixed AGENT_TEAM_ROOT="$RB" -- preflight mixed
-check 'preflight of a team checks each role on its saved backend and own runtime' eval 'rc_is 0 && has "$OUT/pf-mixed.out" "The workspace agent: claude" && has "$OUT/pf-mixed.out" "The channel supervisor: codex" && has "$OUT/pf-mixed.out" "$MC/runtime/codex-acp" && has "$OUT/pf-mixed.out" "your Claude subscription (max)"'
+check 'preflight of a team checks each role on its saved backend and its stock adapter' eval 'rc_is 0 && has "$OUT/pf-mixed.out" "The workspace agent: claude" && has "$OUT/pf-mixed.out" "The channel supervisor: codex" && has "$OUT/pf-mixed.out" "1.13.1 (Buzz-compatible)" && has "$OUT/pf-mixed.out" "your Claude subscription (max)" && hasnt "$OUT/pf-mixed.out" runtime/'
 echo oauth_token > "$HOME/.claude/fake-auth"; run_tool pf-token AGENT_TEAM_ROOT="$RB" -- preflight --backend claude; echo claude.ai > "$HOME/.claude/fake-auth"
 check 'preflight fails a token sign-in with a fix line' eval 'rc_is 1 && has "$OUT/pf-token.out" "uses oauth_token, not your Claude subscription" && has "$OUT/pf-token.out" "fix: remove that credential"'
 run_tool pf-exported ANTHROPIC_API_KEY=example-not-a-key AGENT_TEAM_ROOT="$RB" -- preflight --backend claude
@@ -1736,22 +1842,24 @@ check 'create refuses a Claude model the retrieved list does not offer' eval 'rc
 run_tool mod-codex AGENT_TEAM_ROOT="$RB" -- create --workspace "$TD/ws/models-ws" --channel "$CHANNEL2" --community "$COMMUNITY" --owner "$OWNER" --backend codex --agent-model gpt-example-hidden
 check 'with no retrieved Codex list, the bundled catalog decides: a hidden model is refused' eval 'rc_is 1 && has "$OUT/mod-codex.out" "not a codex model"'
 run_tool mod-codex-sup AGENT_TEAM_ROOT="$RB" -- create --workspace "$TD/ws/models-ws" --channel "$CHANNEL2" --community "$COMMUNITY" --owner "$OWNER" --backend codex --agent-model gpt-example-sol
-check 'the workspace agent is checked against the CLI its stock adapter bundles, not the restricted runtime'"'"'s' eval 'rc_is 1 && has "$OUT/mod-codex-sup.out" "not a codex model offered for the workspace agent" && [ ! -e "$RB/models-ws" ]'
+check 'a Codex model is checked against the CLI the stock adapter bundles, not a codex on PATH' eval 'rc_is 1 && has "$OUT/mod-codex-sup.out" "not a codex model offered for the workspace agent" && [ ! -e "$RB/models-ws" ]'
 run_tool mod-wk-rule AGENT_TEAM_ROOT="$RB" -- create --workspace "$TD/ws/models-ws" --channel "$CHANNEL2" --community "$COMMUNITY" --owner "$OWNER" --agent-model opus --agent-effort high --worker-effort low
 check 'create refuses a level for the workspace agent'"'"'s workers on Claude beside one of its own, saying why and what to do, and makes nothing' eval 'rc_is 1 && has "$OUT/mod-wk-rule.out" "cannot be saved while the agent has one of its own there (high): the level a Claude session runs at, CLAUDE_CODE_EFFORT_LEVEL, also applies to its workers" && has "$OUT/mod-wk-rule.out" "--worker-effort default" && [ ! -e "$RB/models-ws" ]'
 run_tool mod-wk-bad AGENT_TEAM_ROOT="$RB" -- create --workspace "$TD/ws/models-ws" --channel "$CHANNEL2" --community "$COMMUNITY" --owner "$OWNER" --worker-model claude-haiku-5-5
 check 'create refuses a full Claude model name for the workers, naming the four the subagent tool takes, and makes nothing' eval 'rc_is 1 && has "$OUT/mod-wk-bad.out" "claude-haiku-5-5 is not a model the subagent tool of Claude takes for a worker: choose opus, sonnet, haiku or fable" && [ ! -e "$RB/models-ws" ]'
 run_tool mod-wk-rv AGENT_TEAM_ROOT="$RB" -- create --workspace "$TD/ws/models-ws" --channel "$CHANNEL2" --community "$COMMUNITY" --owner "$OWNER" --name models-rv --roles reviewer --worker-model opus
 check 'and the options in a create that makes no workspace agent' eval 'rc_is 1 && has "$OUT/mod-wk-rv.out" "this create makes no workspace agent (--roles reviewer)" && [ ! -e "$RB/models-rv" ]'
-run_tool mod-ok AGENT_TEAM_ROOT="$RB" -- create --workspace "$TD/ws/models-ws" --channel "$CHANNEL2" --community "$COMMUNITY" --owner "$OWNER" --supervisor-backend codex --supervisor-model gpt-example-sol --agent-model opus --worker-model sonnet --worker-effort low
-check 'listed models are accepted and saved per backend; the channel supervisor'"'"'s against its restricted runtime'"'"'s CLI' eval 'rc_is 0 && grep -qx model_codex=gpt-example-sol "$RB/models-ws/supervisor/agent.conf" && grep -qx model_claude=opus "$RB/models-ws/models-ws/agent.conf"'
+run_tool mod-sup-sol AGENT_TEAM_ROOT="$RB" -- create --workspace "$TD/ws/models-ws" --channel "$CHANNEL2" --community "$COMMUNITY" --owner "$OWNER" --supervisor-backend codex --supervisor-model gpt-example-sol
+check 'the channel supervisor'"'"'s Codex model too: the stock adapter'"'"'s catalog, not a codex on PATH' eval 'rc_is 1 && has "$OUT/mod-sup-sol.out" "not a codex model offered for the channel supervisor" && has "$OUT/mod-sup-sol.out" gpt-example-old && [ ! -e "$RB/models-ws" ]'
+run_tool mod-ok AGENT_TEAM_ROOT="$RB" -- create --workspace "$TD/ws/models-ws" --channel "$CHANNEL2" --community "$COMMUNITY" --owner "$OWNER" --supervisor-backend codex --supervisor-model gpt-example-old --agent-model opus --worker-model sonnet --worker-effort low
+check 'listed models are accepted and saved per backend' eval 'rc_is 0 && grep -qx model_codex=gpt-example-old "$RB/models-ws/supervisor/agent.conf" && grep -qx model_claude=opus "$RB/models-ws/models-ws/agent.conf"'
 check 'create saves the model and the level of the workspace agent'"'"'s workers for its backend, and nothing for the channel supervisor' eval '[ "$(grep -c -x -e worker_model_claude=sonnet -e worker_effort_claude=low "$RB/models-ws/models-ws/agent.conf")" = 2 ] && [ "$(grep -c "^worker_" "$RB/models-ws/supervisor/agent.conf")" = 0 ] && [ "$(grep -c "^worker_.*_codex=" "$RB/models-ws/models-ws/agent.conf")" = 0 ]'
 run_tool mod-wk-status AGENT_TEAM_ROOT="$RB" -- status models-ws
 check 'status shows them, for the workspace agent only' eval 'grep -qx "    its workers on claude: model sonnet, reasoning effort low" "$OUT/mod-wk-status.out" && [ "$(grep -c "its workers" "$OUT/mod-wk-status.out")" = 1 ]'
 run_tool mod-wk-again AGENT_TEAM_ROOT="$RB" -- create --workspace "$TD/ws/models-ws" --channel "$CHANNEL2" --community "$COMMUNITY" --owner "$OWNER" --worker-model opus
 check 'a repeated create keeps the agent and says the options were not saved, naming upgrade' eval 'rc_is 0 && has "$OUT/mod-wk-again.out" "create keeps it, so --worker-model and --worker-effort were not saved" && grep -qx worker_model_claude=sonnet "$RB/models-ws/models-ws/agent.conf"'
 run_tool mod-upg AGENT_TEAM_ROOT="$RB" -- upgrade models-ws --agent-model sonnet
-check 'upgrade sets a listed model and keeps the other backend'"'"'s slot' eval 'rc_is 0 && grep -qx model_claude=sonnet "$RB/models-ws/models-ws/agent.conf" && grep -qx model_codex=gpt-example-sol "$RB/models-ws/supervisor/agent.conf"'
+check 'upgrade sets a listed model and keeps the other backend'"'"'s slot' eval 'rc_is 0 && grep -qx model_claude=sonnet "$RB/models-ws/models-ws/agent.conf" && grep -qx model_codex=gpt-example-old "$RB/models-ws/supervisor/agent.conf"'
 check 'and carries the settings of its workers' eval '[ "$(grep -c -x -e worker_model_claude=sonnet -e worker_effort_claude=low "$RB/models-ws/models-ws/agent.conf")" = 2 ]'
 run_tool mod-wk-upg AGENT_TEAM_ROOT="$RB" -- upgrade models-ws --worker-model default --worker-effort high
 check 'upgrade: default clears the workers'"'"' model, and a new level is saved' eval 'rc_is 0 && [ "$(grep "^worker_" "$RB/models-ws/models-ws/agent.conf" | tr "\n" " ")" = "worker_effort_claude=high " ]'
@@ -1768,7 +1876,7 @@ check 'upgrade names the workers'"'"' change in its plan' eval 'rc_is 0 && has "
 run_tool mod-upg-bad AGENT_TEAM_ROOT="$RB" -- upgrade models-ws --agent-model claude-haiku-5-5
 check 'upgrade refuses an unlisted model and changes nothing' eval 'rc_is 1 && grep -qx model_claude=sonnet "$RB/models-ws/models-ws/agent.conf"'
 # A team record still at format 1 (an upgrade stopped before its last step) is refused even when its agents are current.
-cp -p "$RB/models-ws/team.conf" "$TD/team.conf.keep"; sed 's/^format=4$/format=1/' "$TD/team.conf.keep" > "$RB/models-ws/team.conf"
+cp -p "$RB/models-ws/team.conf" "$TD/team.conf.keep"; sed 's/^format=5$/format=1/' "$TD/team.conf.keep" > "$RB/models-ws/team.conf"
 run_tool mod-team1 AGENT_TEAM_ROOT="$RB" -- create --workspace "$TD/ws/models-ws" --channel "$CHANNEL2" --community "$COMMUNITY" --owner "$OWNER"
 check 'create refuses a format-1 team record even with current agents' eval 'rc_is 1 && has "$OUT/mod-team1.out" "upgrade models-ws"'
 cp -p "$TD/team.conf.keep" "$RB/models-ws/team.conf"
@@ -1784,9 +1892,9 @@ check 'the new workspace agent answers its own channel supervisor only, not the 
 check 'create says the earlier channel supervisor must be refreshed with upgrade' has "$OUT/second.out" 'the channel supervisor of workspace "mixed" in this channel takes turns for these new agents until: agent-team.sh upgrade mixed'
 run_tool second-upg AGENT_TEAM_ROOT="$RB" -- upgrade mixed
 check 'after upgrade the earlier channel supervisor ignores the new team'"'"'s agents' eval 'rc_is 0 && has "$MC/subscriptions.toml" "author != \"$(grep ^pubkey= "$RB/second/supervisor/agent.conf" | cut -d= -f2)\"" && has "$MC/subscriptions.toml" "author != \"$(grep ^pubkey= "$RB/second/second/agent.conf" | cut -d= -f2)\""'
-check 'and its prompt names the new workspace agent beside its own' has "$MC/prompt.md" 'The workspace agent (Mixed, Second) works in the project folder'
+check 'and its prompt names the new workspace agent beside its own' has "$MC/prompt.md" 'The workspace agent (Mixed, Second) works in the same project folder'
 
-scenario 'The workspace agent'"'"'s browser: create and upgrade with --browser or --no-browser, the dry run, and the helper as a team file'
+scenario 'The browser of the project folder: create and upgrade with --browser or --no-browser, the dry run, and the helper as a team file'
 RBR=$TD/root-browser BWS=$TD/ws/brz BH=$SKILL_DIR/scripts/workspace-browser.py
 mkdir -p "$BWS"
 br_on() { python3 -I "$BH" check "$1" "$2" > /dev/null 2>&1; } # BACKEND DIR: the file of that backend names it
@@ -1796,46 +1904,47 @@ RS=$(sed -n "s/^RESERVED_NAMES='\(.*\)'\$/\1/p" "$SCRIPT")
 RS_T=$(sed -n "s/^RESERVED_NAMES='\(.*\)'\$/\1/p" "$SKILL_DIR/templates/team.sh")
 all_reserved() { local f; for f in $TF; do case " $RS " in *" $f "*) ;; *) return 1 ;; esac; done; }
 check 'TEAM_FILES names the browser helper, and every team file is a reserved name, the same in agent-team.sh and team.sh' eval 'case " $TF " in *" workspace-browser.py "*) true ;; *) false ;; esac && [ -n "$RS" ] && [ "$RS" = "$RS_T" ] && all_reserved'
-check 'the README lists it among the names a team folder uses, and among the files it holds' eval 'grep -q "\`workspace-settings.py\`, \`workspace-browser.py\`, \`VERSION\`, \`brief.md\`" "$HERE/README.md" && grep -q "\`workspace-browser.py\` (names or takes out the workspace agent" "$HERE/README.md"'
+check 'the README lists it among the names a team folder uses, and among the files it holds' eval 'grep -q "\`workspace-settings.py\`, \`workspace-browser.py\`, \`VERSION\`, \`brief.md\`" "$HERE/README.md" && grep -q "\`workspace-browser.py\` (names or takes out the browser in the project folder" "$HERE/README.md"'
 run_tool br-name AGENT_TEAM_ROOT="$TD/root-browser-name" -- create --workspace "$BWS" --name Workspace-Browser.py --channel "$CHANNEL" --community "$COMMUNITY" --owner "$OWNER"
 check 'a team named like the helper (ignoring case) gets the folder agent' eval 'rc_is 0 && [ -d "$TD/root-browser-name/Workspace-Browser.py/agent" ] && grep -qx agent_folder=agent "$TD/root-browser-name/Workspace-Browser.py/team.conf"'
 check 'and create without --browser left the project folder without a browser' eval '[ ! -e "$BWS/.mcp.json" ] && [ ! -e "$BWS/.codex" ] && hasnt "$OUT/br-name.out" "Browser:"'
 run_tool br-create AGENT_TEAM_ROOT="$RBR" -- create --workspace "$BWS" --channel "$CHANNEL2" --community "$COMMUNITY" --owner "$OWNER" --browser
-check 'create --browser names the server in the project folder'"'"'s .mcp.json for the workspace agent on Claude, after the sandbox settings' eval 'rc_is 0 && br_on claude "$BWS" && [ "$(grep -n -e "^Project folder settings: " -e "^Browser: added: $BWS/.mcp.json\$" "$OUT/br-create.out" | cut -d: -f2 | tr "\n" " ")" = "Project folder settings Browser " ]'
+check 'create --browser names the server in the project folder'"'"'s .mcp.json for the agents on Claude, after the sandbox settings' eval 'rc_is 0 && br_on claude "$BWS" && [ "$(grep -n -e "^Project folder settings: " -e "^Browser: added: $BWS/.mcp.json\$" "$OUT/br-create.out" | cut -d: -f2 | tr "\n" " ")" = "Project folder settings Browser " ]'
 check 'create copies the helper into the team folder, the skill'"'"'s byte for byte, mode 700' eval 'cmp -s "$BH" "$RBR/brz/workspace-browser.py" && [ "$(mode_of "$RBR/brz/workspace-browser.py")" = 700 ]'
 cp -p "$BWS/.mcp.json" "$TD/brz.mcp"
 run_tool br-create2 AGENT_TEAM_ROOT="$RBR" -- create --workspace "$BWS" --channel "$CHANNEL2" --community "$COMMUNITY" --owner "$OWNER"
 check 'create again without an option leaves it as it is' eval 'rc_is 0 && cmp -s "$TD/brz.mcp" "$BWS/.mcp.json" && hasnt "$OUT/br-create2.out" "Browser:"'
 run_tool br-create-off AGENT_TEAM_ROOT="$RBR" -- create --workspace "$BWS" --channel "$CHANNEL2" --community "$COMMUNITY" --owner "$OWNER" --no-browser
 check 'create --no-browser takes it out, and says so' eval 'rc_is 0 && [ ! -e "$BWS/.mcp.json" ] && has "$OUT/br-create-off.out" "Browser: removed: $BWS/.mcp.json is deleted"'
-run_tool br-create-rv AGENT_TEAM_ROOT="$RBR" -- create --workspace "$BWS" --channel "$CHANNEL2" --community "$COMMUNITY" --owner "$OWNER" --name brz-reviewer --roles reviewer --browser
-check 'create refuses it for a team without a workspace agent, before anything is written' eval 'rc_is 1 && has "$OUT/br-create-rv.out" "create: --browser is for the workspace agent'"'"'s browser, and this create makes no workspace agent (--roles reviewer)" && [ ! -e "$RBR/brz-reviewer" ]'
+run_tool br-create-rv AGENT_TEAM_ROOT="$TD/root-browser-rv" -- create --workspace "$BWS" --channel "$CHANNEL2" --community "$COMMUNITY" --owner "$OWNER" --name brz-reviewer --roles reviewer --browser
+check 'a reviewer'"'"'s own team takes it too: create names it for the reviewer'"'"'s backend' eval 'rc_is 0 && br_on claude "$BWS" && has "$OUT/br-create-rv.out" "Browser: added: $BWS/.mcp.json"'
+python3 -I "$BH" remove "$BWS" > /dev/null
 run_tool br-create-both AGENT_TEAM_ROOT="$RBR" -- create --workspace "$BWS" --channel "$CHANNEL2" --community "$COMMUNITY" --owner "$OWNER" --browser --no-browser
 check 'and both at once' eval 'rc_is 1 && has "$OUT/br-create-both.out" "choose --browser or --no-browser, not both"'
 mkdir -p "$TD/ws/brz-cx"
 run_tool br-create-cx AGENT_TEAM_ROOT="$TD/root-browser-cx" -- create --workspace "$TD/ws/brz-cx" --channel "$CHANNEL2" --community "$COMMUNITY" --owner "$OWNER" --agent-backend codex --browser
-check 'for a workspace agent on Codex, create names it in .codex/config.toml, and nothing in .mcp.json' eval 'rc_is 0 && br_on codex "$TD/ws/brz-cx" && [ ! -e "$TD/ws/brz-cx/.mcp.json" ] && has "$OUT/br-create-cx.out" "Browser: added: $TD/ws/brz-cx/.codex/config.toml"'
+check 'agents on two backends: create names it in the file of each, .codex/config.toml and .mcp.json' eval 'rc_is 0 && br_on codex "$TD/ws/brz-cx" && br_on claude "$TD/ws/brz-cx" && has "$OUT/br-create-cx.out" "Browser: added: $TD/ws/brz-cx/.codex/config.toml" && has "$OUT/br-create-cx.out" "Browser: added: $TD/ws/brz-cx/.mcp.json"'
 # upgrade: the plan says what it would do; a dry run does nothing.
 run_tool br-up-dry AGENT_TEAM_ROOT="$RBR" -- upgrade brz --dry-run --browser
-check 'the upgrade plan names the file it would name the server in, repeats the option, and the dry run writes nothing' eval 'rc_is 0 && has "$OUT/br-up-dry.out" "  $BWS/.mcp.json: name the Playwright server (the workspace agent'"'"'s browser on claude)" && has "$OUT/br-up-dry.out" "Run it: agent-team.sh upgrade brz --browser" && [ ! -e "$BWS/.mcp.json" ]'
+check 'the upgrade plan names the file it would name the server in, repeats the option, and the dry run writes nothing' eval 'rc_is 0 && has "$OUT/br-up-dry.out" "  $BWS/.mcp.json: name the Playwright server (the browser of the agents on claude)" && has "$OUT/br-up-dry.out" "Run it: agent-team.sh upgrade brz --browser" && [ ! -e "$BWS/.mcp.json" ]'
 run_tool br-up AGENT_TEAM_ROOT="$RBR" -- upgrade brz --browser
 check 'upgrade --browser names it' eval 'rc_is 0 && br_on claude "$BWS" && has "$OUT/br-up.out" "  added: $BWS/.mcp.json"'
 run_tool br-up2 AGENT_TEAM_ROOT="$RBR" -- upgrade brz --browser
 run_tool br-up3 AGENT_TEAM_ROOT="$RBR" -- upgrade brz
 check 'a second run with it, and one without an option, find the team up to date and leave it' eval 'has "$OUT/br-up2.out" "up to date; nothing was changed" && has "$OUT/br-up3.out" "up to date; nothing was changed" && br_on claude "$BWS"'
 run_tool br-up-cx-dry AGENT_TEAM_ROOT="$RBR" -- upgrade brz --agent-backend codex --browser --dry-run
-check 'with the workspace agent moving to Codex, the plan names the Codex file' has "$OUT/br-up-cx-dry.out" "  $BWS/.codex/config.toml: name the Playwright server (the workspace agent's browser on codex)"
+check 'with the workspace agent moving to Codex, the plan names the Codex file, and the Claude file is in place for the channel supervisor' eval 'has "$OUT/br-up-cx-dry.out" "  $BWS/.codex/config.toml: name the Playwright server (the browser of the agents on codex)" && hasnt "$OUT/br-up-cx-dry.out" "$BWS/.mcp.json: name"'
 run_tool br-up-off-dry AGENT_TEAM_ROOT="$RBR" -- upgrade brz --dry-run --no-browser
 check 'the --no-browser plan names each file it would take the server out of, and writes nothing' eval 'rc_is 0 && has "$OUT/br-up-off-dry.out" "  $BWS/.mcp.json: take the Playwright server out" && hasnt "$OUT/br-up-off-dry.out" ".codex/config.toml" && has "$OUT/br-up-off-dry.out" "Run it: agent-team.sh upgrade brz --no-browser" && br_on claude "$BWS"'
 run_tool br-up-off AGENT_TEAM_ROOT="$RBR" -- upgrade brz --no-browser
 check 'upgrade --no-browser takes it out' eval 'rc_is 0 && [ ! -e "$BWS/.mcp.json" ] && has "$OUT/br-up-off.out" "  removed: $BWS/.mcp.json is deleted"'
 printf 'not json\n' > "$BWS/.mcp.json"
 run_tool br-up-bad AGENT_TEAM_ROOT="$RBR" -- upgrade brz --browser
-check 'a file that cannot be used stops the upgrade before anything is changed, and is left alone' eval 'rc_is 1 && has "$OUT/br-up-bad.out" "the workspace agent'"'"'s browser cannot be named in the project folder" && [ "$(cat "$BWS/.mcp.json")" = "not json" ]'
+check 'a file that cannot be used stops the upgrade before anything is changed, and is left alone' eval 'rc_is 1 && has "$OUT/br-up-bad.out" "the browser cannot be named in the project folder" && [ "$(cat "$BWS/.mcp.json")" = "not json" ]'
 rm -f "$BWS/.mcp.json"
 run_tool br-rv-make AGENT_TEAM_ROOT="$RBR" -- create --workspace "$BWS" --channel "$CHANNEL2" --community "$COMMUNITY" --owner "$OWNER" --name brz-reviewer --roles reviewer
 run_tool br-up-rv2 AGENT_TEAM_ROOT="$RBR" -- upgrade brz-reviewer --browser
-check 'upgrade refuses it for a team without a workspace agent' eval 'rc_is 1 && has "$OUT/br-up-rv2.out" "upgrade: --browser is for the workspace agent'"'"'s browser, and workspace \"brz-reviewer\" has no workspace agent; nothing was changed" && [ ! -e "$BWS/.mcp.json" ]'
+check 'upgrade --browser of a reviewer'"'"'s own team names it for the reviewer'"'"'s backend' eval 'rc_is 0 && br_on claude "$BWS" && has "$OUT/br-up-rv2.out" "  added: $BWS/.mcp.json"'
 # A team folder made by 4.2.0 has no helper: upgrade adds it.
 rm -f "$RBR/brz/workspace-browser.py"
 run_tool br-up-helper-dry AGENT_TEAM_ROOT="$RBR" -- upgrade brz --dry-run

@@ -1,6 +1,6 @@
 # macOS folder metadata
 .DS_Store
-# Python byte code from the test scripts and the runtime helpers
+# Python byte code from the test scripts and the skill's helpers
 __pycache__/
 *.pyc
 # Editor and merge leftovers

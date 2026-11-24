@@ -10,8 +10,7 @@
 #     .env.buzz-acp.local  settings for run-buzz-acp.sh (mode 600; no secret key)
 #     prompt.md            the agent's role instructions, then the workspace brief if there is one
 #     agent.conf           public facts: id, role, display name, public key, backend
-#     runtime/, subscriptions.toml   the channel supervisor's restricted runtime and the rules that
-#                          decide which messages start its turn (a reviewer has the runtime only)
+#     subscriptions.toml   the channel supervisor's rules that decide which messages start its turn
 #     start.sh             that agent's own start command, a copy of templates/agent-start.sh: it
 #                          starts this agent only, through team.sh
 # and, beside the agent folders, brief.md: the user's optional note about the workspace, and
@@ -19,11 +18,13 @@
 # finds everything from its own location, so a team folder runs and moves without this skill.
 # VERSION there is the version of this skill that created or last upgraded the folder.
 # Each agent runs on claude or codex and signs in only through the user's subscription.
-# The shared PROJECT.md is initialized in the workspace if absent, and for a workspace agent on Claude
-# the workspace first gets its sandbox settings, .claude/settings.json (scripts/workspace-settings.py).
-# create and upgrade with --browser name the workspace agent's browser, the Playwright tool server, in
-# the project folder's file of its backend (.mcp.json or .codex/config.toml; scripts/workspace-browser.py),
-# and with --no-browser take it out of both; without either they leave the project folder as it is.
+# The shared PROJECT.md is initialized in the workspace if absent. The workspace first gets the settings
+# of each backend the agents run on (scripts/workspace-settings.py): for an agent on Claude its sandbox
+# settings, .claude/settings.json; for an agent on Codex the buzz rule, .codex/rules/buzz.rules.
+# create and upgrade with --browser name the browser, the Playwright tool server, in the project folder's
+# file of each backend the team's agents run on (.mcp.json or .codex/config.toml;
+# scripts/workspace-browser.py), and with --no-browser take it out of both; without either they leave
+# the project folder as it is.
 # The root must be outside every Git work tree.
 # The root also holds settings.conf (mode 600): public defaults only, written by "settings".
 # This script lives in scripts/ of the buzz-agent-team skill folder; templates/ is beside scripts/.
@@ -51,26 +52,26 @@ PROG=agent-team.sh
 ENV_NAME=.env.buzz-acp.local
 ALL_ROLES='agent supervisor reviewer'
 # The job of each role. 3.0.0 swapped the jobs of the two agents of a team; 4.0.0 named the workspace
-# agent's role "agent" (it was "assistant") and its folder after the team (see agent_folder_for).
-#   agent       the workspace agent: the stock adapter with all its tools, worker subagents and
-#               bypass-permissions; it answers the owner and its channel supervisor
-#   supervisor  the channel supervisor: the restricted runtime; it takes a turn on every ordinary
-#               message in its channel and talks with anyone there
-#   reviewer    the independent reviewer: the restricted runtime; it takes a turn when mentioned
+# agent's role "agent" (it was "assistant") and its folder after the team (see agent_folder_for); 5.0.0
+# runs every role on the stock adapter with all its tools, in bypass-permissions, and what each one may
+# do is a rule in its prompt.
+#   agent       the workspace agent: worker subagents; it answers the owner and its channel supervisor
+#   supervisor  the channel supervisor: it takes a turn on every ordinary message in its channel and
+#               talks with anyone there; it acts only for the owner
+#   reviewer    the independent reviewer: it takes a turn when mentioned, and changes no file
 # Every place where the role decides behaviour asks one of these.
 is_workspace_role() { [ "$1" = agent ]; }
 is_channel_role() { [ "$1" = supervisor ]; }
-# Roles that run the restricted runtime copied into the agent's own folder: file reads inside the
-# project folder and the Buzz tools; no edits, no shell, no web. The workspace agent runs the stock adapter.
-uses_partner_runtime() { is_channel_role "$1" || [ "$1" = reviewer ]; }
 # The team folder format this skill writes (team.conf and agent.conf format=). A team in an earlier
 # format is refused by every command that acts on it, until "upgrade" converts it:
 #   1   made before 20 November 2026
 #   2   made by 1.0.0 or 2.0.0: the assistant was the discussion partner, the supervisor the workspace
 #       supervisor
 #   3   made by 3.0.0: the jobs as now, the workspace agent's role named assistant, in assistant/
-#   4   made by 4.0.0 or later: the workspace agent's role is agent, its folder named after the team
-FORMAT=4
+#   4   made by 4.0.0 to 4.3.0: the workspace agent's role is agent, its folder named after the team;
+#       the channel supervisor and the reviewer ran a restricted runtime in runtime/ of their folders
+#   5   made by 5.0.0 or later: every agent runs the stock adapter
+FORMAT=5
 
 die() { printf '%s: %s\n' "$PROG" "$*" >&2; exit 1; }
 warn() { printf '%s: warning: %s\n' "$PROG" "$*" >&2; }
@@ -205,7 +206,9 @@ sha256_text() { if command -v shasum >/dev/null 2>&1; then shasum -a 256 | cut -
 # so a backend switch never hands a Claude model to Codex or the reverse. Empty = the runtime default.
 # A model is accepted when the last list retrieved with "agent-team.sh models" for that backend and
 # role offers it; without a retrieved list, when the backend documents it (Claude Code's aliases and
-# full model names, model-config; Codex: the bundled catalog of the Codex CLI that role runs).
+# full model names, model-config; Codex: the bundled catalog of the Codex CLI the stock adapter runs).
+# A list retrieved from the restricted runtime of a version before 5.0.0 (its first line names a
+# runtime/ adapter) is not the stock adapter's, and is not used (usable_list).
 agent_model() { conf_get "$(ahome "$1")/agent.conf" "model_$2" 2>/dev/null || true; } # ID BACKEND
 # Each agent may also keep one reasoning effort per backend (agent.conf effort_claude= / effort_codex=).
 # Empty = none set here: Claude Code then uses the user's own level for the model, Codex its own default.
@@ -225,7 +228,7 @@ require_effort() { # BACKEND ROLE MODEL LEVEL: refuse a reasoning effort the bac
     base=${3%\[*\]}
     [ -n "$base" ] || die "on Codex a reasoning effort is part of the model name, so $(job_words "$2") needs a model too: --$2-model ID"
     list=$(models_cache codex "$2")
-    if [ -s "$list" ]; then
+    if usable_list "$list"; then
         if grep -v '^#' "$list" | cut -f1 | grep -Fxq -- "$base[$4]"; then return 0; fi
         levels=$(grep -v '^#' "$list" | cut -f1 | awk -v b="$base" 'index($0, b "[") == 1 { s = substr($0, length(b) + 2); sub(/\]$/, "", s); printf "%s ", s }')
         die "$4 is not a reasoning effort that the list retrieved for $(job_words "$2") offers for $base (it offers: ${levels:-none})"
@@ -253,7 +256,7 @@ require_worker_model() { # BACKEND MODEL: on Claude one of the four names; on Co
         die "$2 is not a model the subagent tool of Claude takes for a worker: choose opus, sonnet, haiku or fable"
     fi
     list=$(models_cache "$1" agent)
-    if [ "$1" = codex ] && [ -s "$list" ] && grep -v '^#' "$list" | cut -f1 | awk -v m="$2" '$0 == m || index($0, m "[") == 1 { f = 1 } END { exit !f }'; then
+    if [ "$1" = codex ] && usable_list "$list" && grep -v '^#' "$list" | cut -f1 | awk -v m="$2" '$0 == m || index($0, m "[") == 1 { f = 1 } END { exit !f }'; then
         refuse_secret model "$2"
         return 0
     fi
@@ -267,7 +270,7 @@ require_worker_effort() { # BACKEND MODEL LEVEL: the levels the backend offers f
         die "$3 is not a Claude reasoning effort for the workspace agent's workers: choose one of $CLAUDE_EFFORTS (or default for none)"
     fi
     list=$(models_cache codex agent)
-    if [ -n "$2" ] && [ -s "$list" ]; then
+    if [ -n "$2" ] && usable_list "$list"; then
         if grep -v '^#' "$list" | cut -f1 | grep -Fxq -- "${2%\[*\]}[$3]"; then return 0; fi
         levels=$(grep -v '^#' "$list" | cut -f1 | awk -v b="${2%\[*\]}" 'index($0, b "[") == 1 { s = substr($0, length(b) + 2); sub(/\]$/, "", s); printf "%s ", s }')
         die "$3 is not a reasoning effort that the list retrieved for the workspace agent offers for ${2%\[*\]}, for its workers (it offers: ${levels:-none})"
@@ -284,9 +287,9 @@ workers_text() { # WORKER_MODEL WORKER_EFFORT NAME: what the workers get, in wor
     if [ -z "$1$2" ]; then printf 'the same as %s' "$3"; return 0; fi
     printf 'model %s, reasoning effort %s' "${1:-the same as $3}" "${2:-the same as $3}"
 }
-# The workspace agent's prompt for a run that names its workers: its prompt.md followed by the section
-# that names them, with only the sentences that apply, written whole into DEST (mode 600). team.sh
-# writes the same; prompt.md itself is never changed.
+# An agent's prompt for a run that names the workspace agent's workers or has the browser: its prompt.md
+# followed by the sections that apply, with only the sentences that apply, written whole into DEST
+# (mode 600). team.sh writes the same; prompt.md itself is never changed.
 write_run_prompt() { # HOME WORKER_MODEL WORKER_EFFORT DEST [BROWSER [OWN]]: the workers' section when one
     local tmp                                         # is named, then the browser's when BROWSER is on
     tmp=$(mktemp "$1/.new-prompt.XXXXXX") || return 1
@@ -305,7 +308,7 @@ write_run_prompt() { # HOME WORKER_MODEL WORKER_EFFORT DEST [BROWSER [OWN]]: the
     chmod 600 "$tmp"
     mv -f -- "$tmp" "$4"
 }
-# The section at the end of the workspace agent's prompt for a run with the browser. With own, for a
+# The section at the end of an agent's prompt for a run with the browser. With own, for a
 # server playwright the owner wrote with other settings ("with your own settings"), it says nothing of
 # the skill's entry. Keep this function identical to browser_section in templates/team.sh
 # (test-team-sh.sh compares them).
@@ -337,15 +340,12 @@ claude_label() { # claude-opus-5-5 -> "Opus 5.5" (how the adapter names that mod
     printf '%s%s %s%s' "$(printf '%s' "${f:0:1}" | LC_ALL=C tr 'a-z' 'A-Z')" "${f:1}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[4]:+.${BASH_REMATCH[4]}}"
 }
 models_cache() { printf '%s/models/%s-%s.list' "$ROOT" "$1" "$2"; } # BACKEND ROLE
-codex_cli_of() { # ROLE: the Codex CLI that role's runtime runs
+usable_list() { # FILE: a retrieved list, from the stock adapter
+    [ -s "$1" ] || return 1
+    case $(sed -n 1p "$1") in *'/runtime/claude-agent-acp' | *'/runtime/codex-acp') return 1 ;; esac
+}
+codex_cli_of() { # the Codex CLI the stock adapter runs
     local acp py=${AGENT_TEAM_PYTHON:-python3}
-    if uses_partner_runtime "$1"; then
-        # The restricted runtime runs the private engine (runtime/codex-acp); the CLI on PATH stands in.
-        if [ -x "$HOME/.local/share/buzz-agent-team/node_modules/.bin/codex" ]; then
-            printf '%s' "$HOME/.local/share/buzz-agent-team/node_modules/.bin/codex"
-        else command -v codex 2>/dev/null || true; fi
-        return 0
-    fi
     # The stock adapter runs CODEX_PATH, or else the Codex CLI it bundles (codex-acp dist/index.js,
     # startCodexConnection), never the one on PATH.
     if [ -n "${CODEX_PATH:-}" ]; then printf '%s' "$CODEX_PATH"; return 0; fi
@@ -354,9 +354,9 @@ codex_cli_of() { # ROLE: the Codex CLI that role's runtime runs
     acp=$("$py" -I -c 'import os,sys; print(os.path.dirname(os.path.dirname(os.path.realpath(sys.argv[1]))))' "$acp" 2>/dev/null) || return 0
     printf '%s' "$acp/node_modules/.bin/codex"
 }
-codex_bundled_models() { # ROLE: the slugs that role's Codex CLI lists in its bundled catalog, offline
+codex_bundled_models() { # the slugs the stock adapter's Codex CLI lists in its bundled catalog, offline
     local cli py=${AGENT_TEAM_PYTHON:-python3}
-    cli=$(codex_cli_of "${1:-agent}")
+    cli=$(codex_cli_of)
     [ -n "$cli" ] && [ -x "$cli" ] && [ "$py" != none ] && command -v -- "$py" >/dev/null 2>&1 || return 0
     "$cli" debug models --bundled 2>/dev/null | "$py" -I -c 'import json,sys
 t=sys.stdin.read(); i=t.find("{")
@@ -368,7 +368,7 @@ for m in d.get("models", []):
 model_offered() { # BACKEND ROLE MODEL: 0 when the backend offers MODEL for that role
     local list label
     list=$(models_cache "$1" "$2")
-    if [ -s "$list" ]; then
+    if usable_list "$list"; then
         if grep -v '^#' "$list" | cut -f1 | grep -Fxq -- "$3"; then return 0; fi
         # A full Claude name that the list offers under its alias, e.g. claude-opus-5-5 as "opus: Opus 5.5".
         if [ "$1" = claude ] && claude_documented_model "$3"; then
@@ -378,7 +378,7 @@ model_offered() { # BACKEND ROLE MODEL: 0 when the backend offers MODEL for that
         return 1
     fi
     if [ "$1" = claude ]; then claude_documented_model "$3"; return; fi
-    codex_bundled_models "$2" | grep -Fxq -- "$3"
+    codex_bundled_models | grep -Fxq -- "$3"
 }
 require_model() { # BACKEND ROLE MODEL: refuse a model the backend does not offer, naming what it offers
     local list offered
@@ -389,9 +389,9 @@ require_model() { # BACKEND ROLE MODEL: refuse a model the backend does not offe
     fi
     model_offered "$1" "$2" "$3" && return 0
     list=$(models_cache "$1" "$2")
-    if [ -s "$list" ]; then offered="retrieved list: $(grep -v '^#' "$list" | cut -f1 | tr '\n' ' ')"
+    if usable_list "$list"; then offered="retrieved list: $(grep -v '^#' "$list" | cut -f1 | tr '\n' ' ')"
     elif [ "$1" = claude ]; then offered='documented: the Claude Code aliases and full claude-* model names'
-    else offered="documented: $(codex_bundled_models "$2" | tr '\n' ' ')"; fi
+    else offered="documented: $(codex_bundled_models | tr '\n' ' ')"; fi
     die "$3 is not a $1 model offered for $(job_words "$2") (${offered% }). List them with: $PROG models --backend $1 --role $2"
 }
 is_hex64() { [[ $1 =~ ^[0-9a-fA-F]{64}$ ]]; }
@@ -826,48 +826,29 @@ write_env() { # OUT HOME NAME ROLE BACKEND MODEL_CLAUDE MODEL_CODEX [AUTH_TAG_LI
         printf 'RUN_BUZZ_ACP_WORKDIR=%s\n' "$C_WS_PATH"
         printf 'BUZZ_ACP_SYSTEM_PROMPT_FILE=%s/prompt.md\n' "$2"
         printf 'BUZZ_ACP_NO_BASE_PROMPT=true\nBUZZ_ACP_MEMORY=true\n'
+        # Every agent runs the stock adapter with all its tools, in bypass-permissions: what it may do is
+        # a rule in its prompt, which nothing enforces.
+        printf 'BUZZ_ACP_AGENT_COMMAND=%s\n' "$(backend_command "$5")"
         if is_channel_role "$4"; then
-            printf 'BUZZ_ACP_AGENT_COMMAND=%s/runtime/%s\n' "$2" "$(backend_command "$5")"
             printf '# The channel supervisor talks with anyone in its channel; subscriptions.toml decides which\n'
-            printf '# messages start a turn. Its runtime holds its own read-only mode; the harness sets none.\n'
+            printf '# messages start a turn. It acts only for the owner: a rule in its prompt.\n'
             printf 'BUZZ_ACP_RESPOND_TO=anyone\nBUZZ_ACP_SUBSCRIBE=config\n'
             printf 'BUZZ_ACP_CONFIG=%s/subscriptions.toml\n' "$2"
-            printf 'BUZZ_ACP_PERMISSION_MODE=default\n'
-        elif uses_partner_runtime "$4"; then
-            printf 'BUZZ_ACP_AGENT_COMMAND=%s/runtime/%s\n' "$2" "$(backend_command "$5")"
-            printf '# The reviewer answers anyone in its channels who mentions it. Its runtime holds its own\n'
-            printf '# read-only mode; the harness sets none.\n'
+        elif ! is_workspace_role "$4"; then
+            printf '# The reviewer answers anyone in its channels who mentions it. It changes no file: a rule in\n'
+            printf '# its prompt.\n'
             printf 'BUZZ_ACP_RESPOND_TO=anyone\n'
-            printf 'BUZZ_ACP_PERMISSION_MODE=default\n'
+        elif [ -n "$answers" ]; then
+            # The workspace agent answers the owner and the channel supervisor it works with, by public key;
+            # the harness always adds the owner, and refuses an empty list.
+            printf '# It answers the owner and its channel supervisor; starting work still needs the owner.\n'
+            printf 'BUZZ_ACP_RESPOND_TO=allowlist\nBUZZ_ACP_RESPOND_TO_ALLOWLIST=%s\n' "$answers"
         else
-            # The workspace agent: the stock adapter. It answers the owner and the channel supervisor it
-            # works with, by public key; the harness always adds the owner, and refuses an empty list.
-            printf 'BUZZ_ACP_AGENT_COMMAND=%s\n' "$(backend_command "$5")"
-            if [ -n "$answers" ]; then
-                printf '# It answers the owner and its channel supervisor; starting work still needs the owner.\n'
-                printf 'BUZZ_ACP_RESPOND_TO=allowlist\nBUZZ_ACP_RESPOND_TO_ALLOWLIST=%s\n' "$answers"
-            else
-                printf '# No channel supervisor of its own is known on this machine: it answers the owner.\n'
-                printf 'BUZZ_ACP_RESPOND_TO=owner-only\n'
-            fi
-            printf 'BUZZ_ACP_PERMISSION_MODE=bypass-permissions\n'
+            printf '# No channel supervisor of its own is known on this machine: it answers the owner.\n'
+            printf 'BUZZ_ACP_RESPOND_TO=owner-only\n'
         fi
+        printf 'BUZZ_ACP_PERMISSION_MODE=bypass-permissions\n'
     } > "$1"
-}
-
-RUNTIME_FILES='claude-agent-acp restricted-claude buzz-tools codex-acp'
-install_partner_runtime() { # AGENT_DIR: add missing runtime files; existing ones are kept (upgrade refreshes them)
-    local dest=$1 file tmp
-    mkdir -p -- "$dest/runtime"
-    chmod 700 "$dest/runtime"
-    for file in $RUNTIME_FILES; do
-        [ ! -e "$dest/runtime/$file" ] || continue
-        tmp=$(mktemp "$dest/runtime/.new-tool.XXXXXX")
-        TMP_PATHS+=("$tmp")
-        cp -- "$(skill_dir)/runtime/$file" "$tmp"
-        chmod 700 "$tmp"
-        publish_file "$tmp" "$dest/runtime/$file"
-    done
 }
 
 # The channel supervisor's subscription rules (harness: crates/buzz-acp/src/filter.rs match_event).
@@ -972,14 +953,15 @@ publish_file() {
 # Files every team folder holds beside its agents, copied from this skill:
 #   team.sh    the team's own command: check, start, stop and status for that folder's agents. It finds
 #              everything from its own location, so a team folder runs, and moves, without this skill.
-#   workspace-settings.py   keeps the sandbox settings of an agent on the stock Claude adapter (the
-#              workspace agent) in its project folder (scripts/workspace-settings.py says which): team.sh
-#              runs it before a start, so a project folder the team is new to gets them first.
+#   workspace-settings.py   keeps the settings of each backend in the project folder: the sandbox
+#              settings of an agent on Claude, the buzz rule of an agent on Codex
+#              (scripts/workspace-settings.py says which): team.sh runs it before a start, so a project
+#              folder the team is new to gets them first.
 #   acp-models.py   asks an adapter for the models it offers (scripts/acp-models.py): team.sh runs it
 #              before a model menu, so the menu shows what the provider offers at that moment.
-#   workspace-browser.py   names, checks and takes out the workspace agent's browser, the Playwright tool
-#              server, in its project folder (scripts/workspace-browser.py says how): team.sh runs it
-#              before a start, to read the state, ask, and switch it when asked to.
+#   workspace-browser.py   names, checks and takes out the browser, the Playwright tool server, in the
+#              project folder (scripts/workspace-browser.py says how): team.sh runs it before a start,
+#              to read the state, ask, and switch it when asked to.
 #   VERSION    the version of the skill that created or last upgraded this folder: create writes it
 #              into a new team folder only, upgrade replaces it. It is data (mode 600, no backup),
 #              and the last file an upgrade writes, so an interrupted upgrade leaves the earlier
@@ -1031,30 +1013,38 @@ install_team_file() { # REL [STAMP]: write or replace it; a replaced one is kept
     fi
     mv -f -- "$tmp" "$dest"
 }
-# What holds an agent to its project folder:
-#   - on the restricted runtime (the channel supervisor, the reviewer): that runtime;
-#   - on the stock Claude adapter (the workspace agent): plain Claude Code settings in the project folder,
-#     PROJECT/.claude/settings.json, which Claude Code reads itself. workspace-settings.py writes and
-#     checks them; create puts them there first, and team.sh before every start;
-#   - on the stock Codex adapter: the adapter runs every turn in Codex's workspace-write sandbox and
-#     replaces what a config file says, so no file is written; start pins that mode (INITIAL_AGENT_MODE);
-#   - and the rule in the workspace agent's prompt, for what no setting holds.
-on_stock_claude() { ! uses_partner_runtime "$1" && [ "$2" = claude ]; }   # ID BACKEND
-on_stock_codex() { ! uses_partner_runtime "$1" && [ "$2" = codex ]; }     # ID BACKEND
-# workspace_settings apply|check DIR: prints the helper's one line. Status: the helper's (0 written or
-# in place; 3 absent; 4 incomplete; 2 the file cannot be used), or 5 when python3 is not available.
+# What holds an agent to its project folder (every agent runs the stock adapter of its backend):
+#   - on Claude: plain Claude Code settings in the project folder, PROJECT/.claude/settings.json, which
+#     Claude Code reads itself. workspace-settings.py writes and checks them; create puts them there
+#     first, and team.sh before every start;
+#   - on Codex: the adapter runs every turn in Codex's workspace-write sandbox, which has no network, and
+#     start pins that mode (INITIAL_AGENT_MODE); the buzz rule, PROJECT/.codex/rules/buzz.rules, lets a
+#     plain buzz command run with the network (workspace-settings.py codex writes and checks it);
+#   - and the rule in each agent's prompt, for what no setting holds.
+# workspace_settings apply|check BACKEND DIR: prints the helper's one line. Status: the helper's (0 written
+# or in place; 3 absent; 4 incomplete; 2 the file cannot be used), or 5 when python3 is not available.
 workspace_settings() {
     local py=${AGENT_TEAM_PYTHON:-python3}
     if [ "$py" = none ] || ! command -v "$py" >/dev/null 2>&1; then
         printf 'python3 is needed to write the settings file, and it is not on PATH'
         return 5
     fi
-    "$py" -I "$(script_dir)/workspace-settings.py" "$1" "$2" 2>&1
+    "$py" -I "$(script_dir)/workspace-settings.py" "$@" 2>&1
 }
-# The workspace agent's browser: the Playwright tool server, named in the project folder's own tool-server
-# file, which the adapter's CLI reads itself (PROJECT/.mcp.json on Claude, PROJECT/.codex/config.toml on
-# Codex). workspace-browser.py writes, checks and takes out the entry; create and upgrade do so only when
-# given --browser or --no-browser, and team.sh at a start. The other roles' runtimes never read those files.
+# The backends the loaded team's agents are saved on, each once, claude first.
+team_backends() {
+    local bk id out=''
+    for bk in claude codex; do
+        for id in $(team_agents); do
+            if [ "$(agent_backend "$id")" = "$bk" ]; then out="$out $bk"; break; fi
+        done
+    done
+    trim "$out"
+}
+# The browser: the Playwright tool server, named in the project folder's own tool-server file, which the
+# adapter's CLI reads itself (PROJECT/.mcp.json on Claude, PROJECT/.codex/config.toml on Codex), so every
+# agent started there on that backend has it. workspace-browser.py writes, checks and takes out the entry;
+# create and upgrade do so only when given --browser or --no-browser, and team.sh at a start.
 # workspace_browser apply|check BACKEND DIR, or remove DIR: prints the helper's line(s). Status: the
 # helper's (0 written, in place or removed; 3 absent; 4 an entry remove leaves; 2 the file cannot be
 # used), or 5 when python3 is not available.
@@ -1271,18 +1261,16 @@ usage() {
 Usage: agent-team.sh <command> [options]
 
   preflight [NAME] [--backend claude|codex] [--agent-backend B] [--supervisor-backend B]
-            [--roles agent,supervisor|agent] [--partner]
-            [--roles reviewer] [--reviewer-backend B]
+            [--roles agent,supervisor|agent] [--roles reviewer] [--reviewer-backend B]
            Check everything a setup needs: the agents' root, the settings file, the
            key generator, the launcher (its path is printed), buzz, buzz-acp, and for
-           each role its ACP adapter, its runtime and its sign-in. Each agent signs in
-           through your subscription only: the CLI the role runs must report a Claude
+           each role its ACP adapter and its sign-in. Each agent signs in through your
+           subscription only: the CLI the adapter runs must report a Claude
            subscription or a ChatGPT sign-in, and no Claude settings file or Codex
            config may add an API key, token, helper or endpoint. With NAME, the team's
-           saved backends and the agents' own runtimes are checked (the options then
-           preview a switch). Prints one fix line per problem and exits 1 when a
-           required item is missing. Changes nothing. --partner is accepted and has no
-           effect (the channel supervisor's role is always checked).
+           saved backends are checked (the options then preview a switch). Prints one
+           fix line per problem and exits 1 when a required item is missing. Changes
+           nothing.
   settings [--keygen PATH] [--launcher PATH] [--community URL] [--owner HEX]
            [--model ID] [--from-env FILE] [--unset NAME]
            Show or change the public defaults kept in <root>/settings.conf (mode 600):
@@ -1294,20 +1282,24 @@ Usage: agent-team.sh <command> [options]
   create   Make the agents for one workspace and one channel: a new key, an env file
            and a prompt per agent. Safe to repeat: existing files are kept. The two
            agents of a team have two jobs (their roles are agent and supervisor):
-             agent       the workspace agent: the stock adapter with all its tools and
-                         worker subagents; it answers the owner and the channel
-                         supervisor, and starts work only on the owner's acceptance
-             supervisor  the channel supervisor: the restricted runtime; it takes a turn
-                         on every ordinary message in its channel, talks with anyone
-                         there, and hands accepted work to the workspace agent
+             agent       the workspace agent: worker subagents; it answers the owner and
+                         the channel supervisor, and starts work only on the owner's
+                         acceptance
+             supervisor  the channel supervisor: it takes a turn on every ordinary
+                         message in its channel, talks with anyone there, acts only for
+                         the owner, and hands accepted work to the workspace agent
+           Every agent runs the stock adapter of its backend with all its tools, in
+           bypass-permissions; what each one may do is a rule in its prompt, which
+           nothing enforces.
            Each agent has a folder in <root>/NAME/. The workspace agent's is named after
            the workspace, NAME itself (team.conf: agent_folder=), or agent when NAME is
            one a team folder uses for something else (supervisor, reviewer, models, ...);
            the others are supervisor/ and reviewer/. On a command line an agent is named
            by its folder, and the workspace agent also by agent.
-           For a workspace agent on Claude it first puts the sandbox settings into the
-           project folder, as .claude/settings.json (workspace-settings.py in this skill
-           says which, and what they hold); an existing file keeps everything else it holds.
+           For an agent on Claude it first puts the sandbox settings into the project
+           folder, as .claude/settings.json, and for an agent on Codex the buzz rule, as
+           .codex/rules/buzz.rules (workspace-settings.py in this skill says which, and what
+           they hold); an existing file keeps everything else it holds.
              --workspace DIR      the project folder the agents work in (required)
              --channel UUID       the Buzz channel (required)
              --backend NAME       claude (default) or codex, for both new agents
@@ -1319,9 +1311,9 @@ Usage: agent-team.sh <command> [options]
                                   agent for a channel that already has a channel
                                   supervisor in another team; or reviewer: one
                                   independent reviewer, as a team of its own (give it
-                                  its own --name). It reads the project and comments
-                                  in Buzz; it cannot edit files or run commands, and it
-                                  answers anyone in its channels who mentions it.
+                                  its own --name). It reads the project, runs checks and
+                                  comments in Buzz; its prompt tells it to change no
+                                  file. It answers anyone in its channels who mentions it.
              --reviewer-name N    the reviewer's display name (default "<Folder> Reviewer")
              --reviewer-backend NAME, --reviewer-model ID
                                   the reviewer's backend and model, as for the other roles
@@ -1343,14 +1335,15 @@ Usage: agent-team.sh <command> [options]
                                   worker effort is refused while the agent has one of its own
                                   (a session's level applies to its workers). Kept one per
                                   backend; default clears a saved one.
-             --browser            give the workspace agent a browser: name the Playwright tool
-                                  server (headless Chrome, a new empty profile each session,
-                                  signed in to nothing) in the project folder's file of its
-                                  backend, .mcp.json on Claude or .codex/config.toml on Codex,
-                                  which the adapter's CLI reads itself (workspace-browser.py in
-                                  this skill says what it holds). An existing file keeps
-                                  everything else it holds; a server named playwright that is
-                                  already there is left as it is.
+             --browser            give the agents a browser: name the Playwright tool server
+                                  (headless Chrome, a new empty profile each session, signed in
+                                  to nothing) in the project folder's file of each backend the
+                                  team's agents run on, .mcp.json on Claude or .codex/config.toml
+                                  on Codex, which the adapter's CLI reads itself
+                                  (workspace-browser.py in this skill says what it holds). Every
+                                  agent started in that folder on that backend has it. An
+                                  existing file keeps everything else it holds; a server named
+                                  playwright that is already there is left as it is.
              --no-browser         take the browser out of both files of the project folder.
                                   Without either, the project folder is left as it is.
              --agent-name N       the workspace agent's display name (default "<Name>")
@@ -1377,7 +1370,7 @@ Usage: agent-team.sh <command> [options]
            in by subscription only: there is no gateway option. The options spelled
            --assistant-* before 4.0.0, and --roles assistant, are refused with the new
            spelling. A team in an earlier team folder format (1; 2 from 1.0.0 and 2.0.0;
-           3 from 3.0.0) is refused: run upgrade first.
+           3 from 3.0.0; 4 from 4.0.0 to 4.3.0) is refused: run upgrade first.
   upgrade  NAME [--dry-run] [--backend B] [--agent-backend B] [--supervisor-backend B]
            [--model ID] [--agent-model ID] [--supervisor-model ID]
            [--reviewer-backend B] [--reviewer-model ID]
@@ -1386,12 +1379,16 @@ Usage: agent-team.sh <command> [options]
            [--worker-model ID] [--worker-effort LEVEL]   (the saved model and reasoning effort
            of the workspace agent's workers on its backend in this run, as for create;
            default clears it)
-           [--browser | --no-browser]   (name the workspace agent's browser in the project
-           folder's file of its backend in this run, or take it out of both files, as for
-           create; without either the project folder's browser is left as it is)
-           Bring a team to the current format (4) and to the chosen backends: subscription
-           sign-in env files, the current prompts, the channel supervisor's runtime and
-           its subscription rules. From format 3 the workspace agent's folder moves from
+           [--browser | --no-browser]   (name the browser in the project folder's file of
+           each backend the team's agents run on in this run, or take it out of both files,
+           as for create; without either the project folder's browser is left as it is)
+           Bring a team to the current format (5) and to the chosen backends: subscription
+           sign-in env files for the stock adapter, the current prompts and the channel
+           supervisor's subscription rules. From format 4 the channel supervisor and the
+           reviewer leave the restricted runtime: each runtime/ is moved aside as
+           runtime.bak-<UTC time>, and from now on they have every tool of the stock
+           adapter, held only by the rules in their prompts. From format 3 the workspace
+           agent's folder moves from
            assistant/ to its own name (one rename, before its files are rewritten there),
            and team.conf records it; the plan names the folder and the new start command.
            In a format-2 team the two agents also swap their jobs: each keeps its key,
@@ -1405,14 +1402,15 @@ Usage: agent-team.sh <command> [options]
            checks them). A format-1 agent's single model is not carried. --dry-run
            prints the plan. The team's own files (team.sh, each start.sh, acp-models.py,
            workspace-settings.py, workspace-browser.py) are refreshed the same way. The wall programs of a
-           team made before 2.0.0 (wall/) are removed, and the sandbox settings of the
-           workspace agent on Claude are put into the project folder
-           (.claude/settings.json; an existing file keeps everything else it holds).
+           team made before 2.0.0 (wall/) are removed. The sandbox settings of an agent on
+           Claude are put into the project folder (.claude/settings.json), and the buzz rule
+           of an agent on Codex (.codex/rules/buzz.rules); an existing file keeps everything
+           else it holds.
            VERSION in the team folder is set to this skill's version, last.
   models   [NAME] [--backend claude|codex] [--role agent|supervisor]
            (--role reviewer for a reviewer; without --role: agent)
            List the models your own sign-in offers for that backend and role, without
-           a model turn: one ACP session with the runtime the role runs, in the agents'
+           a model turn: one ACP session with the stock adapter every role runs, in the agents'
            subscription-only environment, at most 30 s, no retry. The list is kept in
            <root>/models/ and used by the model checks. When it cannot be retrieved,
            the reason and the documented list are shown and the exit status is 1.
@@ -1456,11 +1454,12 @@ Usage: agent-team.sh <command> [options]
            model menu shows the list the provider's adapter offers at that moment
            (acp-models.py in the team folder); --yes asks nothing and keeps the saved ones.
            For the workspace agent both then ask the model and the reasoning effort of its
-           workers, and take --worker-model and --worker-effort for one run, and then whether
-           it has a browser (--browser, --no-browser). This start applies the saved ones the
-           same way: they are named in the agent's system prompt for that run (prompt.run.md:
-           its prompt.md followed by a section that names them), and so is the browser when
-           the project folder names it; this start does not switch the browser.
+           workers, and take --worker-model and --worker-effort for one run; last they ask
+           whether the agents have a browser (--browser, --no-browser). This start applies the
+           saved ones the same way: they are named in the agent's system prompt for that run
+           (prompt.run.md: its prompt.md followed by a section that names them), and so is the
+           browser of each agent whose backend's file in the project folder names it; this
+           start does not switch the browser.
   stop     NAME [AGENT...] [--force]
            stop agents this tool started (SIGTERM, then wait; --force: SIGKILL after)
   status   [NAME]            show agents, backends, sign-in, proofs, whom each agent
@@ -1519,14 +1518,16 @@ format_words() { # FORMAT: how an earlier team folder format is named to the use
         1) printf 'format 1, made before 20 November' ;;
         2) printf 'format 2, made by version 1.0.0 or 2.0.0 of this skill' ;;
         3) printf 'format 3, made by version 3.0.0 of this skill' ;;
+        4) printf 'format 4, made by version 4.0.0 to 4.3.0 of this skill' ;;
         *) printf 'format %s' "$1" ;;
     esac
 }
 old_format_message() { # NAME FORMAT
-    local swap=''
-    case $2 in 1 | 2) swap=' Since format 3 the two agents of a team have the other jobs; the dry run says what each one does from now on.' ;; esac
-    swap="$swap Since format 4 the workspace agent's folder is named after the team: assistant/ becomes $(agent_folder_for "$1")/."
-    printf '%s' "workspace \"$1\" is in an earlier team folder format ($(format_words "$2")). Bring it to the current format ($FORMAT) first: $PROG upgrade $1 --dry-run, then $PROG upgrade $1. It keeps keys, proofs and PROJECT.md.$swap"
+    local more=''
+    case $2 in 1 | 2) more=' Since format 3 the two agents of a team have the other jobs; the dry run says what each one does from now on.' ;; esac
+    case $2 in 1 | 2 | 3) more="$more Since format 4 the workspace agent's folder is named after the team: assistant/ becomes $(agent_folder_for "$1")/." ;; esac
+    more="$more Since format 5 the channel supervisor and the reviewer run on the stock adapter with every tool, and what they may do is a rule in their prompts."
+    printf '%s' "workspace \"$1\" is in an earlier team folder format ($(format_words "$2")). Bring it to the current format ($FORMAT) first: $PROG upgrade $1 --dry-run, then $PROG upgrade $1. It keeps keys, proofs and PROJECT.md.$more"
 }
 
 cmd_create() {
@@ -1689,9 +1690,6 @@ cmd_create() {
             warn "the workspace agent already exists; create keeps it, so --worker-model and --worker-effort were not saved. Save them with: $PROG upgrade $C_NAME --worker-model ID --worker-effort LEVEL"
         fi
     fi
-    if [ -n "$br_opt" ]; then
-        case " $roles " in *' agent '*) ;; *) die "create: $br_opt is for the workspace agent's browser, and this create makes no workspace agent (--roles $roles_arg)" ;; esac
-    fi
 
     mkdir -p -- "$ROOT"
     chmod 700 "$ROOT"
@@ -1853,7 +1851,6 @@ EOF
             chmod 700 "$home"
             saved=$(agent_backend "$id")
             mc=$(agent_model "$id" claude) mx=$(agent_model "$id" codex)
-            if uses_partner_runtime "$id"; then install_partner_runtime "$home"; fi
             existing=''
             for f in "$ENV_NAME" prompt.md; do
                 if [ -f "$home/$f" ]; then existing="$existing $f"; continue; fi
@@ -1898,7 +1895,6 @@ EOF
         write_env "$tmp_home/$ENV_NAME" "$home" "$name" "$id" "$b" "$mc" "$mx"
         render_prompt "$id" "$tmp_home/prompt.md"
         chmod 600 "$tmp_home"/*
-        if uses_partner_runtime "$id"; then install_partner_runtime "$tmp_home"; fi
         [ ! -e "$home" ] || die "$home appeared while this run was creating it; nothing was replaced"
         mv -- "$tmp_home" "$home"
         created_now="$created_now $id"
@@ -1945,25 +1941,32 @@ EOF
         done
     fi
 
-    # The first thing a set of agents gets in its project folder: the sandbox settings of an agent
-    # on the stock Claude adapter. A file that cannot be completed is reported; team.sh, which
-    # writes the settings before every start, then refuses to start that agent until it is fixed.
-    for id in $(team_agents); do
-        on_stock_claude "$id" "$(agent_backend "$id")" || continue
+    # The first thing a set of agents gets in its project folder: the settings of each backend its agents
+    # run on, the sandbox settings on Claude and the buzz rule on Codex. A file that cannot be completed
+    # is reported; team.sh, which writes them before every start, then refuses to start those agents
+    # until it is fixed.
+    for b in $(team_backends); do
         v=0
-        f=$(workspace_settings apply "$C_WS_PATH") || v=$?
+        f=$(workspace_settings apply "$b" "$C_WS_PATH") || v=$?
         if [ "$v" = 0 ]; then say "Project folder settings: $f"
-        else warn "the settings of the workspace agent were not written into the project folder: $f. $T_DIR/team.sh writes them before a start."; fi
-        break
+        else warn "the settings of the agents on $b were not written into the project folder: $f. $T_DIR/team.sh writes them before a start."; fi
     done
-    # The workspace agent's browser, when asked for: named in the project folder's file of its backend
+    # The browser, when asked for: named in the project folder's file of each backend the agents run on
     # (--browser), or taken out of both files (--no-browser). Without either, the folder stays as it is.
     if [ -n "$br_opt" ]; then
-        v=0
-        if [ "$br_opt" = --browser ]; then f=$(workspace_browser apply "$(agent_backend agent)" "$C_WS_PATH") || v=$?
-        else f=$(workspace_browser remove "$C_WS_PATH") || v=$?; fi
-        if [ "$v" = 0 ]; then printf '%s\n' "$f" | sed 's/^/Browser: /'
-        else warn "$br_opt did not go through in the project folder: $f. Fix that, then run create again with $br_opt, or start the workspace agent with $T_DIR/team.sh start $(adir agent) $br_opt"; fi
+        if [ "$br_opt" = --browser ]; then
+            for b in $(team_backends); do
+                v=0
+                f=$(workspace_browser apply "$b" "$C_WS_PATH") || v=$?
+                if [ "$v" = 0 ]; then printf '%s\n' "$f" | sed 's/^/Browser: /'
+                else warn "$br_opt did not go through in the project folder: $f. Fix that, then run create again with $br_opt, or start the agents with $T_DIR/team.sh start $br_opt"; fi
+            done
+        else
+            v=0
+            f=$(workspace_browser remove "$C_WS_PATH") || v=$?
+            if [ "$v" = 0 ]; then printf '%s\n' "$f" | sed 's/^/Browser: /'
+            else warn "$br_opt did not go through in the project folder: $f. Fix that, then run create again with $br_opt, or start the agents with $T_DIR/team.sh start $br_opt"; fi
+        fi
     fi
     ensure_project_record
     say "Shared project record: $C_WS_PATH/PROJECT.md"
@@ -2243,7 +2246,7 @@ require_current() { # ID...: stop unless each agent has the current record forma
 }
 
 cmd_start() {
-    local requested='' check_only=no role_args=() choice saved b runtime run_model='' m list
+    local requested='' check_only=no role_args=() choice saved b run_model='' m list
     local id home log pid launcher protocol wait_s max_bytes size i started='' alive agents eff am walled am_out wm we hold rp br bo v
     [ "$#" -ge 1 ] || die 'start: usage: agent-team.sh start NAME [AGENT...] [--backend claude|codex] [--check]'
     load_team "$1"
@@ -2270,7 +2273,7 @@ cmd_start() {
             # The model, after the backend: the retrieved list when there is one; Enter keeps each saved model.
             b=${requested:-$(agent_backend "$1")}
             list=$(models_cache "$b" "$1")
-            if [ -s "$list" ]; then
+            if usable_list "$list"; then
                 say "Models offered for $b (retrieved $(sed -n '1s/^# retrieved //p' "$list" | cut -d' ' -f1)):" >&2
                 grep -v '^#' "$list" | cut -f1 | tr '\n' ' ' | fold -s -w 100 | sed 's/^/  /' >&2
                 printf '\n' >&2
@@ -2312,12 +2315,6 @@ cmd_start() {
     for id in "$@"; do
         if [ "$check_only" = no ] && ours_alive "$(ahome "$id")"; then continue; fi
         eval "b=\$RUN_BACKEND_$id"
-        if uses_partner_runtime "$id"; then
-            # The channel supervisor and the reviewer run their own runtime copy; that copy is what is checked.
-            runtime=$(ahome "$id")/runtime/$(backend_command "$b")
-            [ -x "$runtime" ] || die "$(adir "$id"): its runtime has no $(backend_command "$b"); refresh it with: $PROG upgrade $T_NAME. Nothing was started."
-            "$runtime" --check-runtime || die "$(adir "$id"): the $b restricted runtime check failed (see above); nothing was started"
-        fi
         (scrub_env
          cd -- "$(ahome "$id")" && "$launcher" --check --backend "$b" ${run_model:+--model "$run_model"}) || die "$(adir "$id") failed its $b launcher check (see above); nothing was started"
     done
@@ -2338,13 +2335,12 @@ cmd_start() {
             am=${am%\[*\]}
             if [ -n "$am" ]; then am="$am[$eff]"; fi
         fi
-        # An agent on the stock Claude adapter gets its settings in the project folder first, as team.sh does.
-        if on_stock_claude "$id" "$b"; then
-            walled=0
-            am_out=$(workspace_settings apply "$T_WORKSPACE") || walled=$?
-            [ "$walled" = 0 ] || die "$(adir "$id"): its settings could not be put into the project folder: $am_out. Nothing more was started."
-            case $am_out in 'in place:'*) ;; *) say "$(adir "$id"): project folder settings: $am_out" ;; esac
-        fi
+        # Its backend's settings go into the project folder first, as team.sh does: the sandbox settings on
+        # Claude, the buzz rule on Codex.
+        walled=0
+        am_out=$(workspace_settings apply "$b" "$T_WORKSPACE") || walled=$?
+        [ "$walled" = 0 ] || die "$(adir "$id"): its settings could not be put into the project folder: $am_out. Nothing more was started."
+        case $am_out in 'in place:'*) ;; *) say "$(adir "$id"): project folder settings: $am_out" ;; esac
         # The workspace agent's workers get their saved model and effort for that backend, as with team.sh.
         # On Claude the agent's own level applies to theirs too, so a level for them applies only without one.
         wm='' we=''
@@ -2360,26 +2356,21 @@ cmd_start() {
         fi
         # Its browser, as team.sh finds it: on when the project folder's file of its backend names the
         # Playwright server. This start does not switch it (team.sh start --browser or --no-browser does).
-        br='' bo=''
-        if is_workspace_role "$id"; then
-            v=0
-            am_out=$(workspace_browser check "$b" "$T_WORKSPACE") || v=$?
-            case $v in 0) br=on ;; 3) br=off ;; esac
-            # A server playwright the owner wrote with other settings gets the section that fits it.
-            case $am_out in *'with your own settings'*) bo=own ;; esac
-        fi
+        br='' bo='' v=0
+        am_out=$(workspace_browser check "$b" "$T_WORKSPACE") || v=$?
+        case $v in 0) br=on ;; 3) br=off ;; esac
+        # A server playwright the owner wrote with other settings gets the section that fits it.
+        case $am_out in *'with your own settings'*) bo=own ;; esac
         # Named in its prompt for this run: prompt.run.md, its prompt.md followed by the sections that apply
-        # (its workers, its browser); with none, prompt.md, and the file of an earlier run goes.
+        # (the workspace agent's workers, the browser); with none, prompt.md, and the file of an earlier run goes.
         rp=''
-        if is_workspace_role "$id"; then
-            if [ -n "$wm$we" ] || [ "$br" = on ]; then
-                rp=$home/prompt.run.md
-                write_run_prompt "$home" "$wm" "$we" "$rp" "$br" "$bo" || die "$(adir "$id"): could not write $rp. Nothing more was started."
-            else
-                rm -f -- "$home/prompt.run.md"
-            fi
+        if [ -n "$wm$we" ] || [ "$br" = on ]; then
+            rp=$home/prompt.run.md
+            write_run_prompt "$home" "$wm" "$we" "$rp" "$br" "$bo" || die "$(adir "$id"): could not write $rp. Nothing more was started."
+        else
+            rm -f -- "$home/prompt.run.md"
         fi
-        if uses_partner_runtime "$id"; then hold=runtime; elif [ "$b" = codex ]; then hold=codex; else hold=settings; fi
+        if [ "$b" = codex ]; then hold=codex; else hold=settings; fi
         printf '\n=== %s: agent-team.sh start (%s, backend %s) ===\n' "$(now_utc)" "$launcher" "$b" >> "$log"
         (
             scrub_env
@@ -2389,7 +2380,7 @@ cmd_start() {
             unset CLAUDE_CODE_SUBAGENT_MODEL CLAUDE_CODE_SUBAGENT_MODEL_FORCE CLAUDE_CODE_SUBAGENT_EFFORT
             if [ -n "$rp" ]; then export BUZZ_ACP_SYSTEM_PROMPT_FILE=$rp; fi
             # The stock Codex adapter's workspace-write mode, whatever the calling shell exports.
-            if on_stock_codex "$id" "$b"; then export INITIAL_AGENT_MODE=agent; fi
+            if [ "$b" = codex ]; then export INITIAL_AGENT_MODE=agent; fi
             trap '' HUP
             cd -- "$home" && exec "$launcher" --run --backend "$b" ${am:+--model "$am"}
         ) >> "$log" 2>&1 < /dev/null &
@@ -2645,15 +2636,15 @@ pf_line() { # STATE NAME DETAIL [FIX]
     fi
     case $1 in MISSING | PROBLEM) PF_MISSING=$((PF_MISSING + 1)) ;; esac
 }
-# One role's checks: its adapter, the runtime it runs, and the sign-in of the CLI that runtime runs.
+# One role's checks: its adapter, and the sign-in of the CLI that adapter runs.
 signin_env() { # CMD...: run CMD in this subshell's environment without the names the launcher removes
     local n
     for n in $(compgen -e); do if credential_name "$n"; then unset "$n"; fi; done
     unset CLAUDE_CODE_EXECUTABLE
     "$@"
 }
-pf_role() { # ID BACKEND RUNTIME_DIR WORKDIR
-    local id=$1 b=$2 rt=$3 ws=$4 adapter cmd d out status=0 method plan f names
+pf_role() { # ID BACKEND WORKDIR
+    local id=$1 b=$2 ws=$3 adapter cmd d out status=0 method plan f names
     adapter=$(backend_command "$b")
     say "$(job_words "$id" | sed 's/^the/The/'): $b"
     d=$(command -v -- "$adapter" 2>/dev/null || true)
@@ -2663,8 +2654,8 @@ pf_role() { # ID BACKEND RUNTIME_DIR WORKDIR
         return 0
     fi
     pf_line ok "$adapter" "$d"
-    # The stock Codex adapter that the workspace agent runs must be the tested one.
-    if [ "$b" = codex ] && ! uses_partner_runtime "$id"; then
+    # The stock Codex adapter every agent runs must be the tested one.
+    if [ "$b" = codex ]; then
         case $(codex-acp --version 2>/dev/null) in
             *' 1.13.1') pf_line ok 'adapter protocol' '1.13.1 (Buzz-compatible)' ;;
             *) pf_line PROBLEM 'adapter protocol' 'unverified adapter version' 'install @agentclientprotocol/codex-acp@1.13.1 under the user npm prefix' ;;
@@ -2673,16 +2664,7 @@ pf_role() { # ID BACKEND RUNTIME_DIR WORKDIR
     out=$(mktemp "${TMPDIR:-/tmp}/agent-team-preflight.XXXXXX")
     TMP_PATHS+=("$out")
     cmd=$adapter
-    if uses_partner_runtime "$id"; then
-        cmd=$rt/$adapter
-        if [ ! -x "$cmd" ]; then
-            pf_line PROBLEM 'restricted runtime' "$cmd is missing" "$PROG upgrade <name> (or install the skill again)"
-            return 0
-        fi
-        if bounded 60 "$out" "$cmd" --check-runtime; then pf_line ok 'restricted runtime' "$cmd"
-        else pf_line PROBLEM 'restricted runtime' "$(tail -n 1 "$out" | cut -c1-160)" 'install what the line names (see SKILL.md, step 1)'; fi
-    fi
-    # The sign-in, asked of the CLI this role will run (the channel supervisor: its restricted runtime).
+    # The sign-in, asked of the CLI the adapter will run.
     status=0
     if [ "$b" = claude ]; then
         (signin_env bounded 30 "$out" "$cmd" --cli auth status) || status=$?   # as the launcher will run it
@@ -2702,8 +2684,7 @@ pf_role() { # ID BACKEND RUNTIME_DIR WORKDIR
             [ -z "$names" ] || pf_line PROBLEM 'Claude settings' "$f sets ${names% }" "remove those entries from $f; agents sign in by subscription only"
         done < <(claude_settings_files "$ws")
     else
-        if uses_partner_runtime "$id"; then (signin_env bounded 30 "$out" "$cmd" --sign-in-status) || status=$?
-        else (signin_env bounded 30 "$out" "$cmd" cli login status) || status=$?; fi   # the Codex CLI the stock adapter runs
+        (signin_env bounded 30 "$out" "$cmd" cli login status) || status=$?   # the Codex CLI the stock adapter runs
         if [ "$status" = 124 ]; then pf_line PROBLEM 'Codex sign-in' 'the check did not answer within 30 s' 'run codex login status in your terminal and retry'
         elif grep -iq 'Logged in using ChatGPT' "$out"; then pf_line ok 'Codex sign-in' 'your ChatGPT sign-in'
         else pf_line PROBLEM 'Codex sign-in' 'not signed in with ChatGPT' 'in your own terminal: codex login (choose Sign in with ChatGPT)'; fi
@@ -2713,7 +2694,7 @@ pf_role() { # ID BACKEND RUNTIME_DIR WORKDIR
     rm -f -- "$out"
 }
 cmd_preflight() {
-    local top f p n v d team='' roles_arg='' roles='agent supervisor' b_all='' b_a='' b_s='' b_r='' id b rt ws='' names
+    local top f p n v d team='' roles_arg='' roles='agent supervisor' b_all='' b_a='' b_s='' b_r='' id b ws='' names
     while [ "$#" -gt 0 ]; do
         case $1 in
             --backend) need_value "$@"; check_backend "$2"; b_all=$2; shift ;;
@@ -2722,7 +2703,6 @@ cmd_preflight() {
             --reviewer-backend) need_value "$@"; check_backend "$2"; b_r=$2; shift ;;
             --assistant-*) die "preflight: $(renamed_option "$1")" ;;
             --roles) need_value "$@"; roles_arg=$2; shift ;;
-            --partner) ;;
             -h|--help) usage; return ;;
             -*) die "unknown preflight option: $1" ;;
             *) [ -z "$team" ] || die 'preflight takes one workspace NAME'; team=$1 ;;
@@ -2794,7 +2774,7 @@ cmd_preflight() {
     names=''
     for n in $(compgen -e); do if credential_name "$n"; then names="$names${names:+ }$n"; fi; done
     if [ -n "$names" ]; then pf_line note 'this shell' "exports $names; the launcher removes them for every agent (names only)"; fi
-    # Each role: its backend, the runtime it runs and that runtime's sign-in.
+    # Each role: its backend, its stock adapter and that adapter's sign-in.
     if [ -n "$team" ]; then
         load_team "$team"
         ws=$T_WORKSPACE
@@ -2804,14 +2784,12 @@ cmd_preflight() {
     for id in $roles; do
         case $id in agent) b=$b_a ;; reviewer) b=$b_r ;; *) b=$b_s ;; esac
         b=${b:-$b_all}
-        rt=$(skill_dir)/runtime
         if [ -n "$team" ]; then
             b=${b:-$(agent_backend "$id")}
             v=$(agent_format "$id")
-            if [ "$v" = "$FORMAT" ]; then rt=$(ahome "$id")/runtime
-            else pf_line PROBLEM "$(adir "$id") record" "$(format_words "$v")" "$PROG upgrade $team --dry-run, then $PROG upgrade $team"; fi
+            [ "$v" = "$FORMAT" ] || pf_line PROBLEM "$(adir "$id") record" "$(format_words "$v")" "$PROG upgrade $team --dry-run, then $PROG upgrade $team"
         fi
-        pf_role "$id" "${b:-claude}" "$rt" "$ws"
+        pf_role "$id" "${b:-claude}" "$ws"
     done
     say 'Defaults (asked for when not set):'
     for n in community owner model; do
@@ -2858,13 +2836,7 @@ cmd_models() {
     if [ -n "$team" ]; then load_team "$team"; backend=${backend:-$(agent_backend "$role")}; fi
     backend=${backend:-claude}
     adapter=$(backend_command "$backend")
-    if uses_partner_runtime "$role"; then
-        cmd=$(skill_dir)/runtime/$adapter
-        if [ -n "$team" ] && [ "$(agent_format "$role")" = "$FORMAT" ]; then cmd=$(ahome "$role")/runtime/$adapter; fi
-        [ -x "$cmd" ] || die "models: the restricted runtime $cmd is missing"
-    else
-        cmd=$(command -v -- "$adapter" 2>/dev/null) || die "models: $adapter is not on PATH"
-    fi
+    cmd=$(command -v -- "$adapter" 2>/dev/null) || die "models: $adapter is not on PATH"
     py=${AGENT_TEAM_PYTHON:-python3}
     [ "$py" != none ] && command -v -- "$py" >/dev/null 2>&1 || die 'models: python3 is needed to read the model list'
     # At most 30 s (AGENT_TEAM_MODELS_TIMEOUT may only shorten it, for tests).
@@ -2921,27 +2893,27 @@ print(d.get("reason") or "the listing gave no answer")' "$out" 2>/dev/null || pr
         say '  aliases: best fable sonnet opus haiku sonnet[1m] opus[1m] opusplan (Claude Code model-config; "default" names no model here)'
         say '  full names, for example: claude-opus-5-5 claude-sonnet-5-5 claude-haiku-5-5 claude-fable-5-2'
     else
-        list=$(codex_bundled_models "$role" | tr '\n' ' ')
-        if [ -n "$list" ]; then say "  $list(the bundled catalog of $(codex_cli_of "$role"))"; else say "  none available offline (the Codex CLI of $(job_words "$role") could not list its bundled catalog)"; fi
+        list=$(codex_bundled_models | tr '\n' ' ')
+        if [ -n "$list" ]; then say "  $list(the bundled catalog of $(codex_cli_of))"; else say "  none available offline (the Codex CLI of the stock adapter could not list its bundled catalog)"; fi
     fi
     exit 1
 }
 
 # ---------------------------------------------------------------- upgrade
-# Bring a team to the current format (4) and to the chosen backends. identity.key, the stored proof
+# Bring a team to the current format (5) and to the chosen backends. identity.key, the stored proof
 # and PROJECT.md stay byte-identical. Each agent folder is rebuilt beside itself and swapped in with
 # two renames; the next run finishes or undoes an interrupted swap, so a folder is old or new.
-# Before format 4 the workspace agent's folder is assistant/: one rename moves it to its own name
-# first, and team.conf records that name last (agent_folder=). From format 2 the two jobs also swap:
-# each agent keeps its key, proof, display name, backend, models and efforts, and gets the generated
-# files of its new job (the runtime and the subscription rules move from the workspace agent's folder
-# to the supervisor's; every replaced or removed file is kept beside itself).
+# Before format 5 the channel supervisor and the reviewer ran a restricted runtime from runtime/ in their
+# folders: the rebuilt folder holds it as runtime.bak-<time>, as 2.0.0 kept a team's wall/, and the
+# env file names the stock adapter. Before format 4 the workspace agent's folder is assistant/: one
+# rename moves it to its own name first, and team.conf records that name last (agent_folder=). From
+# format 2 the two jobs also swap: each agent keeps its key, proof, display name, backend, models and
+# efforts, and gets the generated files of its new job (the subscription rules move from the workspace
+# agent's folder to the supervisor's; every replaced or removed file is kept beside itself).
 GENERATED_COMMON='agent.conf .env.buzz-acp.local prompt.md'
-GENERATED_RUNTIME='runtime/claude-agent-acp runtime/restricted-claude runtime/buzz-tools runtime/codex-acp'
 GENERATED_RULES='subscriptions.toml'
 generated_files() { # ID: the files upgrade writes for that role
     local gen=$GENERATED_COMMON
-    if uses_partner_runtime "$1"; then gen="$gen $GENERATED_RUNTIME"; fi
     if is_channel_role "$1"; then gen="$gen $GENERATED_RULES"; fi
     printf '%s' "$gen"
 }
@@ -2959,8 +2931,20 @@ job_detail() { # ID: what the new job holds, for the upgrade plan
         if [ -n "$names" ]; then names="the owner and $names"; else names='the owner only'; fi
         printf 'the stock adapter with all its tools and worker subagents, in bypass-permissions; it answers %s' "$names"
     else
-        printf 'the restricted runtime: it reads the project folder and cannot edit or run commands; it takes a turn on every ordinary message in its channel'
+        printf 'the stock adapter with all its tools, in bypass-permissions; it takes a turn on every ordinary message in its channel, and what it may do is a rule in its prompt'
     fi
+}
+up_backends() { # LIST: the backends of LIST, each once, claude first
+    local bk out=''
+    for bk in claude codex; do case " $1 " in *" $bk "*) out="$out $bk" ;; esac; done
+    trim "$out"
+}
+# A saved model the stock adapter does not offer, by its retrieved list or its documented values; nothing
+# is said when there is nothing to tell by (no list, and no bundled Codex catalog).
+model_not_offered() { # BACKEND ROLE MODEL
+    [ -n "$3" ] || return 1
+    if ! usable_list "$(models_cache "$1" "$2")" && [ "$1" = codex ] && [ -z "$(codex_bundled_models)" ]; then return 1; fi
+    ! model_offered "$1" "$2" "$3"
 }
 recover_upgrade() {
     local id home p
@@ -3031,7 +3015,7 @@ env_keys() { # FILE: setting names, one line, sorted (names only)
 # HOME is where the agent's folder is now; DEST is where it will be (the workspace agent's folder moves
 # from assistant/ to its own name in format 4), and the env file's paths point there.
 build_agent_files() { # ID HOME STAGE BACKEND MODEL_CLAUDE MODEL_CODEX [DEST]: every generated file, into STAGE
-    local id=$1 home=$2 st=$3 b=$4 dest=${7:-$2} name pubkey about created upgraded file fmt
+    local id=$1 home=$2 st=$3 b=$4 dest=${7:-$2} name pubkey about created upgraded fmt
     name=$(agent_field "$id" name)
     pubkey=$(lower "$(agent_field "$id" pubkey)")
     about=$(conf_get "$home/agent.conf" about) || about=''
@@ -3046,14 +3030,6 @@ build_agent_files() { # ID HOME STAGE BACKEND MODEL_CLAUDE MODEL_CODEX [DEST]: e
     P_AGENT_NAME=$name
     render_prompt "$id" "$st/prompt.md"
     chmod 600 "$st/agent.conf" "$st/$ENV_NAME" "$st/prompt.md"
-    if uses_partner_runtime "$id"; then
-        mkdir -p -- "$st/runtime"
-        chmod 700 "$st/runtime"
-        for file in $RUNTIME_FILES; do
-            cp -- "$(skill_dir)/runtime/$file" "$st/runtime/$file"
-            chmod 700 "$st/runtime/$file"
-        done
-    fi
     if is_channel_role "$id"; then
         write_rules "$st/subscriptions.toml" "$pubkey"
         chmod 600 "$st/subscriptions.toml"
@@ -3062,7 +3038,7 @@ build_agent_files() { # ID HOME STAGE BACKEND MODEL_CLAUDE MODEL_CODEX [DEST]: e
 cmd_upgrade() {
     local dry=no b_all='' b_a='' b_s='' b_r='' model_set=no opt_model='' team='' id home fmt old_b new_b st m old_m
     local gen rel f changed added removed any=no stamp prev ws peers dropped k old_keys new_keys tmp list keep pass m_a='' m_s='' m_r='' mc mx e old_e ec ex e_all='' e_a='' e_s='' e_r=''
-    local v ws_claude=no dest moving w_m='' w_e='' wm we wmc wmx wec wex old_wm old_we eo br_opt='' ws_b='' bb
+    local v dest moving w_m='' w_e='' wm we wmc wmx wec wex old_wm old_we eo br_opt='' up_b='' bb rt_aside
     while [ "$#" -gt 0 ]; do
         case $1 in
             --dry-run) dry=yes ;;
@@ -3096,9 +3072,6 @@ cmd_upgrade() {
     [ -n "$(team_agents)" ] || die "workspace \"$team\" has no agent folders to upgrade"
     if [ -n "$w_m$w_e" ] && [ ! -f "$(ahome agent)/agent.conf" ]; then
         die "upgrade: --worker-model and --worker-effort are for the workspace agent's workers, and workspace \"$team\" has no workspace agent; nothing was changed"
-    fi
-    if [ -n "$br_opt" ] && [ ! -f "$(ahome agent)/agent.conf" ]; then
-        die "upgrade: $br_opt is for the workspace agent's browser, and workspace \"$team\" has no workspace agent; nothing was changed"
     fi
     C_NAME=$T_NAME C_WS_PATH=$T_WORKSPACE C_CHANNEL=$T_CHANNEL C_COMMUNITY=$T_COMMUNITY C_OWNER=$T_OWNER
     C_EXT_AGENT=$T_EXT_AGENT C_EXT_SUPERVISOR=$T_EXT_SUPERVISOR
@@ -3152,8 +3125,8 @@ cmd_upgrade() {
             old_b=$(agent_backend "$id")
             case $id in agent) new_b=${b_a:-${b_all:-$old_b}} ;; reviewer) new_b=${b_r:-${b_all:-$old_b}} ;; *) new_b=${b_s:-${b_all:-$old_b}} ;; esac
             check_backend "$new_b"
-            if on_stock_claude "$id" "$new_b"; then ws_claude=yes; fi
-            if is_workspace_role "$id"; then ws_b=$new_b; fi
+            # The backends the team's agents run on from now on: the settings and the browser of each.
+            case " $up_b " in *" $new_b "*) ;; *) up_b="$up_b $new_b" ;; esac
             # One model per backend: the chosen one for the new backend, else the saved one; the
             # other backend's saved model stays. A format-1 agent's single model is not carried.
             old_m='' mc='' mx=''
@@ -3229,14 +3202,9 @@ cmd_upgrade() {
                 if [ ! -e "$home/$rel" ]; then added="$added $rel"
                 elif ! cmp -s "$st/$rel" "$home/$rel"; then changed="$changed $rel"; fi
             done
-            if [ -d "$home/runtime" ]; then
-                for f in "$home/runtime"/*; do
-                    [ -f "$f" ] || continue
-                    rel=runtime/${f##*/}
-                    case $rel in *.bak-*) continue ;; esac
-                    case " $gen " in *" $rel "*) ;; *) removed="$removed $rel" ;; esac
-                done
-            fi
+            # The restricted runtime of a team before format 5 is moved aside, whole, in the rebuilt folder.
+            rt_aside=no
+            if [ -d "$home/runtime" ] && [ ! -L "$home/runtime" ]; then rt_aside=yes; fi
             if ! is_channel_role "$id" && [ -f "$home/subscriptions.toml" ]; then removed="$removed $GENERATED_RULES"; fi
             if [ "$pass" = plan ]; then
                 old_keys=$(env_keys "$home/$ENV_NAME")
@@ -3245,7 +3213,7 @@ cmd_upgrade() {
                 for k in $old_keys; do case " $new_keys " in *" $k "*) ;; *) dropped="$dropped $k" ;; esac; done
                 say "  $(adir "$id") ($(agent_field "$id" name)): format $fmt -> $FORMAT; backend $old_b -> $new_b"
                 rm -rf -- "$st"
-                if [ -z "$changed$added$removed" ] && [ "$moving" = no ]; then say '    up to date; nothing to change'; continue; fi
+                if [ -z "$changed$added$removed" ] && [ "$moving" = no ] && [ "$rt_aside" = no ]; then say '    up to date; nothing to change'; continue; fi
                 if [ "$moving" = yes ]; then
                     say "    folder: $T_AGENT_DIR/ becomes $T_AGENT_TARGET/; its start command from now on: $dest/start.sh"
                 fi
@@ -3255,6 +3223,14 @@ cmd_upgrade() {
                     if [ "$old_m" = "$m" ]; then
                         say "    keeps its saved model on $new_b: ${m:-runtime default}${e:+, reasoning effort $e}. It was chosen for the earlier job; to choose another: --$id-model ID"
                     fi
+                fi
+                # From format 4: the channel supervisor and the reviewer leave the restricted runtime.
+                if [ "$fmt" != "$FORMAT" ] && ! is_workspace_role "$id"; then
+                    say "    tools: from now on every tool of the stock adapter, in bypass-permissions, as the workspace agent has: it can edit files, run commands and use your connected services. What it may do is a rule in its prompt, which nothing enforces"
+                fi
+                if [ "$rt_aside" = yes ]; then say "    runtime/: move aside (kept as runtime.bak-$stamp); the stock adapter, $(backend_command "$new_b"), takes its place"; fi
+                if [ "$fmt" != "$FORMAT" ] && model_not_offered "$new_b" "$id" "$m"; then
+                    say "    model ($new_b): $m is not one the stock adapter offers for $(job_words "$id"); it is kept, and a start uses it as saved. To choose another: --$id-model ID ($PROG models --backend $new_b --role $id lists them)"
                 fi
                 any=yes
                 [ -z "$changed" ] || say "    replace (each kept as <file>.bak-$stamp):$changed"
@@ -3268,14 +3244,22 @@ cmd_upgrade() {
                 if [ "$old_we" != "$we" ]; then say "    reasoning effort of its workers ($new_b): ${old_we:-none set here} -> ${we:-none set here}"; fi
                 continue
             fi
-            if [ -z "$changed$added$removed" ]; then rm -rf -- "$st"; continue; fi
+            if [ -z "$changed$added$removed" ] && [ "$rt_aside" = no ]; then rm -rf -- "$st"; continue; fi
             # Everything not generated is carried over; every replaced or removed file is kept beside itself.
             cp -p -- "$home/identity.key" "$st/identity.key"
             list=$st/.upgrade-list
             (cd -- "$home" && find . -type f) > "$list"
+            if [ "$rt_aside" = yes ]; then mkdir -m 700 -- "$st/runtime.bak-$stamp"; fi
             while IFS= read -r rel; do
                 rel=${rel#./}
                 case $rel in identity.key | .upgrade-complete | .upgrade-list) continue ;; esac
+                # The restricted runtime, whole, as runtime.bak-<time>.
+                case $rel in
+                    runtime/*)
+                        mkdir -p -- "$(dirname -- "$st/runtime.bak-$stamp/${rel#runtime/}")"
+                        cp -p -- "$home/$rel" "$st/runtime.bak-$stamp/${rel#runtime/}"
+                        continue ;;
+                esac
                 mkdir -p -- "$(dirname -- "$st/$rel")"
                 case " $changed $removed " in
                     *" $rel "*) cp -p -- "$home/$rel" "$st/$rel.bak-$stamp"; chmod 600 "$st/$rel.bak-$stamp"; continue ;;
@@ -3329,27 +3313,33 @@ cmd_upgrade() {
             done
             # A team made before 2.0.0 holds the wall programs; the settings in the project folder replace them.
             if [ -e "$T_DIR/wall" ]; then any=yes; say "  wall/: remove (kept as wall.bak-$stamp); the settings in the project folder replace it"; fi
-            if [ "$ws_claude" = yes ]; then
+            # The settings of each backend the agents run on: the sandbox settings on Claude, the buzz rule
+            # on Codex.
+            for bb in $(up_backends "$up_b"); do
+                if [ "$bb" = codex ]; then rel=.codex/rules/buzz.rules k='the buzz rule of the agents on Codex'
+                else rel=.claude/settings.json k='the sandbox settings of the agents on Claude'; fi
                 v=0
-                f=$(workspace_settings check "$C_WS_PATH") || v=$?
+                f=$(workspace_settings check "$bb" "$C_WS_PATH") || v=$?
                 case $v in
                     0) ;;
-                    3) any=yes; say "  $C_WS_PATH/.claude/settings.json: add (the workspace agent's sandbox settings)" ;;
-                    4) any=yes; say "  $C_WS_PATH/.claude/settings.json: complete (${f#*json }; the earlier file is kept beside it)" ;;
-                    5) say "  $C_WS_PATH/.claude/settings.json: not checked ($f)" ;;
+                    3) any=yes; say "  $C_WS_PATH/$rel: add ($k)" ;;
+                    4) any=yes; say "  $C_WS_PATH/$rel: complete (lacks ${f#* lacks }; the earlier file is kept beside it)" ;;
+                    5) say "  $C_WS_PATH/$rel: not checked ($f)" ;;
                     *) die "the settings file in the project folder cannot be used: $f" ;;
                 esac
-            fi
-            # The workspace agent's browser, only when asked for: --browser names it in the file of its
-            # backend; --no-browser takes it out of both files.
+            done
+            # The browser, only when asked for: --browser names it in the file of each backend the agents
+            # run on; --no-browser takes it out of both files.
             if [ "$br_opt" = --browser ]; then
-                v=0
-                f=$(workspace_browser check "$ws_b" "$C_WS_PATH") || v=$?
-                case $v in
-                    0) ;;
-                    3) any=yes; say "  $(browser_file "$ws_b" "$C_WS_PATH"): name the Playwright server (the workspace agent's browser on $ws_b)" ;;
-                    *) die "the workspace agent's browser cannot be named in the project folder: $f; nothing was changed" ;;
-                esac
+                for bb in $(up_backends "$up_b"); do
+                    v=0
+                    f=$(workspace_browser check "$bb" "$C_WS_PATH") || v=$?
+                    case $v in
+                        0) ;;
+                        3) any=yes; say "  $(browser_file "$bb" "$C_WS_PATH"): name the Playwright server (the browser of the agents on $bb)" ;;
+                        *) die "the browser cannot be named in the project folder: $f; nothing was changed" ;;
+                    esac
+                done
             elif [ "$br_opt" = --no-browser ]; then
                 for bb in claude codex; do
                     v=0
@@ -3361,7 +3351,7 @@ cmd_upgrade() {
                                 codex:*'with your own settings'*) say "  $(browser_file "$bb" "$C_WS_PATH"): a server playwright with your own settings, which upgrade leaves: take its table out yourself" ;;
                                 *) any=yes; say "  $(browser_file "$bb" "$C_WS_PATH"): take the Playwright server out" ;;
                             esac ;;
-                        *) die "the workspace agent's browser cannot be taken out of the project folder: $f; nothing was changed" ;;
+                        *) die "the browser cannot be taken out of the project folder: $f; nothing was changed" ;;
                     esac
                 done
             fi
@@ -3383,21 +3373,24 @@ cmd_upgrade() {
             mv -- "$T_DIR/wall" "$T_DIR/wall.bak-$stamp"
             say "  wall/: removed (kept as wall.bak-$stamp)"
         fi
-        if [ "$ws_claude" = yes ]; then
+        for bb in $(up_backends "$up_b"); do
             v=0
-            f=$(workspace_settings apply "$C_WS_PATH") || v=$?
-            [ "$v" = 0 ] || die "the workspace agent's settings could not be put into the project folder: $f. Fix that, then run $PROG upgrade $T_NAME again; the version is recorded only then."
+            f=$(workspace_settings apply "$bb" "$C_WS_PATH") || v=$?
+            [ "$v" = 0 ] || die "the settings of the agents on $bb could not be put into the project folder: $f. Fix that, then run $PROG upgrade $T_NAME again; the version is recorded only then."
             case $f in 'in place:'*) ;; *) say "  $f" ;; esac
-        fi
+        done
         if [ -n "$br_opt" ]; then
-            v=0
-            if [ "$br_opt" = --browser ]; then f=$(workspace_browser apply "$ws_b" "$C_WS_PATH") || v=$?
-            else f=$(workspace_browser remove "$C_WS_PATH") || v=$?; fi
-            case $v in
-                0) case $f in 'in place'* | 'absent:'*) ;; *) printf '%s\n' "$f" | sed 's/^/  /' ;; esac ;;
-                4) printf '%s\n' "$f" | sed 's/^/  /' ;;   # an entry the user wrote is left, as the plan said
-                *) die "the workspace agent's browser could not be switched in the project folder: $f. Fix that, then run $PROG upgrade $T_NAME $br_opt again; the version is recorded only then." ;;
-            esac
+            if [ "$br_opt" = --browser ]; then bb=$(up_backends "$up_b"); else bb=remove; fi
+            for k in $bb; do
+                v=0
+                if [ "$k" = remove ]; then f=$(workspace_browser remove "$C_WS_PATH") || v=$?
+                else f=$(workspace_browser apply "$k" "$C_WS_PATH") || v=$?; fi
+                case $v in
+                    0) case $f in 'in place'* | 'absent:'*) ;; *) printf '%s\n' "$f" | sed 's/^/  /' ;; esac ;;
+                    4) printf '%s\n' "$f" | sed 's/^/  /' ;;   # an entry the user wrote is left, as the plan said
+                    *) die "the browser could not be switched in the project folder: $f. Fix that, then run $PROG upgrade $T_NAME $br_opt again; the version is recorded only then." ;;
+                esac
+            done
         fi
     fi
     if [ "$dry" = no ] && [ "$any" = yes ] && team_conf_behind; then
