@@ -21,6 +21,9 @@ START_TEMPLATE=$SKILL_DIR/templates/agent-start.sh
 RESTART_TEMPLATE=$SKILL_DIR/templates/agent-restart.sh
 : "${AGENT_TEAM_TEST_DIR:?set AGENT_TEAM_TEST_DIR to an absolute scratch folder}"
 : "${AGENT_TEAM_KEYGEN:?set AGENT_TEAM_KEYGEN to the buzz-admin binary (it runs generate-key only)}"
+# The real launcher, for the checks that run it with --check: the one the skill brings (since 5.4.0),
+# unless AGENT_TEAM_REAL_LAUNCHER names another.
+: "${AGENT_TEAM_REAL_LAUNCHER:=$SKILL_DIR/scripts/run-buzz-acp.sh}"
 case $AGENT_TEAM_TEST_DIR in /*) ;; *) echo 'AGENT_TEAM_TEST_DIR must be absolute' >&2; exit 2 ;; esac
 KEYGEN=$AGENT_TEAM_KEYGEN
 
@@ -255,6 +258,7 @@ check 'team.sh is in the team folder' test -f "$T/team.sh"
 check 'it is the template, byte for byte' cmp -s "$TEMPLATE" "$T/team.sh"
 check 'its mode is 700' test "$(mode_of "$T/team.sh")" = 700
 check 'create names it' has "$OUT/create.out" "Team command: $T/team.sh"
+check 'create ends by saying that the launcher on PATH is not the one this skill brings' test "$(tail -n 1 "$OUT/create.out")" = "Launcher: $BIN/run-buzz-acp.sh is not the launcher this skill brings. agent-team.sh launcher updates it and keeps the earlier file beside it."
 check 'the next steps start with it' has "$OUT/create.out" "$T/team.sh check, then $T/team.sh"
 hasnt "$TEMPLATE" 'skills/' && hasnt "$TEMPLATE" '.cc-switch' && hasnt "$TEMPLATE" 'CLAUDE_SKILL_DIR'
 check 'the command names no skill folder' test $? = 0
@@ -685,7 +689,7 @@ mv "$TD/ws/shop-gone" "$TD/ws/shop"
 RUN_CWD=$TD/ws/moved-shop
 
 scenario 'the real launcher takes the paths of the folder the team is in now'
-REAL=${AGENT_TEAM_REAL_LAUNCHER:-}
+REAL=${AGENT_TEAM_REAL_LAUNCHER:-}   # the skill's own launcher unless another is named (set at the top)
 if [ -z "$REAL" ]; then
     printf '  skip  set AGENT_TEAM_REAL_LAUNCHER=/path/to/run-buzz-acp.sh (it runs with --check only)\n'
 else
@@ -1824,9 +1828,11 @@ check 'the plan names the missing command' has "$OUT/up-dry.out" 'team.sh: add'
 check 'a dry run adds nothing' test ! -e "$T/team.sh"
 run_skill up -- upgrade shop
 check 'upgrade adds it' has "$OUT/up.out" 'team.sh: added'
+check 'upgrade ends with the same line about the launcher' test "$(tail -n 1 "$OUT/up.out")" = "Launcher: $BIN/run-buzz-acp.sh is not the launcher this skill brings. agent-team.sh launcher updates it and keeps the earlier file beside it."
 check 'as the template, mode 700' test "$(mode_of "$T/team.sh")" = 700 -a "$(cmp -s "$TEMPLATE" "$T/team.sh"; echo $?)" = 0
 run_skill up2 -- upgrade shop
 check 'a second upgrade changes nothing' has "$OUT/up2.out" 'up to date; nothing was changed'
+check 'and it says the same about the launcher' test "$(tail -n 1 "$OUT/up2.out")" = "Launcher: $BIN/run-buzz-acp.sh is not the launcher this skill brings. agent-team.sh launcher updates it and keeps the earlier file beside it."
 printf '\n# edited by hand\n' >> "$T/team.sh"
 run_skill up3 -- upgrade shop
 check 'an edited command is replaced' has "$OUT/up3.out" 'team.sh: replaced'

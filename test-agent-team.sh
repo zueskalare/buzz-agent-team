@@ -3,7 +3,7 @@
 # (buzz-agent-team/scripts/agent-team.sh), its SKILL.md and the installer (install.sh). Bash 3.2+.
 #
 #   AGENT_TEAM_TEST_DIR=/abs/scratch/dir AGENT_TEAM_KEYGEN=/path/to/buzz-admin \
-#   [AGENT_TEAM_REAL_LAUNCHER=/path/to/run-buzz-acp.sh] [AGENT_TEAM_REAL_BUZZ=/path/to/buzz] \
+#   [AGENT_TEAM_REAL_LAUNCHER=/another/run-buzz-acp.sh] [AGENT_TEAM_REAL_BUZZ=/path/to/buzz] \
 #     /bin/bash test-agent-team.sh
 #
 # Everything is written under AGENT_TEAM_TEST_DIR (its "run" folder is replaced on each run).
@@ -24,7 +24,7 @@ INSTALLER=$HERE/install.sh
 : "${AGENT_TEAM_TEST_DIR:?set AGENT_TEAM_TEST_DIR to an absolute scratch folder}"
 : "${AGENT_TEAM_KEYGEN:?set AGENT_TEAM_KEYGEN to the buzz-admin binary (it runs generate-key only)}"
 case $AGENT_TEAM_TEST_DIR in /*) ;; *) echo 'AGENT_TEAM_TEST_DIR must be absolute' >&2; exit 2 ;; esac
-REAL_LAUNCHER=${AGENT_TEAM_REAL_LAUNCHER:-}
+REAL_LAUNCHER=${AGENT_TEAM_REAL_LAUNCHER:-$SKILL_DIR/scripts/run-buzz-acp.sh}   # the skill's own, since 5.4.0
 REAL_BUZZ=${AGENT_TEAM_REAL_BUZZ:-}
 KEYGEN=$AGENT_TEAM_KEYGEN
 
@@ -1385,6 +1385,7 @@ run_tool status-shop -- status shop
 check 'status exits 0' rc_is 0
 check 'status shows both running PIDs and the backend each runs on' eval 'has "$OUT/status-shop.out" "running on claude, PID $PA" && has "$OUT/status-shop.out" "running on claude, PID $PS"'
 check 'status shows proofs stored' eval '[ "$(grep -c "proof stored" "$OUT/status-shop.out")" = 2 ]'
+check 'status says when the launcher start would use is not the one this skill brings' has "$OUT/status-shop.out" "Launcher for start: $BIN/standin-launcher.sh (not the one this skill brings: agent-team.sh launcher updates it)"
 check 'status names the launcher start would use' has "$OUT/status-shop.out" "Launcher for start: $BIN/standin-launcher.sh"
 check 'status names each job and whom each agent answers' eval 'has "$OUT/status-shop.out" "shop: Shop, the workspace agent" && has "$OUT/status-shop.out" "supervisor: Shop Supervisor, the channel supervisor" && has "$OUT/status-shop.out" "answers the owner and Shop Supervisor of workspace shop" && has "$OUT/status-shop.out" "answers anyone in the channels it is a member of"'
 run_tool status-all -- status
@@ -1540,7 +1541,7 @@ pre() { # NAME [VAR=value ...]: preflight with a controlled PATH and no tool var
 pre pre-empty
 check 'nothing set: exit 1' rc_is 1
 check 'missing key generator: a MISSING line and a fix line' eval 'grep -q "MISSING  key generator" "$OUT/pre-empty.out" && grep -q "fix: agent-team.sh settings --keygen" "$OUT/pre-empty.out"'
-check 'missing launcher: a MISSING line and a fix line' eval 'grep -q "MISSING  launcher" "$OUT/pre-empty.out" && grep -q "fix: agent-team.sh settings --launcher" "$OUT/pre-empty.out"'
+check 'missing launcher: a MISSING line and a fix line' eval 'grep -q "MISSING  launcher" "$OUT/pre-empty.out" && grep -q "fix: agent-team.sh launcher" "$OUT/pre-empty.out"'
 check 'one fix line per missing item' eval '[ "$(grep -cE "^  (MISSING|PROBLEM) " "$OUT/pre-empty.out")" = "$(grep -c "fix: " "$OUT/pre-empty.out")" ]'
 check 'unset defaults are listed with how to set them' eval 'grep -q "to set: agent-team.sh settings --community" "$OUT/pre-empty.out" && grep -q "to set: agent-team.sh settings --owner" "$OUT/pre-empty.out"'
 check 'preflight created nothing' eval '[ ! -e "$RP" ]'
@@ -1553,8 +1554,8 @@ check 'it prints the launcher path' has "$OUT/pre-ok.out" "Launcher: $BIN/standi
 check 'python3 absent is only a warning' has "$OUT/pre-ok.out" 'warning  python3'
 check 'preflight changed nothing under the root' eval '[ "$(cd "$RP" && find . -print | LC_ALL=C sort; sha "$RP/settings.conf")" = "$SNAP_RP" ]'
 pre pre-nobuzzacp PATH="$TD/nowhere:/usr/bin:/bin"
-check 'buzz, buzz-acp and claude-agent-acp missing from PATH: exit 1 with fix lines (the adapter once per role)' \
-    eval 'rc_is 1 && grep -q "MISSING  buzz-acp" "$OUT/pre-nobuzzacp.out" && grep -q "MISSING  buzz " "$OUT/pre-nobuzzacp.out" && [ "$(grep -c "MISSING  claude-agent-acp" "$OUT/pre-nobuzzacp.out")" = 2 ] && [ "$(grep -c "fix: " "$OUT/pre-nobuzzacp.out")" = 4 ]'
+check 'buzz, buzz-acp and claude-agent-acp missing from PATH: exit 1 with fix lines (the adapter once per role; one more is the note that the launcher is not the skill'"'"'s)' \
+    eval 'rc_is 1 && grep -q "MISSING  buzz-acp" "$OUT/pre-nobuzzacp.out" && grep -q "MISSING  buzz " "$OUT/pre-nobuzzacp.out" && [ "$(grep -c "MISSING  claude-agent-acp" "$OUT/pre-nobuzzacp.out")" = 2 ] && [ "$(grep -c "fix: " "$OUT/pre-nobuzzacp.out")" = 5 ] && [ "$(grep -c "fix: agent-team.sh launcher" "$OUT/pre-nobuzzacp.out")" = 1 ]'
 chmod 644 "$RP/settings.conf"
 pre pre-mode
 check 'settings.conf with mode 644: exit 1 and the chmod fix' eval 'rc_is 1 && grep -q "PROBLEM  settings file" "$OUT/pre-mode.out" && grep -q "fix: chmod 600" "$OUT/pre-mode.out"'
@@ -1713,6 +1714,50 @@ check 'uninstalling again: not installed, exit 0' eval 'rc_is 0 && [ "$(grep -c 
 check 'no installer run created anything under any ~/.buzz-agents' eval '[ -z "$(ls -d "$TD"/home*/.buzz-agents 2>/dev/null)" ]'
 check 'no installer run printed a shell error' eval '! grep -lE "command not found|unbound variable|syntax error|No such file or directory" "$OUT"/inst-*.out >/dev/null'
 check 'uninstall names each tool' eval 'grep -q "^Claude Code: " "$OUT/inst-un.out" && grep -q "^Codex: " "$OUT/inst-un.out"'
+
+scenario 'the launcher this skill brings: put on PATH, replaced, compared (5.4.0)'
+# A home folder, a PATH and a root of this scenario's own, so that the machine's own run-buzz-acp.sh is
+# never found or written, and no setting of the test names a launcher.
+LH=$TD/launcher-home LP=$TD/launcher-path LROOT=$TD/launcher-root
+mkdir -p "$LH" "$LP"
+SKILL_LAUNCHER=$SKILL_DIR/scripts/run-buzz-acp.sh
+lrun() { # NAME PATH_PREFIX ARGS...: agent-team.sh with only that prefix and the system's tools on PATH
+    local name=$1 pre=$2
+    shift 2
+    RC=0
+    env -u AGENT_TEAM_LAUNCHER HOME="$LH" AGENT_TEAM_ROOT="$LROOT" PATH="${pre:+$pre:}/usr/bin:/bin:/usr/sbin:/sbin" /bin/bash "$SCRIPT" "$@" > "$OUT/$name.out" 2>&1 < /dev/null || RC=$?
+}
+check 'the skill folder holds the launcher, and it can be run' eval '[ -f "$SKILL_LAUNCHER" ] && [ -x "$SKILL_LAUNCHER" ] && [ "$(sed -n 1p "$SKILL_LAUNCHER")" = "#!/usr/bin/env bash" ]'
+lrun l-dry '' launcher --dry-run
+check 'with none on PATH, the dry run names ~/.local/bin and writes nothing' eval 'rc_is 0 && has "$OUT/l-dry.out" "Would install it as $LH/.local/bin/run-buzz-acp.sh (mode 700)." && [ ! -e "$LH/.local" ]'
+lrun l-new '' launcher
+check 'it installs it there: the skill'"'"'s file byte for byte, mode 700' eval 'rc_is 0 && cmp -s "$SKILL_LAUNCHER" "$LH/.local/bin/run-buzz-acp.sh" && [ "$(mode_of "$LH/.local/bin/run-buzz-acp.sh")" = 700 ]'
+check 'and says that the folder is not on PATH, with the line to add' has "$OUT/l-new.out" "note: $LH/.local/bin is not on PATH, so a team's own command does not find the launcher. Add it in your shell profile: export PATH=\"$LH/.local/bin:\$PATH\""
+lrun l-same "$LH/.local/bin" launcher
+check 'the same file is left as it is: nothing changed, no copy kept, no note' eval 'rc_is 0 && has "$OUT/l-same.out" "is the same file, byte for byte; nothing was changed." && [ "$(ls "$LH/.local/bin" | wc -l | tr -d " ")" = 1 ] && hasnt "$OUT/l-same.out" "note:"'
+printf '#!/bin/sh\necho an earlier launcher\n' > "$LP/run-buzz-acp.sh"; chmod 755 "$LP/run-buzz-acp.sh"
+OLD_SHA=$(sha "$LP/run-buzz-acp.sh")
+lrun l-diff-dry "$LP" launcher --dry-run
+check 'another file on PATH: the dry run says it would replace it and keep it, and changes nothing' eval 'rc_is 0 && has "$OUT/l-diff-dry.out" "Would replace $LP/run-buzz-acp.sh, which differs, and keep it as $LP/run-buzz-acp.sh.bak-" && [ "$(sha "$LP/run-buzz-acp.sh")" = "$OLD_SHA" ] && [ "$(ls "$LP" | wc -l | tr -d " ")" = 1 ]'
+lrun l-diff "$LP" launcher
+check 'it replaces the one PATH finds, where it is, mode 700' eval 'rc_is 0 && cmp -s "$SKILL_LAUNCHER" "$LP/run-buzz-acp.sh" && [ "$(mode_of "$LP/run-buzz-acp.sh")" = 700 ] && has "$OUT/l-diff.out" "Replaced: $LP/run-buzz-acp.sh (mode 700)."'
+check 'and keeps the earlier file beside it, unchanged' eval '[ "$(ls "$LP" | grep -c "^run-buzz-acp.sh.bak-[0-9]\{8\}T[0-9]\{6\}Z$")" = 1 ] && [ "$(sha "$LP"/run-buzz-acp.sh.bak-*)" = "$OLD_SHA" ]'
+mkdir -p "$TD/launcher-link"; ln -s "$LP/run-buzz-acp.sh" "$TD/launcher-link/run-buzz-acp.sh"
+lrun l-link "$TD/launcher-link" launcher
+check 'a symbolic link on PATH is refused and left as it is' eval 'rc_is 1 && has "$OUT/l-link.out" "is a symbolic link; it was left as it is" && [ -L "$TD/launcher-link/run-buzz-acp.sh" ]'
+lrun l-dir '' launcher --dir "$TD/launcher-other"
+check '--dir names another folder' eval 'rc_is 0 && cmp -s "$SKILL_LAUNCHER" "$TD/launcher-other/run-buzz-acp.sh"'
+lrun l-bad '' launcher --force
+check 'an unknown argument is refused' eval 'rc_is 1 && has "$OUT/l-bad.out" "launcher: unknown argument: --force"'
+# What preflight says about the launcher a start would use: the skill's, another one, none.
+lrun l-pre-same "$LP:$BIN" preflight
+check 'preflight: the skill'"'"'s launcher on PATH is named as such, with no note' eval 'grep -Eq "^  ok +launcher +$LP/run-buzz-acp.sh \(the one this skill brings\)$" "$OUT/l-pre-same.out" && ! grep -Eq "^  note +launcher" "$OUT/l-pre-same.out"'
+printf '\n# edited by hand\n' >> "$LP/run-buzz-acp.sh"
+lrun l-pre-diff "$LP:$BIN" preflight
+check 'preflight: another launcher is a note with the command as its fix, and not a problem' eval 'grep -Eq "^  note +launcher +it is not the launcher this skill brings" "$OUT/l-pre-diff.out" && has "$OUT/l-pre-diff.out" "fix: agent-team.sh launcher" && ! grep -Eq "^  (MISSING|PROBLEM) +launcher" "$OUT/l-pre-diff.out"'
+lrun l-pre-none "$BIN" preflight
+check 'preflight: no launcher is MISSING, and the fix is the command' eval 'grep -Eq "^  MISSING +launcher +run-buzz-acp.sh not found" "$OUT/l-pre-none.out" && has "$OUT/l-pre-none.out" "fix: agent-team.sh launcher"'
+check 'the machine'"'"'s own home folder and PATH were not written: every file of this scenario is in the test folder' eval '[ -f "$LH/.local/bin/run-buzz-acp.sh" ] && [ "$HOME" = "$TD/home" ] && [ ! -e "$HOME/.local/bin/run-buzz-acp.sh" ]'
 
 scenario 'SKILL.md: both tools, guided flow, only real commands and options (D4)'
 SK=$SKILL_DIR/SKILL.md

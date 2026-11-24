@@ -83,7 +83,7 @@ if [ "$mode" = install ]; then
     [ -f "$SRC/templates/team.sh" ] || die "missing $SRC/templates/team.sh"
     [ -f "$SRC/templates/agent-start.sh" ] || die "missing $SRC/templates/agent-start.sh"
     [ -f "$SRC/templates/agent-restart.sh" ] || die "missing $SRC/templates/agent-restart.sh"
-    for t in workspace-settings.py workspace-browser.py acp-models.py; do
+    for t in workspace-settings.py workspace-browser.py acp-models.py run-buzz-acp.sh; do
         [ -f "$SRC/scripts/$t" ] || die "missing $SRC/scripts/$t"
     done
 fi
@@ -139,7 +139,7 @@ install_one() { # TOOL SKILLS_DIR
     mkdir -p -- "$dir" || { say "  failed: cannot create $dir"; return 1; }
     STAGE=$(mktemp -d "$dir/.$NAME.new.XXXXXX") || { say "  failed: cannot write in $dir"; return 1; }
     cp -R "$SRC/." "$STAGE/" || { say "  failed: copying the skill folder"; return 1; }
-    chmod 755 "$STAGE" "$STAGE/scripts" "$STAGE/scripts/agent-team.sh"
+    chmod 755 "$STAGE" "$STAGE/scripts" "$STAGE/scripts/agent-team.sh" "$STAGE/scripts/run-buzz-acp.sh"
     { printf 'installer=%s\nformat=1\nversion=%s\nsource=%s\ninstalled=%s\n' "$NAME" "$VERSION" "$SRC" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"; manifest "$SRC"; } > "$STAGE/$MARKER"
     [ "$(manifest "$STAGE")" = "$(manifest "$SRC")" ] && [ -x "$STAGE/scripts/agent-team.sh" ] ||
         { say "  failed: the copy does not match the source; nothing was changed"; return 1; }

@@ -6,6 +6,7 @@ One skill, for Claude Code and for Codex, that sets up a set of Buzz agents for 
   - `VERSION`: the skill's version, one line (see [Versions](#versions)).
   - `SKILL.md`: the guided flow, for both tools.
   - `scripts/agent-team.sh`: the script that does every step (Bash 3.2 or later, mode 755). `agent-team.sh help` lists every command and option.
+  - `scripts/run-buzz-acp.sh`: the launcher, the program that starts one agent (since 5.4.0 part of the skill, because it changes together with it). `agent-team.sh launcher` puts it on `PATH` (see [The launcher](#the-launcher)).
   - `scripts/workspace-settings.py`: puts the settings of each backend into the project folder, and checks them: the sandbox settings of an agent on Claude, the buzz rule of an agent on Codex (see What holds each agent). `create` and `upgrade` also copy it into each team folder, where `team.sh` runs it before a start.
   - `scripts/workspace-browser.py`: names the browser, the Playwright tool server, in the project folder, checks it and takes it out (see [The browser of the project folder](#the-browser-of-the-project-folder)). `create` and `upgrade` also copy it into each team folder, where `team.sh` runs it before a start.
   - `scripts/acp-models.py`: lists the models an ACP adapter offers, without a model turn (used by `agent-team.sh models`; `create` and `upgrade` also copy it into each team folder, where `team.sh` runs it before a model menu).
@@ -42,13 +43,20 @@ diff -rq "$src" "$dst" && echo "up to date"
 "$dst/scripts/agent-team.sh" version                    # the installed version
 ```
 
-The launcher on `PATH` is updated the same way, keeping the old one beside it:
+### The launcher
+
+`run-buzz-acp.sh`, the program that starts one agent, is part of the skill since 5.4.0: `scripts/run-buzz-acp.sh`. It changes together with the skill, so the skill brings the copy that fits it. Agents are started with the launcher on `PATH`, where each team's own command looks for it. One command puts the skill's copy there:
 
 ```sh
-cp -p ~/.local/bin/run-buzz-acp.sh ~/.local/bin/run-buzz-acp.sh.bak-$(date -u +%Y%m%dT%H%M%SZ)
-install -m 700 /path/to/buzz/local/buzz-acp/run-buzz-acp.sh ~/.local/bin/run-buzz-acp.sh
-cmp /path/to/buzz/local/buzz-acp/run-buzz-acp.sh ~/.local/bin/run-buzz-acp.sh && echo "launcher up to date"
+"$dst/scripts/agent-team.sh" launcher --dry-run          # what it would write
+"$dst/scripts/agent-team.sh" launcher                    # install it, or replace the one PATH finds
 ```
+
+- **Where:** it replaces the `run-buzz-acp.sh` that `PATH` finds now. When there is none, it installs it into `~/.local/bin` and says so if that folder is not on `PATH`. `--dir DIR` names another folder.
+- **The earlier file is kept** beside the new one as `run-buzz-acp.sh.bak-<UTC time>`. The same file is left as it is. A symbolic link is refused.
+- **Agents that already run are not affected.** The launcher has become the harness by then; they get the new one at their next start.
+- **It is the only command that writes there.** `preflight`, `status`, `create` and `upgrade` only say when the launcher a start would use is not the skill's: `preflight` as a `note` line with the command as its fix, the others as one line that starts `Launcher:`.
+- **A launcher named in the settings** (`agent-team.sh settings --launcher <path>`, or `AGENT_TEAM_LAUNCHER`) still wins for this skill's own `start`. A team's own command uses the one on `PATH`.
 
 ## Versions
 
@@ -399,7 +407,6 @@ Needed on `PATH`: `buzz`, `buzz-acp`, and `claude-agent-acp` or `codex-acp`; Pyt
 ```sh
 AGENT_TEAM_TEST_DIR=/tmp/agent-team-test \
 AGENT_TEAM_KEYGEN=/path/to/buzz/target/debug/buzz-admin \
-AGENT_TEAM_REAL_LAUNCHER=/path/to/buzz/local/buzz-acp/run-buzz-acp.sh \
 AGENT_TEAM_REAL_BUZZ=/path/to/buzz/target/release/buzz \
   /bin/bash test-agent-team.sh
 ```

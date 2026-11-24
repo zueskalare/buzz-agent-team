@@ -780,6 +780,27 @@ script_dir() {
 }
 # The skill folder is the parent of scripts/; templates/ sits there.
 skill_dir() { (cd -P -- "$(script_dir)/.." && pwd); }
+# The launcher this skill brings (since 5.4.0): scripts/run-buzz-acp.sh, the program that starts one
+# agent. It changes together with the skill, so the skill carries the copy that fits it. Agents are
+# started with the launcher a start finds (launcher_path: AGENT_TEAM_LAUNCHER, settings.conf, then
+# run-buzz-acp.sh on PATH, where team.sh looks too), so the "launcher" command puts the skill's copy on
+# PATH, or replaces the one there and keeps the earlier file beside it. Nothing else writes there:
+# preflight, status, create and upgrade only say when the launcher a start would use is another one.
+skill_launcher() { printf '%s/run-buzz-acp.sh' "$(script_dir)"; }
+launcher_state() { # [FILE]: same | differs | missing, for FILE or the launcher a start would use
+    local d
+    if [ "$#" -ge 1 ]; then d=$1; else d=$(launcher_path); fi
+    if [ -z "$d" ] || [ ! -e "$d" ]; then printf 'missing'
+    elif cmp -s -- "$(skill_launcher)" "$d"; then printf 'same'
+    else printf 'differs'; fi
+}
+launcher_hint() { # one line, when the launcher a start would use is not the skill's
+    case $(launcher_state) in
+        missing) say "Launcher: run-buzz-acp.sh was not found. This skill brings it: $PROG launcher puts it on PATH." ;;
+        differs) say "Launcher: $(launcher_path) is not the launcher this skill brings. $PROG launcher updates it and keeps the earlier file beside it." ;;
+    esac
+    return 0
+}
 template_dir() { printf '%s' "${AGENT_TEAM_TEMPLATES:-$(skill_dir)/templates}"; }
 
 # This skill's version: the one line of VERSION in the skill folder, MAJOR.MINOR.PATCH. create
@@ -1605,6 +1626,15 @@ Usage: agent-team.sh <command> [options]
   status   [NAME]            show agents, backends, sign-in, proofs, whom each agent
            answers, the saved settings of the workspace agent's workers and running state,
            and the version of the skill that wrote each team's files
+  launcher [--dry-run] [--dir DIR]
+           Put the launcher this skill brings, scripts/run-buzz-acp.sh, where a start finds
+           it. The launcher is the program that starts one agent; it changes together with
+           the skill. Without --dir it replaces the run-buzz-acp.sh that PATH finds now, or,
+           when there is none, installs it into ~/.local/bin. A file that differs is kept
+           beside the new one as run-buzz-acp.sh.bak-<UTC time>; the same file is left as it
+           is. --dry-run says what would change. Agents that already run are not affected.
+           preflight, status, create and upgrade say when the launcher a start would use is
+           not this one; nothing but this command writes it.
   version  Print this skill's version: the one line of VERSION in the skill folder.
            create records it in a new team folder (<root>/NAME/VERSION) and upgrade
            replaces it there; "status NAME" and "<root>/NAME/team.sh version" show it.
@@ -2185,6 +2215,7 @@ EOF
     say '     asks its provider, model and reasoning effort (Enter keeps the saved one; --yes asks nothing).'
     say "     Later, $T_DIR/<agent>/restart.sh starts that agent again as its last run was, and"
     say "     $T_DIR/team.sh restart does it for every agent that runs; neither asks anything."
+    launcher_hint
 }
 
 # ---------------------------------------------------------------- proof
@@ -2302,7 +2333,7 @@ cmd_finish() {
     launcher=$(launcher_path)
     buzz=$(tool_path "${AGENT_TEAM_BUZZ:-}" buzz)
     if [ "$dry" = no ]; then
-        [ -n "$launcher" ] || die 'launcher not found. Fix: agent-team.sh settings --launcher /path/to/run-buzz-acp.sh (or put it on PATH)'
+        [ -n "$launcher" ] || die 'launcher not found. Fix: agent-team.sh launcher (puts the one this skill brings on PATH), or agent-team.sh settings --launcher /path/to/run-buzz-acp.sh'
         [ -n "$buzz" ] || die 'Buzz CLI not found: put buzz on PATH or set AGENT_TEAM_BUZZ'
     fi
     launcher=${launcher:-run-buzz-acp.sh} buzz=${buzz:-buzz}
@@ -2481,7 +2512,7 @@ cmd_start() {
         fi
     done
     launcher=$(launcher_path)
-    [ -n "$launcher" ] || die 'launcher not found. Fix: agent-team.sh settings --launcher /path/to/run-buzz-acp.sh (or put it on PATH)'
+    [ -n "$launcher" ] || die 'launcher not found. Fix: agent-team.sh launcher (puts the one this skill brings on PATH), or agent-team.sh settings --launcher /path/to/run-buzz-acp.sh'
     protocol=${CLAUDE_AGENT_ACP_PROTOCOL:-v1}
     wait_s=${AGENT_TEAM_START_WAIT:-3}
     max_bytes=${AGENT_TEAM_LOG_MAX_BYTES:-10485760}
@@ -2639,7 +2670,7 @@ cmd_stop() {
 }
 
 cmd_status() {
-    local id home size proof run d fmt b mode m e sv tv
+    local id home size proof run d fmt b mode m e sv tv lv=''
     sv=$(version_in "$(skill_dir)/VERSION") || sv='(no valid VERSION file)'
     if [ "$#" -eq 0 ]; then
         resolve_root
@@ -2660,7 +2691,11 @@ cmd_status() {
     elif [ "$tv" = "$sv" ]; then say "Team files: written by buzz-agent-team $tv, this skill's version"
     else say "Team files: written by buzz-agent-team $tv; this skill is $sv: $PROG upgrade $T_NAME --dry-run shows what it would change"; fi
     d=$(launcher_path)
-    say "Launcher for start: ${d:-not found (agent-team.sh settings --launcher /path/to/run-buzz-acp.sh)}"
+    case $(launcher_state "$d") in
+        same) lv=' (the one this skill brings)' ;;
+        differs) lv=" (not the one this skill brings: $PROG launcher updates it)" ;;
+    esac
+    say "Launcher for start: ${d:-not found ($PROG launcher puts the one this skill brings on PATH)}$lv"
     [ -z "$T_EXT_SUPERVISOR" ] || say "Channel supervisor (in another team of this channel): $T_EXT_SUPERVISOR"
     [ -z "$T_EXT_AGENT" ] || say "Workspace agent (in another team of this channel): $T_EXT_AGENT"
     fmt=$(team_format)
@@ -2946,8 +2981,13 @@ cmd_preflight() {
     if [ -n "$d" ]; then pf_line ok 'key generator' "$d"
     else pf_line MISSING 'key generator' 'buzz-admin not found' 'agent-team.sh settings --keygen /path/to/buzz-admin (in a Buzz checkout: target/debug/buzz-admin)'; fi
     d=$(launcher_path)
-    if [ -n "$d" ]; then pf_line ok 'launcher' "$d"
-    else pf_line MISSING 'launcher' 'run-buzz-acp.sh not found' 'agent-team.sh settings --launcher /path/to/run-buzz-acp.sh (in a Buzz checkout: local/buzz-acp/run-buzz-acp.sh)'; fi
+    case $(launcher_state "$d") in
+        same) pf_line ok 'launcher' "$d (the one this skill brings)" ;;
+        differs)
+            pf_line ok 'launcher' "$d"
+            pf_line note 'launcher' 'it is not the launcher this skill brings, which changes together with the skill' 'agent-team.sh launcher   (updates it and keeps the earlier file beside it)' ;;
+        *) pf_line MISSING 'launcher' 'run-buzz-acp.sh not found' 'agent-team.sh launcher   (puts the one this skill brings on PATH)' ;;
+    esac
     say "  Launcher: ${d:-not found}"
     # The launcher itself requires these on PATH, so settings cannot stand in for them.
     for n in buzz buzz-acp; do
@@ -3660,9 +3700,82 @@ cmd_upgrade() {
         install_team_file VERSION
         say "  VERSION: $SKILL_VERSION"
     fi
-    if [ "$any" = no ]; then say "Workspace \"$T_NAME\" is up to date; nothing was changed."; return; fi
+    if [ "$any" = no ]; then say "Workspace \"$T_NAME\" is up to date; nothing was changed."; launcher_hint; return; fi
     if [ "$dry" = yes ]; then say "Run it: $PROG upgrade $T_NAME$( [ -z "$b_all" ] || printf ' --backend %s' "$b_all")$( [ -z "$b_a" ] || printf ' --agent-backend %s' "$b_a")$( [ -z "$b_s" ] || printf ' --supervisor-backend %s' "$b_s")$( [ -z "$b_r" ] || printf ' --reviewer-backend %s' "$b_r")$( [ "$model_set" = no ] || printf ' --model %s' "$(shquote "$opt_model")")$( [ -z "$m_a" ] || printf ' --agent-model %s' "$(shquote "$m_a")")$( [ -z "$m_s" ] || printf ' --supervisor-model %s' "$(shquote "$m_s")")$( [ -z "$m_r" ] || printf ' --reviewer-model %s' "$(shquote "$m_r")")$( [ -z "$e_all" ] || printf ' --effort %s' "$e_all")$( [ -z "$e_a" ] || printf ' --agent-effort %s' "$e_a")$( [ -z "$e_s" ] || printf ' --supervisor-effort %s' "$e_s")$( [ -z "$e_r" ] || printf ' --reviewer-effort %s' "$e_r")$( [ -z "$w_m" ] || printf ' --worker-model %s' "$(shquote "$w_m")")$( [ -z "$w_e" ] || printf ' --worker-effort %s' "$w_e")$( [ -z "$br_opt" ] || printf ' %s' "$br_opt")$( [ "$obs_opt" != yes ] || printf ' --observer')$( [ "$obs_opt" != no ] || printf ' --no-observer')$( [ -z "$par_opt" ] || printf ' --supervisor-parallel %s' "$par_opt")"
     else say "Upgraded. Next, with the team's own command, from the project folder: cd $(shquote "$T_WORKSPACE") && $T_DIR/team.sh check, then $T_DIR/team.sh"; fi
+    launcher_hint
+}
+
+# ---------------------------------------------------------------- launcher
+# Put the launcher this skill brings where a start finds it, or say what would change (--dry-run).
+# Where: --dir DIR; else the folder of the run-buzz-acp.sh that PATH finds now; else ~/.local/bin.
+# A file that is there and differs is kept beside the new one as run-buzz-acp.sh.bak-<UTC time>. The new
+# file is written beside its place and moved into it in one step, so a start that is reading the earlier
+# file at that moment keeps reading that one. Agents that already run are not affected: the launcher
+# has long become the harness by then.
+cmd_launcher() {
+    local dry=no dir='' src cur dest state stamp tmp found other
+    while [ "$#" -gt 0 ]; do
+        case $1 in
+            --dry-run) dry=yes ;;
+            --dir) [ "$#" -ge 2 ] && [ -n "$2" ] || die '--dir needs a folder'; dir=$2; shift ;;
+            -h | --help) usage; exit 0 ;;
+            *) die "launcher: unknown argument: $1 (usage: $PROG launcher [--dry-run] [--dir DIR])" ;;
+        esac
+        shift
+    done
+    resolve_root
+    src=$(skill_launcher)
+    [ -f "$src" ] || die "this skill folder has no scripts/run-buzz-acp.sh; install the skill again"
+    cur=$(command -v -- run-buzz-acp.sh 2>/dev/null || true)
+    if [ -n "$dir" ]; then
+        case $dir in *[[:cntrl:]]*) die '--dir: the folder name contains control characters' ;; esac
+        case $dir in /*) ;; *) dir=$PWD/$dir ;; esac
+        dest=${dir%/}/run-buzz-acp.sh
+    elif [ -n "$cur" ]; then dest=$cur
+    else dest=$HOME/.local/bin/run-buzz-acp.sh; fi
+    dir=${dest%/*}
+    if [ -L "$dest" ]; then die "$dest is a symbolic link; it was left as it is. Give another folder with --dir, or replace the link yourself"; fi
+    if [ -e "$dest" ] && [ ! -f "$dest" ]; then die "$dest is not a file; nothing was changed"; fi
+    state=$(launcher_state "$dest")
+    say "The launcher this skill brings: $src (buzz-agent-team $(version_in "$(skill_dir)/VERSION" || printf '?'))"
+    case $state in
+        same)
+            say "Already there: $dest is the same file, byte for byte; nothing was changed." ;;
+        missing)
+            if [ "$dry" = yes ]; then say "Would install it as $dest (mode 700)."
+            else
+                mkdir -p -- "$dir" || die "cannot create $dir; nothing was changed"
+                tmp=$(mktemp "$dir/.run-buzz-acp.XXXXXX") || die "cannot write in $dir; nothing was changed"
+                TMP_PATHS+=("$tmp")
+                cp -- "$src" "$tmp" && chmod 700 "$tmp" && mv -f -- "$tmp" "$dest" || die "could not install $dest; nothing was changed"
+                say "Installed: $dest (mode 700)."
+            fi ;;
+        *)
+            stamp=$(date -u '+%Y%m%dT%H%M%SZ')
+            if [ "$dry" = yes ]; then say "Would replace $dest, which differs, and keep it as $dest.bak-$stamp."
+            else
+                tmp=$(mktemp "$dir/.run-buzz-acp.XXXXXX") || die "cannot write in $dir; nothing was changed"
+                TMP_PATHS+=("$tmp")
+                cp -- "$src" "$tmp" && chmod 700 "$tmp" || die "could not write the new launcher in $dir; nothing was changed"
+                cp -p -- "$dest" "$dest.bak-$stamp" || die "could not keep the earlier launcher as $dest.bak-$stamp; nothing was changed"
+                mv -f -- "$tmp" "$dest" || die "could not replace $dest; the earlier file is still there"
+                say "Replaced: $dest (mode 700). The earlier file is kept as $dest.bak-$stamp."
+            fi ;;
+    esac
+    if [ "$dry" = no ]; then cmp -s -- "$src" "$dest" || die "$dest is not the skill's launcher after all; check it"; fi
+    # What a start finds: the settings may name another launcher, and PATH may find another one first.
+    found=$(launcher_path)
+    other=$(setting launcher 2>/dev/null || true)
+    if [ -n "${AGENT_TEAM_LAUNCHER:-}$other" ] && [ "$found" != "$dest" ]; then
+        say "note: this skill's own start uses ${found:-a launcher that is not found}, named by ${AGENT_TEAM_LAUNCHER:+AGENT_TEAM_LAUNCHER}${AGENT_TEAM_LAUNCHER:-settings.conf}; a team's own command uses the one on PATH"
+    fi
+    cur=$(command -v -- run-buzz-acp.sh 2>/dev/null || true)
+    if [ "$dry" = no ] && [ "$cur" != "$dest" ]; then
+        if [ -n "$cur" ]; then say "note: PATH finds another one first, $cur; a team's own command would start agents with that one"
+        else say "note: $dir is not on PATH, so a team's own command does not find the launcher. Add it in your shell profile: export PATH=\"$dir:\$PATH\""; fi
+    fi
+    return 0
 }
 
 # ---------------------------------------------------------------- version
@@ -3688,6 +3801,7 @@ case $cmd in
     status) cmd_status "$@" ;;
     preflight) cmd_preflight "$@" ;;
     settings) cmd_settings "$@" ;;
+    launcher) cmd_launcher "$@" ;;
     version | --version | -V) cmd_version "$@" ;;
     help | -h | --help) usage ;;
     *) die "unknown command: $cmd (see agent-team.sh help)" ;;

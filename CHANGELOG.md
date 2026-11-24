@@ -2,6 +2,27 @@
 
 Versions of the buzz-agent-team skill, newest first. The version is the one line of `buzz-agent-team/VERSION`, and each one is the Git tag `v<version>` of this repository. What the three numbers mean is in the [README](README.md#versions).
 
+## 5.4.0 (2026-11-24)
+
+The launcher comes with the skill. `run-buzz-acp.sh`, the program that starts one agent, changes together with the skill, so the skill now carries the copy that fits it and one command puts it on `PATH`. No team file changes: a team made by 5.3.0 needs no upgrade for this.
+
+What a 5.3.0 user sees change, after the skill is installed:
+
+- **`scripts/run-buzz-acp.sh` is in the skill folder.** In this version it is, byte for byte, the launcher that was kept in a Buzz checkout as `local/buzz-acp/run-buzz-acp.sh` (sha256 `4683b969…`). From now on the skill's copy is the one that is changed and released.
+- **`agent-team.sh launcher`** puts it where a start finds it. It replaces the `run-buzz-acp.sh` that `PATH` finds now; when there is none, it installs it into `~/.local/bin`, mode 700, and says so when that folder is not on `PATH`. `--dir DIR` names another folder, and `--dry-run` says what would change.
+- **The earlier file is kept** beside the new one as `run-buzz-acp.sh.bak-<UTC time>`. A file that is already the same is left as it is, and a symbolic link is refused.
+- **Agents that already run are not affected.** The launcher has become the harness by then. The new file is written beside its place and moved into it in one step.
+- **The skill says when the launcher is another one.** `preflight` shows `launcher ... (the one this skill brings)`, or a `note` line with `agent-team.sh launcher` as its fix; a launcher that is not found is `MISSING` with the same fix, where it used to ask for a path. `status` says it on its `Launcher for start` line, and `create` and `upgrade` end with one line that starts `Launcher:`. None of them writes the launcher.
+- **The assistant keeps it current.** `SKILL.md` tells Claude or Codex to run `agent-team.sh launcher`, dry run first, whenever one of those lines appears, and to say what was replaced.
+- **`settings --launcher` and `AGENT_TEAM_LAUNCHER` still work** and win for this skill's own `start`; a team's own command uses the one on `PATH`. `agent-team.sh launcher` notes it when they name another file.
+- `install.sh` requires `scripts/run-buzz-acp.sh`. The two offline suites now run their real-launcher checks with the skill's own launcher by default; `AGENT_TEAM_REAL_LAUNCHER` names another one.
+
+What was measured and what was only read:
+
+- **Measured, offline:** the scenario "the launcher this skill brings" of `test-agent-team.sh`, in a home folder and on a `PATH` of the test: none on `PATH`, the same file, another file, a symbolic link, another folder, the three states in `preflight`, and the lines of `status`, `create` and `upgrade`.
+- **Measured on the owner's machine:** the launcher on `PATH` there was already the same file, so `agent-team.sh launcher` changed nothing.
+- **Not measured:** a start of a real agent with a launcher this command has just replaced.
+
 ## 5.3.0 (2026-11-24)
 
 The channel supervisor listens in every channel it is a member of. Before, an ordinary message started its turn without a mention only in the channel its team was set up for; anywhere else it needed a mention. The team folder format does not change: a team made by 5.2.0 keeps starting as it is, and gets this after `agent-team.sh upgrade <team>`.

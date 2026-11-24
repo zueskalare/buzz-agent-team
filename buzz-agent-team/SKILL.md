@@ -2,7 +2,7 @@
 name: buzz-agent-team
 description: Create, upgrade or operate a Buzz agent team for a project. Use for setting up a project-named workspace agent and a channel supervisor, each on Claude or Codex signed in through the user's own subscription, choosing each agent's model from the list the sign-in offers, upgrading a team made by an earlier version (where the two jobs were the other way round), and starting, checking or stopping the agents. Guides workspace and channel setup, ownership proofs and channel membership.
 metadata:
-  version: "5.3.0"
+  version: "5.4.0"
 ---
 
 # Buzz agent team setup
@@ -97,7 +97,8 @@ Tell the user this right after the first preflight, before any command writes un
    - Run `agent-team.sh preflight --backend <claude|codex>`, or `agent-team.sh preflight --agent-backend <b> --supervisor-backend <b>` for different backends. It checks each role's adapter and its sign-in, and it fails when a Claude settings file or the Codex configuration would add an API key, token, helper or endpoint.
    - For each line marked `MISSING` or `PROBLEM`, take one at a time: say what is missing and ask for what fixes it.
      - Key generator: ask where `buzz-admin` is (in a Buzz checkout: `target/debug/buzz-admin`), then run `agent-team.sh settings --keygen <path>`.
-     - Launcher: ask where the accepted `run-buzz-acp.sh` is, then run `agent-team.sh settings --launcher <path>`.
+     - Launcher: the skill brings it (`scripts/run-buzz-acp.sh`), because it changes together with the skill. Run `agent-team.sh launcher --dry-run`, tell the user in one line what it will write, then run `agent-team.sh launcher`. It installs `run-buzz-acp.sh` into `~/.local/bin`, or replaces the one `PATH` finds and keeps the earlier file beside it as `run-buzz-acp.sh.bak-<time>`. If it says the folder is not on `PATH`, the user adds it in their shell profile.
+   - **Keep the launcher current.** When preflight has a `note` line for `launcher`, or `status`, `create` or `upgrade` prints a line that starts `Launcher:`, the launcher a start would use is not the one this skill brings. Update it the same way, dry run first, without waiting to be asked: the user wants the launcher kept current with the skill. Say what was replaced and where the earlier file is. Agents that already run are not affected; they pick it up at their next start.
      - `buzz`, `buzz-acp`, `claude-agent-acp` or `codex-acp` not on `PATH`: the user adds the folder to `PATH` in their shell profile. If this session still does not see it, the user starts a new session from a new terminal.
      - A sign-in or settings problem: the fix line says what the user does in their own terminal or which entry to remove; names are shown, never values.
    - Run preflight again until it says "Preflight passed". Show the `Launcher:` line and ask the user to confirm it is the accepted launcher.
