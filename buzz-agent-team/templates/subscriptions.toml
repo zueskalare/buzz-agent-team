@@ -1,11 +1,13 @@
 # Which events start a turn for the channel supervisor (harness: crates/buzz-acp/src/filter.rs).
-# Rules are tried in order and the first match wins. Each filter is an evalexpr expression on the
-# event's author (hex public key): the channel supervisor takes no turn for this team's own agents
-# (its workspace agent included, so their mentions cannot set each other off), and none for other
-# local agents of this channel unless they mention it. agent-team.sh writes the keys.
+# Rules are tried in order and the first match wins. The first rule holds in every channel the channel
+# supervisor is a member of (since 5.3.0; before that, in its team's channel only): an ordinary message
+# there starts a turn without a mention. Each filter is an evalexpr expression on the event's author
+# (hex public key): the channel supervisor takes no turn for this team's own agents (its workspace
+# agent included, so their mentions cannot set each other off), and none for any other local agent
+# unless it mentions it. agent-team.sh writes the keys.
 [[rules]]
-name = "Project discussion"
-channels = ["{{CHANNEL_ID}}"]
+name = "Channel discussion"
+channels = "all"
 kinds = [9, 40002]
 require_mention = false
 filter = '{{TEAM_FILTER}}'

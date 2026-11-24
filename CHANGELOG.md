@@ -2,6 +2,34 @@
 
 Versions of the buzz-agent-team skill, newest first. The version is the one line of `buzz-agent-team/VERSION`, and each one is the Git tag `v<version>` of this repository. What the three numbers mean is in the [README](README.md#versions).
 
+## 5.3.0 (2026-11-24)
+
+The channel supervisor listens in every channel it is a member of. Before, an ordinary message started its turn without a mention only in the channel its team was set up for; anywhere else it needed a mention. The team folder format does not change: a team made by 5.2.0 keeps starting as it is, and gets this after `agent-team.sh upgrade <team>`.
+
+What a 5.2.0 user sees change, after `agent-team.sh upgrade <team>` and a restart of the channel supervisor:
+
+- **An ordinary message in any channel the channel supervisor is a member of starts its turn,** from anyone who can post there, without a mention. A direct mention still does, as before. Membership is the switch: to keep it out of a channel's talk, do not add it to that channel.
+- **Nothing else about it changes.** It still acts only on a message signed by you, a rule in its prompt that nothing enforces, and it now meets more people: in every channel it is in, anyone's message reaches it with every tool call approved. It still takes no turn for its own team's agents.
+- **It takes no turn for any local agent unless that agent mentions it.** The rule without a mention used to name the local agents of its team's channel. It now names every agent under `~/.buzz-agents`, whatever channel each team was made for, because any two of them may share a channel.
+- **The workspace agent and the reviewer do not change.** Each still takes a turn only when it is mentioned.
+- **Cost.** The channel supervisor takes a model turn on every ordinary message in each of those channels, also when it then stays silent.
+- **Two channel supervisors in one channel both answer a person's message there.** Neither takes a turn for the other's message, once both are upgraded.
+- **Its prompt says so.** A new paragraph tells it that it hears every channel it is a member of, and to hand work to the workspace agent in a channel that agent is in. Like the rest of the prompt, it names no channel.
+- **Shown.** `team.sh check` and `status` say `answers anyone in the channels it is a member of`.
+
+How the upgrade does it:
+
+- With the agents stopped, `agent-team.sh upgrade <team> --dry-run` names, for the channel supervisor, `subscriptions.toml`, `prompt.md` and `.env.buzz-acp.local` (one comment line) as replaced, each kept beside itself as `<file>.bak-<UTC time>`, then `team.sh: replace` and `VERSION: 5.2.0 -> 5.3.0`. A team without a channel supervisor gets only the team command and the version.
+- In `subscriptions.toml` the first rule is now called "Channel discussion" and has `channels = "all"`, where it named the one channel, and its filter names every local agent.
+- **Upgrade every team that has a channel supervisor** when a team gets new agents: `create` now names each of them, not only those of the same channel. Until then that channel supervisor takes turns for the new agents' ordinary messages in a channel they share.
+- A prompt you edited by hand is replaced like any generated file; the earlier one is kept as `prompt.md.bak-<UTC time>`.
+
+What was measured and what was only read:
+
+- **Measured, offline:** the generated rules, run through the test's own reading of the harness's matching order (channel, kind, mention, author filter): an ordinary message in the team's channel and in another channel starts a turn; a local agent of another team, made for another channel, starts none without a mention and one with a mention; the team's own agents start none either way.
+- **Read in the harness source** (`crates/buzz-acp/src/config.rs` and `filter.rs`): a rule with `channels = "all"` applies to every channel the agent has discovered, which are the channels it is a member of, and one rule without `require_mention` makes that channel's subscription deliver ordinary messages.
+- **Not measured:** a real channel supervisor taking a turn in a second channel. An agent that is not local, such as one Buzz Desktop runs, is in no filter: its ordinary messages start the channel supervisor's turn, as they already did in its own channel.
+
 ## 5.2.0 (2026-11-24)
 
 A restart: an agent starts again as its last run was, with nothing asked and no choice changed. The team folder format does not change: a team made by 5.1.0 keeps starting as it is, and gets the restart after `agent-team.sh upgrade <team>`.

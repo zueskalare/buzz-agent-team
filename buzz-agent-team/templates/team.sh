@@ -23,9 +23,9 @@
 #   agent        the workspace agent, in the folder named after the team, with worker subagents. It
 #                answers the owner and its channel supervisor, and starts work only on the owner's
 #                own acceptance.
-#   supervisor   the channel supervisor. It takes a turn on every ordinary message in its channel,
-#                talks with anyone there, acts only for the owner, and hands accepted work to the
-#                workspace agent.
+#   supervisor   the channel supervisor. It takes a turn on every ordinary message in every channel it
+#                is a member of (since 5.3.0; before, in its team's channel only), talks with anyone
+#                there, acts only for the owner, and hands accepted work to the workspace agent.
 # A reviewer's own team has one agent, reviewer, which answers anyone who mentions it. This command
 # derives whom each agent answers from that agent's settings file.
 #
@@ -175,7 +175,7 @@ run had none (--no-wall).
 
 The jobs: the agent is the workspace agent, with worker subagents; it answers the owner and its
 channel supervisor. The supervisor is the channel supervisor: it takes a turn on every ordinary
-message in its channel and hands accepted work to the workspace agent. A reviewer answers anyone who
+message in every channel it is a member of, and hands accepted work to the workspace agent. A reviewer answers anyone who
 mentions it. Every agent runs the stock adapter with all its tools, in bypass-permissions: what each
 one may do, and for whom, is a rule in its prompt that nothing enforces. check and status say whom
 each agent answers.
@@ -477,7 +477,7 @@ answers() { # ID
     case $mode in
         anyone)
             if [ "$(env_get "$env" BUZZ_ACP_SUBSCRIBE || true)" = config ]; then
-                printf 'anyone in its channel (its subscription rules decide which messages start a turn)'
+                printf 'anyone in the channels it is a member of (its subscription rules decide which messages start a turn)'
             else printf 'anyone who mentions it'; fi ;;
         allowlist)
             keys=$(env_get "$env" BUZZ_ACP_RESPOND_TO_ALLOWLIST) || keys=''

@@ -64,8 +64,8 @@ ALL_ROLES='agent supervisor reviewer'
 # runs every role on the stock adapter with all its tools, in bypass-permissions, and what each one may
 # do is a rule in its prompt.
 #   agent       the workspace agent: worker subagents; it answers the owner and its channel supervisor
-#   supervisor  the channel supervisor: it takes a turn on every ordinary message in its channel and
-#               talks with anyone there; it acts only for the owner
+#   supervisor  the channel supervisor: it takes a turn on every ordinary message in every channel it
+#               is a member of and talks with anyone there; it acts only for the owner
 #   reviewer    the independent reviewer: it takes a turn when mentioned, and changes no file
 # Every place where the role decides behaviour asks one of these.
 is_workspace_role() { [ "$1" = agent ]; }
@@ -738,7 +738,7 @@ answers_text() { # ID
     case $mode in
         anyone)
             if [ "$(env_get "$env" BUZZ_ACP_SUBSCRIBE 2>/dev/null || true)" = config ]; then
-                printf 'anyone in its channel (subscriptions.toml decides which messages start a turn)'
+                printf 'anyone in the channels it is a member of (subscriptions.toml decides which messages start a turn)'
             else printf 'anyone who mentions it'; fi ;;
         allowlist)
             keys=$(env_get "$env" BUZZ_ACP_RESPOND_TO_ALLOWLIST 2>/dev/null) || keys=''
@@ -907,8 +907,8 @@ write_env() { # OUT HOME NAME ROLE BACKEND MODEL_CLAUDE MODEL_CODEX [AUTH_TAG_LI
         # a rule in its prompt, which nothing enforces.
         printf 'BUZZ_ACP_AGENT_COMMAND=%s\n' "$(backend_command "$5")"
         if is_channel_role "$4"; then
-            printf '# The channel supervisor talks with anyone in its channel; subscriptions.toml decides which\n'
-            printf '# messages start a turn. It acts only for the owner: a rule in its prompt.\n'
+            printf '# The channel supervisor talks with anyone in the channels it is a member of; subscriptions.toml\n'
+            printf '# decides which messages start a turn. It acts only for the owner: a rule in its prompt.\n'
             printf 'BUZZ_ACP_RESPOND_TO=anyone\nBUZZ_ACP_SUBSCRIBE=config\n'
             printf 'BUZZ_ACP_CONFIG=%s/subscriptions.toml\n' "$2"
         elif ! is_workspace_role "$4"; then
@@ -949,28 +949,41 @@ write_env() { # OUT HOME NAME ROLE BACKEND MODEL_CLAUDE MODEL_CODEX [AUTH_TAG_LI
 # The channel supervisor's subscription rules (harness: crates/buzz-acp/src/filter.rs match_event).
 # Both rules carry an evalexpr author filter, filter.rs:318-330 (author = the event's hex public key),
 # so the channel supervisor takes no turn for its own team's agents (both rules: its workspace agent
-# answers its mentions, and its own mentions cannot start a turn back) or for any other local agent in
-# its channel (the no-mention rule). The harness parses each filter at load (config.rs:1295-1340) and
-# caps it at 4096 bytes, so at most RULES_MAX_KEYS keys are written.
+# answers its mentions, and its own mentions cannot start a turn back) or for any other local agent (the
+# no-mention rule). Since 5.3.0 the no-mention rule holds in every channel the channel supervisor is a
+# member of, so its filter names every local agent under the root, whatever channel that agent's team
+# was made for: any two of them may share a channel. The harness parses each filter at load
+# (config.rs:1295-1340) and caps it at 4096 bytes, so at most RULES_MAX_KEYS keys are written.
 RULES_MAX_KEYS=40
 author_filter() { # KEY...: an expression that excludes these authors, or true for none
     local k out=''
     [ "$#" -le "$RULES_MAX_KEYS" ] ||
-        die "more than $RULES_MAX_KEYS local agents share this channel; the channel supervisor's author filter would pass the harness's 4096-byte limit"
+        die "more than $RULES_MAX_KEYS local agents are under $ROOT; the channel supervisor's author filter would pass the harness's 4096-byte limit"
     for k in "$@"; do out="$out${out:+ && }author != \"$k\""; done
     printf '%s' "${out:-true}"
 }
-channel_agent_keys() { # CHANNEL OWN_KEY: public keys of every local agent in CHANNEL except OWN_KEY, sorted
+local_agent_keys() { # OWN_KEY: public keys of every local agent under the root except OWN_KEY, sorted
     local d id k
     for d in "$ROOT"/*/; do
         [ -f "$d/team.conf" ] || continue
-        [ "$(conf_get "$d/team.conf" channel || true)" = "$1" ] || continue
         for id in $ALL_ROLES; do
             k=$(conf_get "$d/$(role_dir_in "$d" "$id")/agent.conf" pubkey 2>/dev/null) || continue
             k=$(lower "$k")
-            if [ "$k" != "$2" ]; then printf '%s\n' "$k"; fi
+            if [ "$k" != "$1" ]; then printf '%s\n' "$k"; fi
         done
     done | LC_ALL=C sort -u
+}
+# The other teams under the root that have a channel supervisor: its rules name every local agent, so
+# each one is refreshed (upgrade) when a team gets new agents.
+supervisor_teams() { # EXCLUDE_WS: one team name per line
+    local d ws
+    for d in "$ROOT"/*/; do
+        [ -f "$d/team.conf" ] || continue
+        ws=$(basename -- "$d")
+        [ "$ws" != "$1" ] || continue
+        [ -f "$d/supervisor/agent.conf" ] || continue
+        printf '%s\n' "$ws"
+    done
 }
 team_agent_keys() { # OWN_KEY: public keys of this team's other agents, sorted
     local id k
@@ -984,7 +997,7 @@ write_rules() { # OUT CHANNEL_SUPERVISOR_KEY
     local tpl s team own
     tpl=$(template_dir)/subscriptions.toml
     [ -f "$tpl" ] || tpl=$(skill_dir)/templates/subscriptions.toml
-    team=$(author_filter $(channel_agent_keys "$C_CHANNEL" "$2"))
+    team=$(author_filter $(local_agent_keys "$2"))
     own=$(author_filter $(team_agent_keys "$2"))
     s=$(cat -- "$tpl")
     s=${s//"{{CHANNEL_ID}}"/"$C_CHANNEL"}
@@ -1389,8 +1402,9 @@ Usage: agent-team.sh <command> [options]
                          the channel supervisor, and starts work only on the owner's
                          acceptance
              supervisor  the channel supervisor: it takes a turn on every ordinary
-                         message in its channel, talks with anyone there, acts only for
-                         the owner, and hands accepted work to the workspace agent
+                         message in every channel it is a member of, talks with anyone
+                         there, acts only for the owner, and hands accepted work to the
+                         workspace agent
            Every agent runs the stock adapter of its backend with all its tools, in
            bypass-permissions; what each one may do is a rule in its prompt, which
            nothing enforces.
@@ -2069,12 +2083,12 @@ EOF
         chmod 600 "$tmp_home"
         if [ ! -f "$(ahome "$id")/subscriptions.toml" ]; then
             publish_file "$tmp_home" "$(ahome "$id")/subscriptions.toml"
-            say "$(adir "$id"): wrote subscriptions.toml (it takes no turn for this channel's local agents)"
+            say "$(adir "$id"): wrote subscriptions.toml (it takes a turn on ordinary messages in every channel it is a member of, and none for the local agents)"
         elif ! cmp -s "$tmp_home" "$(ahome "$id")/subscriptions.toml"; then
             stamp=$(date -u '+%Y%m%dT%H%M%SZ')
             cp -p -- "$(ahome "$id")/subscriptions.toml" "$(ahome "$id")/subscriptions.toml.bak-$stamp"
             mv -f -- "$tmp_home" "$(ahome "$id")/subscriptions.toml"
-            say "$(adir "$id"): refreshed subscriptions.toml for the agents now in this channel (earlier file: subscriptions.toml.bak-$stamp)"
+            say "$(adir "$id"): refreshed subscriptions.toml for the local agents there are now (earlier file: subscriptions.toml.bak-$stamp)"
         else
             rm -f -- "$tmp_home"
         fi
@@ -2088,10 +2102,11 @@ EOF
             say "Note: the workspace agent was set up to answer $(answers_text "$id"); to let it answer the channel supervisor now in this team or channel: $PROG upgrade $C_NAME"
         fi
     done
-    if [ -n "$created_now" ] && [ -n "$peers" ]; then
-        printf '%s\n' "$peers" | while IFS="$(printf '\t')" read -r ws pid prole pname; do
-            is_channel_role "$prole" || continue
-            say "Note: the channel supervisor of workspace \"$ws\" in this channel takes turns for these new agents until: $PROG upgrade $ws"
+    # Every other channel supervisor on this machine names the local agents in its rules, and may share
+    # a channel with the new ones: until it is refreshed, their ordinary messages there start its turns.
+    if [ -n "$created_now" ]; then
+        supervisor_teams "$C_NAME" | while IFS= read -r ws; do
+            say "Note: the channel supervisor of workspace \"$ws\" takes turns for these new agents in any channel they share, until: $PROG upgrade $ws"
         done
     fi
 
@@ -3118,7 +3133,7 @@ job_detail() { # ID: what the new job holds, for the upgrade plan
         if [ -n "$names" ]; then names="the owner and $names"; else names='the owner only'; fi
         printf 'the stock adapter with all its tools and worker subagents, in bypass-permissions; it answers %s' "$names"
     else
-        printf 'the stock adapter with all its tools, in bypass-permissions; it takes a turn on every ordinary message in its channel, and what it may do is a rule in its prompt'
+        printf 'the stock adapter with all its tools, in bypass-permissions; it takes a turn on every ordinary message in every channel it is a member of, and what it may do is a rule in its prompt'
     fi
 }
 up_backends() { # LIST: the backends of LIST, each once, claude first
@@ -3524,7 +3539,7 @@ cmd_upgrade() {
                 if is_workspace_role "$id"; then v="${v}w"; elif is_channel_role "$id"; then v="${v}c"; fi
             done
             if [ "$v" = c ]; then
-                say "  note: this team has no workspace agent of its own. Its supervisor becomes a channel supervisor and takes a turn on every ordinary message in its channel${C_EXT_AGENT:+, beside $C_EXT_AGENT, the workspace agent of another team}."
+                say "  note: this team has no workspace agent of its own. Its supervisor becomes a channel supervisor and takes a turn on every ordinary message in every channel it is a member of${C_EXT_AGENT:+, beside $C_EXT_AGENT, the workspace agent of another team}."
             fi
             if [ -n "$v" ]; then
                 say "  Buzz profiles: each agent's description follows its new job; Buzz shows the earlier one until finish runs again ($PROG finish $T_NAME --dry-run shows its steps)"

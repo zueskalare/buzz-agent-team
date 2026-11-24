@@ -578,9 +578,10 @@ print("none")
 PY
 STRANGER=1111111111111111111111111111111111111111111111111111111111111111 OTHERCH=9f8e7d6c-5b4a-4392-8170-6f5e4d3c2b1a
 sel() { python3 -I "$SELECT" "$sp/subscriptions.toml" "$@" "$CK"; }
-check 'rules: a member'"'"'s ordinary message in the channel starts a channel supervisor turn' eval '[ "$(sel "$CHANNEL" 9 "$STRANGER" "")" = "Project discussion" ]'
-check 'rules: an ordinary message in another channel does not' eval '[ "$(sel "$OTHERCH" 9 "$STRANGER" "")" = none ]'
-check 'rules: a mention in another channel does' eval '[ "$(sel "$OTHERCH" 9 "$STRANGER" "$CK")" = "Direct mentions" ]'
+check 'rules: a member'"'"'s ordinary message in the channel starts a channel supervisor turn' eval '[ "$(sel "$CHANNEL" 9 "$STRANGER" "")" = "Channel discussion" ]'
+check 'rules: so does an ordinary message in any other channel it is a member of, without a mention (5.3.0)' eval '[ "$(sel "$OTHERCH" 9 "$STRANGER" "")" = "Channel discussion" ] && [ "$(sel "$OTHERCH" 40002 "$STRANGER" "")" = "Channel discussion" ]'
+check 'rules: the rule without a mention names no channel: it holds in all of them' eval '[ "$(grep -c "^channels = \"all\"$" "$sp/subscriptions.toml")" = 2 ] && ! grep -q "$CHANNEL" "$sp/subscriptions.toml"'
+check 'rules: a kind outside that rule needs a mention, in another channel too' eval '[ "$(sel "$OTHERCH" 40003 "$STRANGER" "")" = none ] && [ "$(sel "$OTHERCH" 40003 "$STRANGER" "$CK")" = "Direct mentions" ]'
 check 'rules: a kind outside the channel rule needs a mention' eval '[ "$(sel "$CHANNEL" 40003 "$STRANGER" "")" = none ] && [ "$(sel "$CHANNEL" 40003 "$STRANGER" "$CK")" = "Direct mentions" ]'
 check 'loop guard: the team'"'"'s workspace agent posting in the channel starts no channel supervisor turn (T-9 R1)' eval '[ "$(sel "$CHANNEL" 9 "$WK" "")" = none ]'
 check 'loop guard: nor does the workspace agent mentioning the channel supervisor, in any channel' eval '[ "$(sel "$CHANNEL" 9 "$WK" "$CK")" = none ] && [ "$(sel "$OTHERCH" 40002 "$WK" "$CK")" = none ]'
@@ -1110,7 +1111,7 @@ check 'a workspace agent alone finds the channel supervisor of the other workspa
 check 'only a workspace agent folder was made, and team.conf names that channel supervisor' eval '[ -d "$ROOT/shop-2/shop-2" ] && [ ! -e "$ROOT/shop-2/supervisor" ] && grep -qx "external_supervisor=Shop Supervisor" "$ROOT/shop-2/team.conf"'
 check 'its prompt names that channel supervisor' has "$ROOT/shop-2/shop-2/prompt.md" 'The channel supervisor (Shop Supervisor)'
 check 'it answers the owner and exactly that channel supervisor, found on this machine' eval 'grep -qx BUZZ_ACP_RESPOND_TO=allowlist "$ROOT/shop-2/shop-2/.env.buzz-acp.local" && grep -qx "BUZZ_ACP_RESPOND_TO_ALLOWLIST=$CK" "$ROOT/shop-2/shop-2/.env.buzz-acp.local"'
-check 'create says so, and names the channel supervisor to refresh' eval 'has "$OUT/same-name-4.out" "The workspace agent, shop-2, answers the owner and Shop Supervisor of workspace shop." && has "$OUT/same-name-4.out" "the channel supervisor of workspace \"shop\" in this channel takes turns for these new agents until: agent-team.sh upgrade shop"'
+check 'create says so, and names the channel supervisor to refresh' eval 'has "$OUT/same-name-4.out" "The workspace agent, shop-2, answers the owner and Shop Supervisor of workspace shop." && has "$OUT/same-name-4.out" "the channel supervisor of workspace \"shop\" takes turns for these new agents in any channel they share, until: agent-team.sh upgrade shop"'
 
 scenario 'A workspace agent alone (--roles agent): its channel supervisor is found locally or must be named (decision 3)'
 run_tool ws-only-found -- create --workspace "$TD/ws/api" --roles agent --channel "$CHANNEL2" --community "$COMMUNITY" --owner "$OWNER" --name api-x
@@ -1385,7 +1386,7 @@ check 'status exits 0' rc_is 0
 check 'status shows both running PIDs and the backend each runs on' eval 'has "$OUT/status-shop.out" "running on claude, PID $PA" && has "$OUT/status-shop.out" "running on claude, PID $PS"'
 check 'status shows proofs stored' eval '[ "$(grep -c "proof stored" "$OUT/status-shop.out")" = 2 ]'
 check 'status names the launcher start would use' has "$OUT/status-shop.out" "Launcher for start: $BIN/standin-launcher.sh"
-check 'status names each job and whom each agent answers' eval 'has "$OUT/status-shop.out" "shop: Shop, the workspace agent" && has "$OUT/status-shop.out" "supervisor: Shop Supervisor, the channel supervisor" && has "$OUT/status-shop.out" "answers the owner and Shop Supervisor of workspace shop" && has "$OUT/status-shop.out" "answers anyone in its channel"'
+check 'status names each job and whom each agent answers' eval 'has "$OUT/status-shop.out" "shop: Shop, the workspace agent" && has "$OUT/status-shop.out" "supervisor: Shop Supervisor, the channel supervisor" && has "$OUT/status-shop.out" "answers the owner and Shop Supervisor of workspace shop" && has "$OUT/status-shop.out" "answers anyone in the channels it is a member of"'
 run_tool status-all -- status
 check 'status without a name lists the workspaces' eval 'has "$OUT/status-all.out" "  shop  $TD/ws/shop" && has "$OUT/status-all.out" "  docs  "'
 
@@ -2011,7 +2012,7 @@ run_tool second AGENT_TEAM_ROOT="$RB" -- create --workspace "$TD/ws/second" --ch
 R2=$RB/second/supervisor/subscriptions.toml
 check 'the new channel supervisor'"'"'s channel rule names the other team'"'"'s agents too' eval 'rc_is 0 && has "$R2" "author != \"$(grep ^pubkey= "$MC/agent.conf" | cut -d= -f2)\"" && has "$R2" "author != \"$(grep ^pubkey= "$MW/agent.conf" | cut -d= -f2)\""'
 check 'the new workspace agent answers its own channel supervisor only, not the other team'"'"'s' eval 'grep -qx "BUZZ_ACP_RESPOND_TO_ALLOWLIST=$(grep ^pubkey= "$RB/second/supervisor/agent.conf" | cut -d= -f2)" "$RB/second/second/.env.buzz-acp.local"'
-check 'create says the earlier channel supervisor must be refreshed with upgrade' has "$OUT/second.out" 'the channel supervisor of workspace "mixed" in this channel takes turns for these new agents until: agent-team.sh upgrade mixed'
+check 'create says the earlier channel supervisor must be refreshed with upgrade' has "$OUT/second.out" 'the channel supervisor of workspace "mixed" takes turns for these new agents in any channel they share, until: agent-team.sh upgrade mixed'
 run_tool second-upg AGENT_TEAM_ROOT="$RB" -- upgrade mixed
 check 'after upgrade the earlier channel supervisor ignores the new team'"'"'s agents' eval 'rc_is 0 && has "$MC/subscriptions.toml" "author != \"$(grep ^pubkey= "$RB/second/supervisor/agent.conf" | cut -d= -f2)\"" && has "$MC/subscriptions.toml" "author != \"$(grep ^pubkey= "$RB/second/second/agent.conf" | cut -d= -f2)\""'
 check 'and its prompt names the new workspace agent beside its own' has "$MC/prompt.md" 'The workspace agent (Mixed, Second) works in the same project folder'

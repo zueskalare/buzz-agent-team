@@ -292,7 +292,7 @@ check 'it lists buzz-acp and buzz' test "$(grep -c -E '^  ok +(buzz-acp|buzz) ' 
 check 'it names the project folder and why' has "$OUT/check.out" "$TD/ws/shop (the current folder)"
 check 'it checks the stock adapter of each agent, as the one it runs' test "$(grep -c -E "^  ok +claude-agent-acp +$BIN/claude-agent-acp\$" "$OUT/check.out")$(grep -c -e 'restricted' -e 'runtime/' "$OUT/check.out")" = 20
 check 'and the sandbox settings of each' test "$(grep -c "^  ok  *sandbox  *the settings in $TD/ws/shop/.claude/settings.json hold" "$OUT/check.out")" = 2
-check 'it says whom each agent answers: the workspace agent its owner and channel supervisor, the channel supervisor anyone' test "$(grep -c -E '^  ok +answers +(the owner and Shop Supervisor of shop|anyone in its channel)' "$OUT/check.out")" = 2
+check 'it says whom each agent answers: the workspace agent its owner and channel supervisor, the channel supervisor anyone' test "$(grep -c -E '^  ok +answers +(the owner and Shop Supervisor of shop|anyone in the channels it is a member of)' "$OUT/check.out")" = 2
 check 'the launcher checked both agents' test "$(grep -c '^call: --check --backend claude$' "$STANDIN_RECORD")" = 2
 check 'no agent runs' test ! -e "$T/shop/agent.pid" -a ! -e "$T/supervisor/agent.pid"
 run_team check-v "$T" -- check --verbose
@@ -344,7 +344,7 @@ check 'the pid file records the provider' test "$(sed -n '3p' "$T/supervisor/age
 run_team status "$T" -- status
 check 'status shows both running' test "$(grep -c 'running on claude' "$OUT/status.out")" = 2
 check 'status names each agent by its folder and display name, with its job' test "$(grep -c -x -e '  shop: Shop, the workspace agent' -e '  supervisor: Shop Supervisor, the channel supervisor' "$OUT/status.out")" = 2
-check 'and whom each answers' test "$(grep -c -e '^    answers the owner and Shop Supervisor of shop$' -e '^    answers anyone in its channel' "$OUT/status.out")" = 2
+check 'and whom each answers' test "$(grep -c -e '^    answers the owner and Shop Supervisor of shop$' -e '^    answers anyone in the channels it is a member of' "$OUT/status.out")" = 2
 run_skill skill-status -- status shop
 check 'the skill sees the same agents running' test "$(grep -c 'running on claude, PID' "$OUT/skill-status.out")" = 2
 run_team start-again "$T" -- start
@@ -734,7 +734,7 @@ check 'the prompt has no unfilled placeholder' hasnt "$R/reviewer/prompt.md" '{{
 check 'and no Channels rule: managing channels is the channel supervisor'"'"'s alone' hasnt "$R/reviewer/prompt.md" '## Channels'
 check 'its limits are a rule in its prompt: it changes no file of the work it reviews' has "$R/reviewer/prompt.md" 'You never change the work you review: you do not edit, create or delete a file of the project'
 check 'the team has its own command' cmp -s "$TEMPLATE" "$R/team.sh"
-check 'create says which channel supervisor to refresh' has "$OUT/rv.out" 'the channel supervisor of workspace "shop" in this channel takes turns for these new agents until'
+check 'create says which channel supervisor to refresh' has "$OUT/rv.out" 'the channel supervisor of workspace "shop" takes turns for these new agents in any channel they share, until'
 RV_KEY=$(sed -n 's/^pubkey=//p' "$R/reviewer/agent.conf")
 check 'before that, the channel supervisor does not know the reviewer' hasnt "$T/supervisor/subscriptions.toml" "$RV_KEY"
 run_skill rv-refresh -- upgrade shop
@@ -1925,6 +1925,16 @@ printf '# retrieved 2026-11-21T00:00:00Z stand-in\ndefault\tDefault (recommended
 printf '# retrieved 2026-11-21T00:00:00Z stand-in\ngpt-example-sol\tExample Sol\ngpt-example-astra\tExample Astra\n' > "$ROOT/models/codex-agent.list"
 run_skill rs-create -- create --workspace "$RW" --channel 1b1c2d3e-4f50-6172-8394-a5b6c7d8e9f1
 check 'a new team has a restart command in each agent folder' test "$RC$(cmp -s "$RESTART_TEMPLATE" "$X/rshop/restart.sh"; echo $?)$(cmp -s "$RESTART_TEMPLATE" "$X/supervisor/restart.sh"; echo $?)" = 000
+# This team is made for another channel than shop. Since 5.3.0 its channel supervisor listens in every
+# channel it is a member of, so its rule without a mention names the local agents of every team: here
+# shop's two and each reviewer team's one, beside its own workspace agent.
+key_of() { sed -n 's/^pubkey=//p' "$1/agent.conf"; }
+RULES=$X/supervisor/subscriptions.toml
+OTHERS=$(($(ls "$ROOT"/*/*/agent.conf | wc -l) - 1))   # every local agent but this channel supervisor
+check 'its channel supervisor'"'"'s rule without a mention holds in every channel' test "$(sed -n '/^name = "Channel discussion"$/,/^filter/p' "$RULES" | grep -c -x -e 'channels = "all"' -e 'require_mention = false')" = 2
+check 'that rule takes no turn for a local agent of any team, whatever channel the team was made for' test "$(sed -n '/^name = "Channel discussion"$/,/^filter/p' "$RULES" | grep -c -e "author != \"$(key_of "$T/supervisor")\"" -e "author != \"$(key_of "$ROOT/shop-reviewer/reviewer")\"")$(sed -n '/^name = "Channel discussion"$/,/^filter/p' "$RULES" | grep -o 'author != ' | wc -l | tr -d ' ')$([ "$OTHERS" -ge 4 ] && echo enough)" = "1${OTHERS}enough"
+check 'the rule for mentions still names only its own team'"'"'s agent' test "$(sed -n '/^name = "Direct mentions"$/,/^filter/p' "$RULES" | grep -o 'author != ' | wc -l | tr -d ' ')$(sed -n '/^name = "Direct mentions"$/,/^filter/p' "$RULES" | grep -c "author != \"$(key_of "$X/rshop")\"")" = 11
+check 'create names the channel supervisor of the other team to refresh, though it is in another channel' has "$OUT/rs-create.out" 'Note: the channel supervisor of workspace "shop" takes turns for these new agents in any channel they share, until: agent-team.sh upgrade shop'
 store_proof rshop rshop; store_proof rshop supervisor
 RUN_CWD=$RW
 # A run without the sandbox settings (--no-wall, in a folder that has none) is repeated without them.
