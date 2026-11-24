@@ -1786,6 +1786,62 @@ run_tool second-upg AGENT_TEAM_ROOT="$RB" -- upgrade mixed
 check 'after upgrade the earlier channel supervisor ignores the new team'"'"'s agents' eval 'rc_is 0 && has "$MC/subscriptions.toml" "author != \"$(grep ^pubkey= "$RB/second/supervisor/agent.conf" | cut -d= -f2)\"" && has "$MC/subscriptions.toml" "author != \"$(grep ^pubkey= "$RB/second/second/agent.conf" | cut -d= -f2)\""'
 check 'and its prompt names the new workspace agent beside its own' has "$MC/prompt.md" 'The workspace agent (Mixed, Second) works in the project folder'
 
+scenario 'The workspace agent'"'"'s browser: create and upgrade with --browser or --no-browser, the dry run, and the helper as a team file'
+RBR=$TD/root-browser BWS=$TD/ws/brz BH=$SKILL_DIR/scripts/workspace-browser.py
+mkdir -p "$BWS"
+br_on() { python3 -I "$BH" check "$1" "$2" > /dev/null 2>&1; } # BACKEND DIR: the file of that backend names it
+# The listings of the files a team folder holds beside its agents: the helper is one of them.
+TF=$(sed -n "s/^TEAM_FILES='\(.*\)'\$/\1/p" "$SCRIPT")
+RS=$(sed -n "s/^RESERVED_NAMES='\(.*\)'\$/\1/p" "$SCRIPT")
+RS_T=$(sed -n "s/^RESERVED_NAMES='\(.*\)'\$/\1/p" "$SKILL_DIR/templates/team.sh")
+all_reserved() { local f; for f in $TF; do case " $RS " in *" $f "*) ;; *) return 1 ;; esac; done; }
+check 'TEAM_FILES names the browser helper, and every team file is a reserved name, the same in agent-team.sh and team.sh' eval 'case " $TF " in *" workspace-browser.py "*) true ;; *) false ;; esac && [ -n "$RS" ] && [ "$RS" = "$RS_T" ] && all_reserved'
+check 'the README lists it among the names a team folder uses, and among the files it holds' eval 'grep -q "\`workspace-settings.py\`, \`workspace-browser.py\`, \`VERSION\`, \`brief.md\`" "$HERE/README.md" && grep -q "\`workspace-browser.py\` (names or takes out the workspace agent" "$HERE/README.md"'
+run_tool br-name AGENT_TEAM_ROOT="$TD/root-browser-name" -- create --workspace "$BWS" --name Workspace-Browser.py --channel "$CHANNEL" --community "$COMMUNITY" --owner "$OWNER"
+check 'a team named like the helper (ignoring case) gets the folder agent' eval 'rc_is 0 && [ -d "$TD/root-browser-name/Workspace-Browser.py/agent" ] && grep -qx agent_folder=agent "$TD/root-browser-name/Workspace-Browser.py/team.conf"'
+check 'and create without --browser left the project folder without a browser' eval '[ ! -e "$BWS/.mcp.json" ] && [ ! -e "$BWS/.codex" ] && hasnt "$OUT/br-name.out" "Browser:"'
+run_tool br-create AGENT_TEAM_ROOT="$RBR" -- create --workspace "$BWS" --channel "$CHANNEL2" --community "$COMMUNITY" --owner "$OWNER" --browser
+check 'create --browser names the server in the project folder'"'"'s .mcp.json for the workspace agent on Claude, after the sandbox settings' eval 'rc_is 0 && br_on claude "$BWS" && [ "$(grep -n -e "^Project folder settings: " -e "^Browser: added: $BWS/.mcp.json\$" "$OUT/br-create.out" | cut -d: -f2 | tr "\n" " ")" = "Project folder settings Browser " ]'
+check 'create copies the helper into the team folder, the skill'"'"'s byte for byte, mode 700' eval 'cmp -s "$BH" "$RBR/brz/workspace-browser.py" && [ "$(mode_of "$RBR/brz/workspace-browser.py")" = 700 ]'
+cp -p "$BWS/.mcp.json" "$TD/brz.mcp"
+run_tool br-create2 AGENT_TEAM_ROOT="$RBR" -- create --workspace "$BWS" --channel "$CHANNEL2" --community "$COMMUNITY" --owner "$OWNER"
+check 'create again without an option leaves it as it is' eval 'rc_is 0 && cmp -s "$TD/brz.mcp" "$BWS/.mcp.json" && hasnt "$OUT/br-create2.out" "Browser:"'
+run_tool br-create-off AGENT_TEAM_ROOT="$RBR" -- create --workspace "$BWS" --channel "$CHANNEL2" --community "$COMMUNITY" --owner "$OWNER" --no-browser
+check 'create --no-browser takes it out, and says so' eval 'rc_is 0 && [ ! -e "$BWS/.mcp.json" ] && has "$OUT/br-create-off.out" "Browser: removed: $BWS/.mcp.json is deleted"'
+run_tool br-create-rv AGENT_TEAM_ROOT="$RBR" -- create --workspace "$BWS" --channel "$CHANNEL2" --community "$COMMUNITY" --owner "$OWNER" --name brz-reviewer --roles reviewer --browser
+check 'create refuses it for a team without a workspace agent, before anything is written' eval 'rc_is 1 && has "$OUT/br-create-rv.out" "create: --browser is for the workspace agent'"'"'s browser, and this create makes no workspace agent (--roles reviewer)" && [ ! -e "$RBR/brz-reviewer" ]'
+run_tool br-create-both AGENT_TEAM_ROOT="$RBR" -- create --workspace "$BWS" --channel "$CHANNEL2" --community "$COMMUNITY" --owner "$OWNER" --browser --no-browser
+check 'and both at once' eval 'rc_is 1 && has "$OUT/br-create-both.out" "choose --browser or --no-browser, not both"'
+mkdir -p "$TD/ws/brz-cx"
+run_tool br-create-cx AGENT_TEAM_ROOT="$TD/root-browser-cx" -- create --workspace "$TD/ws/brz-cx" --channel "$CHANNEL2" --community "$COMMUNITY" --owner "$OWNER" --agent-backend codex --browser
+check 'for a workspace agent on Codex, create names it in .codex/config.toml, and nothing in .mcp.json' eval 'rc_is 0 && br_on codex "$TD/ws/brz-cx" && [ ! -e "$TD/ws/brz-cx/.mcp.json" ] && has "$OUT/br-create-cx.out" "Browser: added: $TD/ws/brz-cx/.codex/config.toml"'
+# upgrade: the plan says what it would do; a dry run does nothing.
+run_tool br-up-dry AGENT_TEAM_ROOT="$RBR" -- upgrade brz --dry-run --browser
+check 'the upgrade plan names the file it would name the server in, repeats the option, and the dry run writes nothing' eval 'rc_is 0 && has "$OUT/br-up-dry.out" "  $BWS/.mcp.json: name the Playwright server (the workspace agent'"'"'s browser on claude)" && has "$OUT/br-up-dry.out" "Run it: agent-team.sh upgrade brz --browser" && [ ! -e "$BWS/.mcp.json" ]'
+run_tool br-up AGENT_TEAM_ROOT="$RBR" -- upgrade brz --browser
+check 'upgrade --browser names it' eval 'rc_is 0 && br_on claude "$BWS" && has "$OUT/br-up.out" "  added: $BWS/.mcp.json"'
+run_tool br-up2 AGENT_TEAM_ROOT="$RBR" -- upgrade brz --browser
+run_tool br-up3 AGENT_TEAM_ROOT="$RBR" -- upgrade brz
+check 'a second run with it, and one without an option, find the team up to date and leave it' eval 'has "$OUT/br-up2.out" "up to date; nothing was changed" && has "$OUT/br-up3.out" "up to date; nothing was changed" && br_on claude "$BWS"'
+run_tool br-up-cx-dry AGENT_TEAM_ROOT="$RBR" -- upgrade brz --agent-backend codex --browser --dry-run
+check 'with the workspace agent moving to Codex, the plan names the Codex file' has "$OUT/br-up-cx-dry.out" "  $BWS/.codex/config.toml: name the Playwright server (the workspace agent's browser on codex)"
+run_tool br-up-off-dry AGENT_TEAM_ROOT="$RBR" -- upgrade brz --dry-run --no-browser
+check 'the --no-browser plan names each file it would take the server out of, and writes nothing' eval 'rc_is 0 && has "$OUT/br-up-off-dry.out" "  $BWS/.mcp.json: take the Playwright server out" && hasnt "$OUT/br-up-off-dry.out" ".codex/config.toml" && has "$OUT/br-up-off-dry.out" "Run it: agent-team.sh upgrade brz --no-browser" && br_on claude "$BWS"'
+run_tool br-up-off AGENT_TEAM_ROOT="$RBR" -- upgrade brz --no-browser
+check 'upgrade --no-browser takes it out' eval 'rc_is 0 && [ ! -e "$BWS/.mcp.json" ] && has "$OUT/br-up-off.out" "  removed: $BWS/.mcp.json is deleted"'
+printf 'not json\n' > "$BWS/.mcp.json"
+run_tool br-up-bad AGENT_TEAM_ROOT="$RBR" -- upgrade brz --browser
+check 'a file that cannot be used stops the upgrade before anything is changed, and is left alone' eval 'rc_is 1 && has "$OUT/br-up-bad.out" "the workspace agent'"'"'s browser cannot be named in the project folder" && [ "$(cat "$BWS/.mcp.json")" = "not json" ]'
+rm -f "$BWS/.mcp.json"
+run_tool br-rv-make AGENT_TEAM_ROOT="$RBR" -- create --workspace "$BWS" --channel "$CHANNEL2" --community "$COMMUNITY" --owner "$OWNER" --name brz-reviewer --roles reviewer
+run_tool br-up-rv2 AGENT_TEAM_ROOT="$RBR" -- upgrade brz-reviewer --browser
+check 'upgrade refuses it for a team without a workspace agent' eval 'rc_is 1 && has "$OUT/br-up-rv2.out" "upgrade: --browser is for the workspace agent'"'"'s browser, and workspace \"brz-reviewer\" has no workspace agent; nothing was changed" && [ ! -e "$BWS/.mcp.json" ]'
+# A team folder made by 4.2.0 has no helper: upgrade adds it.
+rm -f "$RBR/brz/workspace-browser.py"
+run_tool br-up-helper-dry AGENT_TEAM_ROOT="$RBR" -- upgrade brz --dry-run
+run_tool br-up-helper AGENT_TEAM_ROOT="$RBR" -- upgrade brz
+check 'upgrade adds the helper to a team folder that lacks it, and its plan says so' eval 'has "$OUT/br-up-helper-dry.out" "  workspace-browser.py: add" && rc_is 0 && cmp -s "$BH" "$RBR/brz/workspace-browser.py"'
+
 scenario 'Secrets: a final sweep of every output and log (C3)'
 check 'no secret key in any captured output, log or record' no_key_in "$OUT"/* "$TD"/root*/*/*/agent.log* "$TD"/root*/*/*/.env.buzz-acp.local "$TD"/root*/*/*/prompt.md "$TD"/root*/*/*/agent.conf "$TD"/root*/*/team.conf "$TD"/root*/settings.conf
 if [ -n "$REAL_LAUNCHER" ]; then

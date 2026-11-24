@@ -8,8 +8,8 @@
 #   cd ~/code/shop && ~/.buzz-agents/shop/shop/start.sh
 # The agent is the one of this folder: its folder name is the name the team's command knows it by.
 # In a terminal it asks this agent's provider, model and reasoning effort, and for the workspace agent
-# the model and reasoning effort of its workers; Enter keeps the saved one. The model menu shows the
-# list the provider's adapter offers at that moment. With --yes, or
+# the model and reasoning effort of its workers and whether it has a browser; Enter keeps the saved one.
+# The model menu shows the list the provider's adapter offers at that moment. With --yes, or
 # without a terminal, it asks nothing and the agent starts on its saved choices. A choice lasts for
 # that run; the saved ones are changed with the skill (agent-team.sh upgrade). Stopping and status
 # stay with the team's command.
@@ -33,8 +33,9 @@ usage() {
 Usage: start.sh [options]     start $NAME, the agent of this folder, and no other
 
 In a terminal it asks this agent's provider, its model and its reasoning effort, and for the
-workspace agent then the model and the reasoning effort of its workers; Enter keeps the saved one.
-Before the model menu, the provider's adapter is asked which models it offers now.
+workspace agent then the model and the reasoning effort of its workers and whether it has a browser;
+Enter keeps the saved one. Before the model menu, the provider's adapter is asked which models it
+offers now.
   --yes                     ask nothing: the saved provider, model and reasoning effort
   --model ID                this model, for this run (no model question)
   --backend claude|codex    this provider, for this run (no provider question)
@@ -45,6 +46,10 @@ Before the model menu, the provider's adapter is asked which models it offers no
   --worker-effort LEVEL     the workspace agent: the reasoning effort of its workers, for this
                             run; default sets none. On Claude only with no level of the agent's
                             own (--effort default)
+  --browser                 the workspace agent: give it a browser (the Playwright tools, headless
+                            Chrome, signed in to nothing), named in the project folder; it stays
+                            there for later starts
+  --no-browser              the workspace agent: take the browser out of the project folder
   --workspace DIR           another project folder than the current one
   --no-wall                 do not put the sandbox settings into the project folder (the workspace agent on Claude)
   --check                   check this agent and start nothing
@@ -61,7 +66,7 @@ while [ "$#" -gt 0 ]; do
         --model | --backend | --effort | --workspace | --worker-model | --worker-effort)
             [ "$#" -ge 2 ] && [ -n "$2" ] || die "$1 needs a value"
             args+=("$1" "$2"); shift ;;
-        --yes | -y | --no-wall | --check | --verbose | -v) args+=("$1") ;;
+        --yes | -y | --no-wall | --browser | --no-browser | --check | --verbose | -v) args+=("$1") ;;
         help | -h | --help) usage; exit 0 ;;
         *) die "unknown option: $1. This command starts $NAME only (see start.sh --help); each other agent has its own start.sh, and the team's command is $TEAM" ;;
     esac

@@ -7,7 +7,7 @@ and shell actions inside and outside the project folder.
 Offline: a loopback model endpoint, a fixture API key, a disposable home folder, a stand-in buzz.
 Nothing signs in, and nothing contacts a provider or a community.
 
-    python3 test-workspace-settings.py [--verbose] [--also-without]
+    python3 test-workspace-settings.py [--verbose] [--also-without] [--also-browser]
 
 It asserts what the settings hold, and reports what they leave to the rule in the supervisor's
 prompt, so the documentation of both stays what was measured.
@@ -17,6 +17,14 @@ local model starts one worker with the subagent tool, passing a model and an eff
 that section asks, with no CLAUDE_CODE_SUBAGENT_* variable set, and the endpoint records the model and
 the effort of every request; a second session sets CLAUDE_CODE_EFFORT_LEVEL as well. --also-without
 adds a session in which nothing is named on the call, where the worker must run as the main session.
+
+--also-browser adds a session in a project folder whose .mcp.json names the workspace agent's browser
+exactly as workspace-browser.py writes it, beside the sandbox settings: the Playwright tool server, run by
+npx. It asserts that the browser tools are offered, that a page on a loopback address opens, that a
+screenshot saved without a name lands in .browser-output/ in the project folder, that a named file outside
+the project folder is refused, and that a file: address is refused. It needs npx and Google Chrome, and it
+is offline apart from npx's cache: npx uses the npm cache of the user running the test (npm_config_cache,
+else ~/.npm), and fetches @playwright/mcp@0.0.86 there once when it is not cached yet.
 """
 import http.server
 import json
@@ -48,6 +56,15 @@ def model_fixture(calls, requests):
         def log_message(self, *_):
             pass
 
+        def do_GET(self):
+            # A page on a loopback address, for the browser to open.
+            page = b"<html><head><title>Fixture page</title></head><body><h1>PAGE-MARKER</h1></body></html>"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(page)))
+            self.end_headers()
+            self.wfile.write(page)
+
         def do_POST(self):
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             if "/count_tokens" in self.path:
@@ -75,7 +92,8 @@ def model_fixture(calls, requests):
                 name, arguments = calls[index][1], calls[index][2]
                 emit("content_block_start", index=0, content_block={
                     "type": "tool_use", "id": f"tool_{index}", "name": name, "input": {}})
-                emit("content_block_delta", index=0, delta={"type": "input_json_delta", "partial_json": json.dumps(arguments)})
+                partial = json.dumps(arguments).replace("{PORT}", str(self.server.server_port))
+                emit("content_block_delta", index=0, delta={"type": "input_json_delta", "partial_json": partial})
                 reason = "tool_use"
             else:
                 emit("content_block_start", index=0, content_block={"type": "text", "text": ""})
@@ -147,10 +165,11 @@ class Acp:
                 pass
 
 
-def exercise(home, earlier=None, settings=True):
+def exercise(home, earlier=None, settings=True, browser=False):
     """One supervisor session in bypassPermissions, the mode its settings file asks the harness for.
     earlier: a settings.json the project folder already has, which the helper must complete.
-    settings=False: no settings file at all, to show that the checks can fail."""
+    settings=False: no settings file at all, to show that the checks can fail.
+    browser=True: the project folder's .mcp.json names the browser, and the model drives it instead."""
     home = home.resolve()
     project = home / "WorkSpace" / "proj"
     project.mkdir(parents=True)
@@ -188,7 +207,17 @@ def exercise(home, earlier=None, settings=True):
     if not adapter:
         raise SystemExit("Install the Claude ACP adapter before running this test.")
     key_glob = f'P=$HOME/.buzz-agents; cat "$P"/*/*/identity.key'
-    calls = [
+    extra = {}
+    if browser:
+        # The entry is put there by the production helper, as create and team.sh do.
+        subprocess.run([sys.executable, "-I", str(SKILL / "scripts" / "workspace-browser.py"), "apply", "claude", str(project)],
+                       check=True, stdout=subprocess.DEVNULL)
+        (project / "page.html").write_text("<h1>LOCAL-FILE-MARKER</h1>")
+        # The system's temporary folder, as the agent has it: Playwright refuses a socket folder whose path
+        # is too long, as one in the disposable home can be.
+        extra = {"npm_config_cache": NPM_CACHE, "TMPDIR": os.environ.get("TMPDIR", "/tmp")}
+        warm(dict(os.environ, **extra))
+    calls = BROWSER_CALLS(project, home) if browser else [
         ("read inside", "Read", {"file_path": str(project / "inside.txt")}),
         ("write inside", "Write", {"file_path": str(project / "written-inside.txt"), "content": "ok"}),
         ("read outside", "Read", {"file_path": str(home / "private.txt")}),
@@ -225,7 +254,7 @@ def exercise(home, earlier=None, settings=True):
             "CLAUDE_CONFIG_DIR": str(home / ".claude"), "ANTHROPIC_API_KEY": "fixture-only",
             "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{server.server_port}", "NO_PROXY": "localhost,127.0.0.1",
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1", "DISABLE_TELEMETRY": "1",
-            "CLAUDE_AGENT_ACP_PROTOCOL": "v1",
+            "CLAUDE_AGENT_ACP_PROTOCOL": "v1", **extra,
         }
         command = [adapter]
         acp = Acp(command, str(project), env, time.monotonic() + 420)
@@ -255,6 +284,11 @@ def exercise(home, earlier=None, settings=True):
         item = results.get(f"tool_{index}")
         assert item is not None, f"no result for: {label} ({len(requests)} model requests)"
         out[label] = (bool(item.get("is_error")), json.dumps(item.get("content")))
+    if browser:
+        offered = sorted({t.get("name", "") for r in requests for t in r.get("tools") or []} & {
+            "mcp__playwright__browser_navigate", "mcp__playwright__browser_take_screenshot"})
+        saved = sorted(p.name for p in (project / ".browser-output").glob("*.png")) if (project / ".browser-output").is_dir() else []
+        return out, {"offered": offered, "saved": saved, "outside": (home / "stolen.png").exists(), "approved": acp.approved}
     first = json.dumps(requests[0].get("system")) + json.dumps(requests[0].get("messages")) if requests else ""
     state = {
         "mode_applied": "result" in mode, "approved": acp.approved, "project_instructions": "PROJECT-INSTRUCTIONS-MARKER" in first,
@@ -418,6 +452,65 @@ def check_workers(verbose, also_without):
           + (" With nothing named on the call, the worker ran on the main session's model and effort." if also_without else ""))
 
 
+NPM_CACHE = os.environ.get("npm_config_cache") or os.path.expanduser("~/.npm")   # read before any HOME is replaced
+BROWSER_PACKAGE = "@playwright/mcp@0.0.86"
+
+
+def warm(env):
+    """Fetch the browser package once, as a start with the browser on does, so the session finds it at once."""
+    npx = shutil.which("npx", path=env.get("PATH"))
+    if not npx:
+        raise SystemExit("--also-browser needs npx (Node.js) on PATH.")
+    run = subprocess.run([npx, "-y", BROWSER_PACKAGE, "--version"], env=env, capture_output=True, text=True, timeout=300)
+    assert run.returncode == 0, f"npx -y {BROWSER_PACKAGE} --version failed: {(run.stderr or run.stdout)[-400:]}"
+
+
+def BROWSER_CALLS(project, home):
+    """What the local model asks the browser for: load its tools (they are deferred), open a loopback page,
+    save a screenshot without a name, one named outside the project folder, and open a project file as file:."""
+    return [
+        ("load the browser tools", "ToolSearch", {"query": "select:mcp__playwright__browser_navigate,mcp__playwright__browser_take_screenshot", "max_results": 5}),
+        ("open a loopback page", "mcp__playwright__browser_navigate", {"url": "http://127.0.0.1:{PORT}/page"}),
+        ("screenshot without a name", "mcp__playwright__browser_take_screenshot", {}),
+        ("screenshot named outside", "mcp__playwright__browser_take_screenshot", {"filename": str(home / "stolen.png")}),
+        ("a project file as file:", "mcp__playwright__browser_navigate", {"url": "file://" + str(project / "page.html")}),
+    ]
+
+
+def check_browser(verbose):
+    """The workspace agent's browser on Claude, with the entry exactly as workspace-browser.py writes it."""
+    tmp = tempfile.mkdtemp(prefix="buzz-browser-")
+    try:
+        out, state = exercise(Path(tmp), browser=True)
+    finally:
+        time.sleep(1)   # the browser may still be writing its last files there
+        shutil.rmtree(tmp, ignore_errors=True)
+    if verbose:
+        print("--- browser")
+        for name, (error, text) in out.items():
+            print(f"  {name:32s} error={error!s:5} {text[:160]}")
+        print("  ", state)
+    # (a) the browser tools are offered: the tool search loads them, and the next requests carry them.
+    assert state["offered"] == ["mcp__playwright__browser_navigate", "mcp__playwright__browser_take_screenshot"], state
+    # (b) a page on a loopback address opens.
+    error, text = out["open a loopback page"]
+    assert not error and "Fixture page" in text, out["open a loopback page"]
+    # (c) a screenshot saved without a name lands in .browser-output/ in the project folder.
+    error, text = out["screenshot without a name"]
+    assert not error and ".browser-output/" in text and state["saved"], (out["screenshot without a name"], state)
+    # (d) a named file outside the project folder is refused, and nothing is written there.
+    error, text = out["screenshot named outside"]
+    assert error and "outside allowed roots" in text and not state["outside"], (out["screenshot named outside"], state)
+    # (e) a file: address is refused, for a file inside the project folder too.
+    error, text = out["a project file as file:"]
+    assert error and 'Access to \\"file:\\" protocol is blocked' in text, out["a project file as file:"]
+    print(f"Measured over ACP with the installed Claude adapter (bypassPermissions, the sandbox settings in place) and "
+          f".mcp.json as workspace-browser.py writes it: the browser tools are offered ({len(state['offered'])} loaded by the "
+          f"tool search), a loopback page opens, a screenshot without a name lands in .browser-output/, a named file "
+          f"outside the project folder is refused, and a file: address is refused; {state['approved']} permission "
+          f"request(s) reached the client.")
+
+
 HELD = "the settings hold"
 LEFT = "left to the rule in the supervisor's prompt"
 
@@ -499,6 +592,9 @@ def main():
         print(f"  - {line}")
     # The workspace agent's workers: what a start's variables give a worker started through the subagent tool.
     check_workers(verbose, "--also-without" in sys.argv)
+    # The workspace agent's browser, named in the project folder by the production helper.
+    if "--also-browser" in sys.argv:
+        check_browser(verbose)
 
 
 if __name__ == "__main__":
