@@ -29,6 +29,12 @@
 # A reviewer's own team has one agent, reviewer, which answers anyone who mentions it. This command
 # derives whom each agent answers from that agent's settings file.
 #
+# THE LIVE VIEW (since 5.1.0): Buzz Desktop shows the owner what each agent does, in frames encrypted to
+# the owner, unless the team has it off (team.conf observer=no). The channel supervisor runs several
+# conversations at a time (its agent.conf parallel=, one adapter process each); the workspace agent and the
+# reviewer run one. An agent on Codex runs the Codex CLI in ~/.local/share/buzz-agent-team when one is
+# installed there (see codex_choice). check and status show all three.
+#
 # THE PROJECT FOLDER the agents work in is the folder this command is started from, or --workspace DIR:
 #   cd ~/code/shop && ~/.buzz-agents/shop/team.sh
 # It can never be the team folder or a folder around it, because the secret keys are here. Started
@@ -177,6 +183,26 @@ CLAUDE_CODE_SUBAGENT_EFFORT are removed, so that none overrides it.
     has none of its own.
   - On Codex: a model the list offers (each model once; model[level] also gives their level).
 
+The live view: Buzz Desktop shows you what each agent does, in frames encrypted to you, and lets you
+cancel a turn or switch its model. It is the team's choice, for every agent (team.conf observer=yes, or
+a team without the line; observer=no turns it off). Change it with the skill: agent-team.sh upgrade
+<team> --observer or --no-observer.
+
+Conversations at a time: the channel supervisor runs as many as its agent.conf says (parallel=N; the
+skill saves 3 unless asked for another number), one adapter process each, so that turns for different
+conversations run at the same time instead of waiting in a queue. The workspace agent and the reviewer run one: the workspace agent must
+not run two jobs on the same files at once, and the reviewer is only mentioned now and then. Change it
+with the skill: agent-team.sh upgrade <team> --supervisor-parallel N (1 to 8). The agent is still one
+process, which this command starts, stops and reports.
+
+The Codex CLI of an agent on Codex: the stock adapter (codex-acp 1.13.1) runs the Codex CLI it bundles,
+which cannot use the newest models with a ChatGPT sign-in: a turn on one fails without a line in the log.
+When ~/.local/share/buzz-agent-team/node_modules/.bin/codex is there (AGENT_TEAM_CODEX_CLI names another
+file), each agent on Codex is started with CODEX_PATH set to it, and its model list is retrieved with it.
+A CODEX_PATH your shell exports is left as it is and wins. check prints one codex line per agent on Codex.
+Install a newer one with:
+  npm install --prefix "$HOME/.local/share/buzz-agent-team" --save-exact @openai/codex@0.171.0
+
 The browser belongs to the project folder: the Playwright tool server, a headless Chrome that starts
 with a new, empty profile each session, so it is signed in to nothing. The adapter's CLI reads it from
 the project folder itself: .mcp.json on Claude, .codex/config.toml on Codex, written and checked by
@@ -217,6 +243,9 @@ Environment:
   AGENT_TEAM_LOG_MAX_BYTES  a log above this is moved to agent.log.1 at start (10 MiB)
   AGENT_TEAM_MODELS_TIMEOUT seconds a model list may take to arrive (default and most: 30)
   AGENT_TEAM_PYTHON         the python3 that retrieves a model list (none: never retrieve one)
+  AGENT_TEAM_CODEX_CLI      the Codex CLI agents on Codex run, a full path (default
+                            ~/.local/share/buzz-agent-team/node_modules/.bin/codex, when it is
+                            there; none: the adapter's own)
   AGENT_TEAM_CHROME         the Google Chrome the browser check looks for, instead of the usual
                             places (macOS: Google Chrome.app in /Applications or ~/Applications;
                             elsewhere google-chrome or google-chrome-stable on PATH); for tests
@@ -225,11 +254,12 @@ EOF
 }
 
 # ---------------------------------------------------------------- cleanup and lock
-LOCK_DIR='' LIST_TMP='' WARM_TMP='' CHECK_PROMPTS=()
+LOCK_DIR='' LIST_TMP='' WARM_TMP='' CODEX_TMP='' CHECK_PROMPTS=()
 cleanup() {
     local f
     if [ -n "$LOCK_DIR" ]; then rm -rf -- "$LOCK_DIR"; LOCK_DIR=''; fi
     if [ -n "$LIST_TMP" ]; then rm -f -- "$LIST_TMP" "$LIST_TMP.err"; LIST_TMP=''; fi
+    if [ -n "$CODEX_TMP" ]; then rm -f -- "$CODEX_TMP"; CODEX_TMP=''; fi
     for f in ${CHECK_PROMPTS[@]+"${CHECK_PROMPTS[@]}"}; do rm -f -- "$f"; done
     CHECK_PROMPTS=()
     if [ -n "$WARM_TMP" ]; then rm -f -- "$WARM_TMP"; WARM_TMP=''; fi
@@ -483,6 +513,9 @@ resolve_workspace() { # -> RUN_WORKSPACE WORKSPACE_SOURCE
 # whether the workspace agent has the browser in that run, and since 5.0.0 whether each agent has it
 # (on or off; empty when it could not be told). A file written before 4.2.0 has none of these lines,
 # and PF_WREC stays empty; one written by 4.2.0 has no browser line, and PF_BROWSER stays empty.
+# The PID is the launcher's, which becomes the harness (exec): one process per agent, however many
+# conversations it runs at a time. The harness starts that many adapter processes itself and stops them
+# when it stops, so stop and status follow the one PID.
 read_pidfile() { # HOME -> PF_PID PF_START PF_BACKEND PF_MODEL PF_WORKSPACE PF_EFFORT PF_WALL PF_WMODEL PF_WEFFORT PF_WREC PF_BROWSER; returns 1 when there is none
     PF_PID='' PF_START='' PF_BACKEND='' PF_MODEL='' PF_WORKSPACE='' PF_EFFORT='' PF_WALL='' PF_WMODEL='' PF_WEFFORT='' PF_WREC='' PF_BROWSER=''
     [ -f "$1/agent.pid" ] || return 1
@@ -623,6 +656,8 @@ refresh_models() { # BACKEND ID: 0 when the list in place was retrieved in this 
             for v in $(compgen -e); do if credential_name "$v"; then unset "$v"; fi; done
             unset CLAUDE_CODE_EXECUTABLE
             export CLAUDE_AGENT_ACP_PROTOCOL=v1
+            # On Codex the list comes from the Codex CLI the agent will run.
+            if [ "$b" = codex ]; then codex_env; fi
             exec "$py" -I "$fetch" --lines --timeout "$timeout" -- "$cmd" < /dev/null
         )
     } > "$LIST_TMP" 2> "$LIST_TMP.err" || rc=$?
@@ -683,6 +718,82 @@ require_model() { # BACKEND ROLE MODEL
                 die "$3 is not a $1 model offered for $(label "$2"). The list retrieved $(sed -n '1s/^# retrieved //p' "$list" | cut -d' ' -f1) offers: $(grep -v '^#' "$list" | cut -f1 | tr '\n' ' ')"
             fi
             die "$3 is not a Claude model: use an alias (opus, sonnet, haiku, fable) or a full name such as claude-opus-5-5" ;;
+    esac
+}
+
+# ---------------------------------------------------------------- the live view, conversations, the Codex CLI
+# The live view (since 5.1.0): the harness publishes what an agent does as frames encrypted to the owner,
+# which Buzz Desktop shows, and takes the owner's controls back: cancel a turn, switch the model. It is the
+# team's choice: team.conf observer=no turns it off for every agent, and a team without the line has it on.
+# The skill writes it into each settings file; this command reads team.conf to show it.
+observer_on() { [ "$(conf_get "$T_DIR/team.conf" observer 2>/dev/null || true)" != no ]; }
+observer_words() { # what the live view of this team does, and the option that changes it
+    if observer_on; then printf 'on: you see what it does in Buzz Desktop and can cancel a turn or switch its model there; the frames are encrypted to you (agent-team.sh upgrade <team> --no-observer turns it off)'
+    else printf 'off (agent-team.sh upgrade <team> --observer turns it on)'; fi
+}
+# The conversations an agent runs at a time: one adapter process each. The channel supervisor's agent.conf
+# says how many (parallel=, written by the skill); the workspace agent and the reviewer run one. The agent is
+# one process all the same: agent.pid holds it, and stop and status follow it.
+conversations() { # ID
+    local v=''
+    if [ "$1" = supervisor ]; then v=$(afield supervisor parallel); fi
+    case $v in '' | *[!0-9]* | 0*) v=1 ;; esac
+    printf '%s' "$v"
+}
+conversations_text() { # N: "3 conversations at a time: three adapter processes"
+    local w
+    case $1 in 1) w=one ;; 2) w=two ;; 3) w=three ;; 4) w=four ;; 5) w=five ;; 6) w=six ;; 7) w=seven ;; 8) w=eight ;; *) w=$1 ;; esac
+    if [ "$1" = 1 ]; then printf '1 conversation at a time: one adapter process'
+    else printf '%s conversations at a time: %s adapter processes' "$1" "$w"; fi
+}
+# The Codex CLI of an agent on Codex. The stock adapter runs the program CODEX_PATH names, or else the Codex
+# CLI it bundles. That one (Codex 0.156.1 in adapter 1.13.1) lists the newest models but cannot run them with
+# a ChatGPT sign-in: every turn on one ends with HTTP 400, and the harness log records nothing. So when the
+# calling shell has no CODEX_PATH of its own and codex_cli_file can be run, each agent on Codex is started
+# with CODEX_PATH set to it, and its model list is retrieved with it. A CODEX_PATH of the calling shell is
+# left as it is and wins. AGENT_TEAM_CODEX_CLI names another file; none means none. The one the adapter
+# bundles is <its package>/node_modules/.bin/codex. Keep codex_cli_file, codex_choice, codex_env and
+# conversations_text identical to agent-team.sh's (test-team-sh.sh compares them).
+CODEX_INSTALL='npm install --prefix "$HOME/.local/share/buzz-agent-team" --save-exact @openai/codex@0.171.0'
+codex_cli_file() { printf '%s' "${AGENT_TEAM_CODEX_CLI:-$HOME/.local/share/buzz-agent-team/node_modules/.bin/codex}"; }
+# CODEX_RUN: the Codex CLI the adapter will run (empty when it cannot be told); CODEX_FROM: where that comes
+# from, shell (the calling shell's CODEX_PATH), skill (codex_cli_file) or adapter (the one it bundles).
+CODEX_RUN='' CODEX_FROM=adapter
+codex_choice() {
+    local f acp py=${AGENT_TEAM_PYTHON:-python3}
+    CODEX_RUN='' CODEX_FROM=adapter
+    if [ -n "${CODEX_PATH:-}" ]; then CODEX_RUN=$CODEX_PATH CODEX_FROM=shell; return 0; fi
+    f=$(codex_cli_file)
+    case $f in /*) if [ -f "$f" ] && [ -x "$f" ]; then CODEX_RUN=$f CODEX_FROM=skill; return 0; fi ;; esac
+    acp=$(command -v codex-acp 2>/dev/null) || return 0
+    [ "$py" != none ] && command -v -- "$py" >/dev/null 2>&1 || return 0
+    acp=$("$py" -I -c 'import os,sys; print(os.path.dirname(os.path.dirname(os.path.realpath(sys.argv[1]))))' "$acp" 2>/dev/null) || return 0
+    if [ -x "$acp/node_modules/.bin/codex" ]; then CODEX_RUN=$acp/node_modules/.bin/codex; fi
+}
+codex_env() { codex_choice; if [ "$CODEX_FROM" = skill ]; then export CODEX_PATH=$CODEX_RUN; fi; } # in the subshell that runs the adapter
+CODEX_VERSION=''
+codex_version() { # FILE -> CODEX_VERSION: the last line of its --version, at most 10 s
+    CODEX_VERSION=''
+    [ -n "$1" ] && [ -f "$1" ] && [ -x "$1" ] || return 0
+    CODEX_TMP=$(mktemp "${TMPDIR:-/tmp}/team-codex.XXXXXX" 2>/dev/null) || { CODEX_TMP=''; return 0; }
+    if bounded 10 "$CODEX_TMP" "$1" --version; then CODEX_VERSION=$(sed -n '$p' "$CODEX_TMP" | cut -c1-80); fi
+    rm -f -- "$CODEX_TMP"
+    CODEX_TMP=''
+}
+# The check's line for the Codex CLI of an agent on Codex.
+codex_line() {
+    local v f
+    codex_choice
+    codex_version "$CODEX_RUN"
+    v=$CODEX_VERSION
+    case $CODEX_FROM in
+        skill)
+            if [ -n "${AGENT_TEAM_CODEX_CLI:-}" ]; then f='AGENT_TEAM_CODEX_CLI'; else f='~/.local/share/buzz-agent-team'; fi
+            line ok codex "$CODEX_RUN${v:+ ($v)}, from $f: the adapter runs it (CODEX_PATH)" ;;
+        shell)
+            if [ -f "$CODEX_RUN" ] && [ -x "$CODEX_RUN" ]; then line ok codex "$CODEX_RUN${v:+ ($v)}, from your shell's CODEX_PATH: the adapter runs it"
+            else line PROBLEM codex "your shell's CODEX_PATH, $CODEX_RUN, is not a program that can be run, and the adapter would run it" 'unset CODEX_PATH, or point it at a Codex CLI'; fi ;;
+        *) line note codex "the adapter's own${CODEX_RUN:+, $CODEX_RUN}${v:+ ($v)}: it cannot use the newest models with a ChatGPT sign-in, and a turn on one then fails without a line in the log" "$CODEX_INSTALL" ;;
     esac
 }
 
@@ -1328,8 +1439,9 @@ agent_env() { # ID
     # the calling shell may export are removed, so that none overrides what the prompt says.
     unset CLAUDE_CODE_SUBAGENT_MODEL CLAUDE_CODE_SUBAGENT_MODEL_FORCE CLAUDE_CODE_SUBAGENT_EFFORT
     # On the stock Codex adapter: its workspace-write mode, whatever the calling shell exports. The
-    # adapter sends that mode's sandbox with every turn, over what a Codex config file says.
-    if [ "$b" = codex ]; then export INITIAL_AGENT_MODE=agent; fi
+    # adapter sends that mode's sandbox with every turn, over what a Codex config file says. And the Codex
+    # CLI it runs: the one in ~/.local/share/buzz-agent-team when it is there (codex_choice).
+    if [ "$b" = codex ]; then export INITIAL_AGENT_MODE=agent; codex_env; fi
     export RUN_BUZZ_ACP_KEY_FILE=$home/identity.key
     # Its prompt: prompt.md, or in a run that adds a section to it (its workers, the browser), the file of that run.
     eval "v=\$RUN_PROMPT_$1"
@@ -1418,6 +1530,13 @@ run_checks() { # AGENT...: 0 when everything a start needs is in place
         else line MISSING proof 'no ownership proof stored' 'store one with the skill: agent-team.sh proof <team> '"$id"; fi
         if out=$(answers "$id"); then line ok answers "$out"
         else line PROBLEM answers "$out, which the harness refuses to start" 'rebuild its settings with the skill: agent-team.sh upgrade <team>'; fi
+        line ok 'live view' "$(observer_words)"
+        if [ "$id" = supervisor ]; then
+            out=$(conversations supervisor)
+            if [ "$out" = 1 ]; then out="$(conversations_text 1): turns for different conversations wait in a queue"
+            else out="$(conversations_text "$out"), so that turns for different conversations run at the same time"; fi
+            line ok conversations "$out (agent-team.sh upgrade <team> --supervisor-parallel N changes it)"
+        fi
         old=$(env_get "$home/$ENV_NAME" RUN_BUZZ_ACP_KEY_FILE) || old=''
         if [ -n "$old" ] && [ "$old" != "$home/identity.key" ]; then
             line note 'moved folder' "the settings file names ${old%/identity.key}; this folder's own paths are used instead"
@@ -1465,6 +1584,7 @@ run_checks() { # AGENT...: 0 when everything a start needs is in place
         fi
         browser_line "$id" "$b"
         need_cmd "$(backend_command "$b")"
+        if [ "$b" = codex ]; then codex_line; fi
         [ -n "$launcher" ] || continue
         rc=0
         out=$( (scrub_env; agent_env "$id"; cd -- "$home" && "$launcher" --check --backend "$b" ${m:+--model "$m"}) 2>&1 < /dev/null) || rc=$?
@@ -1483,7 +1603,7 @@ run_checks() { # AGENT...: 0 when everything a start needs is in place
 
 # ---------------------------------------------------------------- start and check
 cmd_start() { # MODE(start|check) ARGS...
-    local mode=$1 ids='' all=no yes=no id b m e w home log pid protocol wait_s max_bytes size i alive started='' todo='' explicit rc out wm we wk bk br bopt=''
+    local mode=$1 ids='' all=no yes=no id b m e w home log pid protocol wait_s max_bytes size i alive started='' todo='' explicit rc out wm we wk bk br bopt='' cv
     shift
     while [ "$#" -gt 0 ]; do
         case $1 in
@@ -1672,7 +1792,9 @@ cmd_start() { # MODE(start|check) ARGS...
             [ -z "$started" ] || note "Still running: $started"
             die "$(adir "$id") did not start"
         fi
-        say "$(adir "$id"): started as PID $pid on $b, model ${m:-the runtime default}${e:+, reasoning effort $e}${wk:+; its workers: $wk}${bk:+; $bk} (log $log)"
+        cv=''
+        if [ "$id" = supervisor ]; then cv=$(conversations_text "$(conversations supervisor)"); fi
+        say "$(adir "$id"): started as PID $pid on $b, model ${m:-the runtime default}${e:+, reasoning effort $e}${wk:+; its workers: $wk}${bk:+; $bk}${cv:+; $cv} (log $log)"
         if [ "$w" = none ]; then say "$(adir "$id"): WARNING: started WITHOUT sandbox settings in its project folder; only the rule in its prompt holds it"; fi
         started="$started${started:+, }$id"
     done
@@ -1766,6 +1888,8 @@ cmd_status() {
             say "    saved: $b, model ${m:-the runtime default}, reasoning effort ${se:-none set here}"
             if [ "$id" = agent ]; then say "    saved for its workers on $b: $(workers_words "$(saved_worker model "$b")" "$(saved_worker effort "$b")")"; fi
             say "    answers $(answers "$id" || true)"
+            say "    live view $(observer_words)"
+            if [ "$id" = supervisor ]; then say "    $(conversations_text "$(conversations supervisor)") (agent-team.sh upgrade <team> --supervisor-parallel N changes it)"; fi
         else say "    made by an earlier version of the skill (format $(agent_format "$id")): upgrade it with the skill (agent-team.sh upgrade <team>) before starting"; fi
         say "    $run"
         say "    log $home/agent.log ($size bytes)"

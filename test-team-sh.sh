@@ -32,7 +32,7 @@ OUT=$TD/out BIN=$TD/bin ROOT=$TD/root
 export GIT_CEILING_DIRECTORIES=$TOP
 export HOME=$TD/home
 unset CODEX_HOME CLAUDE_CONFIG_DIR AGENT_TEAM_TEMPLATES AGENT_TEAM_PYTHON CLAUDE_AGENT_ACP_PROTOCOL BUZZ_AUTH_TAG AGENT_TEAM_LAUNCHER TEAM_SH_ASK CLAUDE_CODE_EFFORT_LEVEL
-unset CLAUDE_CODE_SUBAGENT_MODEL CLAUDE_CODE_SUBAGENT_MODEL_FORCE CLAUDE_CODE_SUBAGENT_EFFORT
+unset CLAUDE_CODE_SUBAGENT_MODEL CLAUDE_CODE_SUBAGENT_MODEL_FORCE CLAUDE_CODE_SUBAGENT_EFFORT CODEX_PATH AGENT_TEAM_CODEX_CLI
 export AGENT_TEAM_ROOT=$ROOT AGENT_TEAM_KEYGEN=$KEYGEN AGENT_TEAM_BUZZ=$BIN/buzz
 export BUZZ_CLAUDE_MANAGED_DIR=$TD/managed-none
 export AGENT_TEAM_START_WAIT=1 AGENT_TEAM_STOP_GRACE=5
@@ -45,7 +45,7 @@ mkdir -p "$AGENT_TEAM_CHROME"
 export PATH=$BIN:$PATH
 # Stray exported settings in the caller's shell must never reach an agent.
 export BUZZ_PRIVATE_KEY=0000000000000000000000000000000000000000000000000000000000000001
-export RUN_BUZZ_ACP_WORKDIR=/stray/workdir BUZZ_ACP_SYSTEM_PROMPT_FILE=/stray/prompt.md
+export RUN_BUZZ_ACP_WORKDIR=/stray/workdir BUZZ_ACP_SYSTEM_PROMPT_FILE=/stray/prompt.md BUZZ_ACP_RELAY_OBSERVER=false BUZZ_ACP_AGENTS=7
 CHANNEL=0b1c2d3e-4f50-6172-8394-a5b6c7d8e9f0
 COMMUNITY=wss://community.example.org
 OWNER=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
@@ -141,6 +141,9 @@ with open(os.path.join(home, ".fake-acp-calls"), "a") as rec:
         "yes" if any(k.startswith(("ANTHROPIC_", "OPENAI_")) for k in os.environ) else "no",
         "yes" if "BUZZ_PRIVATE_KEY" in os.environ else "no",
         os.environ.get("CLAUDE_CODE_EXECUTABLE", "unset")))
+# The Codex CLI the adapter was told to run, in a file of its own: $HOME/.fake-acp-codex-path.
+with open(os.path.join(home, ".fake-acp-codex-path"), "a") as rec:
+    rec.write("%s codex_path=%s\n" % (backend, os.environ.get("CODEX_PATH", "unset")))
 if mode == "off":
     sys.exit(0)
 lists = {"claude": [("default", "Default (recommended)"), ("opus", "Opus 5.5"), ("sonnet", "Sonnet 5.5"),
@@ -186,7 +189,7 @@ rec=${STANDIN_RECORD:-/dev/null}
     printf 'call: %s\n' "$*"
     printf 'cwd: %s\n' "$(pwd -P)"
     for v in RUN_BUZZ_ACP_KEY_FILE BUZZ_ACP_SYSTEM_PROMPT_FILE RUN_BUZZ_ACP_WORKDIR BUZZ_ACP_AGENT_COMMAND BUZZ_ACP_CONFIG CLAUDE_AGENT_ACP_PROTOCOL CLAUDE_CODE_EFFORT_LEVEL INITIAL_AGENT_MODE BUZZ_ACP_PERMISSION_MODE \
-        CLAUDE_CODE_SUBAGENT_MODEL CLAUDE_CODE_SUBAGENT_MODEL_FORCE CLAUDE_CODE_SUBAGENT_EFFORT; do
+        CLAUDE_CODE_SUBAGENT_MODEL CLAUDE_CODE_SUBAGENT_MODEL_FORCE CLAUDE_CODE_SUBAGENT_EFFORT CODEX_PATH BUZZ_ACP_RELAY_OBSERVER BUZZ_ACP_AGENTS; do
         printf '%s=%s\n' "$v" "${!v-unset}"
     done
     if [ -n "${BUZZ_PRIVATE_KEY+x}" ]; then printf 'inherited-key: yes\n'; else printf 'inherited-key: no\n'; fi
@@ -752,6 +755,163 @@ if [ -n "${AGENT_TEAM_REAL_LAUNCHER:-}" ]; then
     check 'and the stock Codex adapter' has "$OUT/rv-real.out" "Runtime:      $BIN/codex-acp"
 fi
 stop_all "$R"
+
+scenario 'the live view and the conversations at a time: the env lines of each role, what create and upgrade save, check, status and the start line'
+RUN_CWD=$TD/ws/shop
+envline() { grep -c -x -F -- "$2" "$1/.env.buzz-acp.local"; } # AGENT_DIR LINE: how often the env file has that line
+cline() { printf '  %-8s %-17s %s' "$1" "$2" "$3"; } # STATUS NAME DETAIL: a line of the check, as team.sh prints it
+OBS_ON='# The live view: Buzz Desktop shows the owner what this agent does, in frames encrypted to the owner.'
+check 'every role'"'"'s env file has the live view on, with its comment line just above it' \
+    test "$(for d in "$T/shop" "$T/supervisor" "$R/reviewer"; do grep -x -B1 'BUZZ_ACP_RELAY_OBSERVER=true' "$d/.env.buzz-acp.local" | head -n 1; done | grep -c -x -F -- "$OBS_ON")" = 3
+check 'the channel supervisor runs 3 conversations at a time, the workspace agent and the reviewer one, each with the reason in a comment' \
+    test "$(envline "$T/supervisor" 'BUZZ_ACP_AGENTS=3')$(envline "$T/shop" 'BUZZ_ACP_AGENTS=1')$(envline "$R/reviewer" 'BUZZ_ACP_AGENTS=1')$(envline "$T/supervisor" '# 3 conversations at a time: three adapter processes, so that turns for different conversations do not wait in a queue.')$(envline "$T/shop" '# One conversation at a time: it must not run two jobs on the same files at once.')$(envline "$R/reviewer" '# One conversation at a time: it is only mentioned now and then.')" = 111111
+check 'the team saves the live view in team.conf, the channel supervisor its conversations in its agent.conf, and no other agent saves any' \
+    test "$(grep -c -x observer=yes "$T/team.conf")$(grep -c -x observer=yes "$R/team.conf")$(grep -c -x parallel=3 "$T/supervisor/agent.conf")$(cat "$T/shop/agent.conf" "$R/reviewer/agent.conf" | grep -c '^parallel=')" = 1110
+LV_ON='on: you see what it does in Buzz Desktop and can cancel a turn or switch its model there; the frames are encrypted to you (agent-team.sh upgrade <team> --no-observer turns it off)'
+LV_OFF='off (agent-team.sh upgrade <team> --observer turns it on)'
+run_team lv-check "$T" -- check
+check 'the check prints one live view line per agent, read from team.conf: on, what it does, and the option that turns it off' test "$RC$(grep -c -x -F "$(cline ok 'live view' "$LV_ON")" "$OUT/lv-check.out")" = 02
+check 'and one conversations line, for the channel supervisor only' \
+    test "$(grep -c -x -F "$(cline ok conversations '3 conversations at a time: three adapter processes, so that turns for different conversations run at the same time (agent-team.sh upgrade <team> --supervisor-parallel N changes it)')" "$OUT/lv-check.out")$(grep -c 'conversation' "$OUT/lv-check.out")" = 11
+: > "$STANDIN_RECORD"
+run_team lv-start "$T" -- start
+check 'the line that says the channel supervisor started names its conversations; the workspace agent'"'"'s does not' \
+    test "$RC$(grep -c '^supervisor: started as PID .*; 3 conversations at a time: three adapter processes (log ' "$OUT/lv-start.out")$(grep '^shop: started as PID' "$OUT/lv-start.out" | grep -c conversation)" = 010
+check 'a live view or a number of conversations this shell exports reaches no agent: its env file decides' \
+    test "$(grep -c -e '^BUZZ_ACP_RELAY_OBSERVER=' -e '^BUZZ_ACP_AGENTS=' "$STANDIN_RECORD")" -ge 4 -a "$(grep -e '^BUZZ_ACP_RELAY_OBSERVER=' -e '^BUZZ_ACP_AGENTS=' "$STANDIN_RECORD" | grep -c -v '=unset$')" = 0
+run_team lv-status "$T" -- status
+check 'status shows the live view of each agent, and the conversations of the channel supervisor' \
+    test "$(grep -c -x -F "    live view $LV_ON" "$OUT/lv-status.out")$(grep -c -x -F '    3 conversations at a time: three adapter processes (agent-team.sh upgrade <team> --supervisor-parallel N changes it)' "$OUT/lv-status.out")" = 21
+check 'an agent is still one process: one pid file each, which status and stop follow' test "$(sed -n '1p' "$T/supervisor/agent.pid" | grep -c '^[0-9][0-9]*$')$(grep -c 'running on claude' "$OUT/lv-status.out")" = 12
+stop_all "$T"
+check 'and stop ends it' test ! -e "$T/supervisor/agent.pid"
+# The other choices, in a team of its own (its own root and channel, so that no team above sees it).
+LVR=$TD/root-lv LV=$TD/root-lv/lv LV_CHANNEL=2c3d4e5f-6071-8293-a4b5-c6d7e8f9a0b1
+mkdir -p "$TD/ws/lv"
+run_lv() { local name=$1; shift 2; RC=0; env AGENT_TEAM_ROOT="$LVR" /bin/bash "$SCRIPT" "$@" > "$OUT/$name.out" 2>&1 < /dev/null || RC=$?; }
+LV_NEW=(--channel "$LV_CHANNEL" --community "$COMMUNITY" --owner "$OWNER")
+run_lv lv-create -- create --workspace "$TD/ws/lv" "${LV_NEW[@]}" --no-observer --supervisor-parallel 5
+check 'create --no-observer --supervisor-parallel 5: the live view off in every env file, 5 conversations for the channel supervisor, one for the workspace agent' \
+    test "$RC$(envline "$LV/lv" 'BUZZ_ACP_RELAY_OBSERVER=false')$(envline "$LV/supervisor" 'BUZZ_ACP_RELAY_OBSERVER=false')$(envline "$LV/supervisor" 'BUZZ_ACP_AGENTS=5')$(envline "$LV/lv" 'BUZZ_ACP_AGENTS=1')$(cat "$LV/lv/.env.buzz-acp.local" "$LV/supervisor/.env.buzz-acp.local" | grep -c 'BUZZ_ACP_RELAY_OBSERVER=true')" = 011110
+check 'each with its comment line' test "$(envline "$LV/lv" '# The live view is off for this team: agent-team.sh upgrade lv --observer turns it on.')$(envline "$LV/supervisor" '# 5 conversations at a time: five adapter processes, so that turns for different conversations do not wait in a queue.')" = 11
+check 'and saves them: observer=no in team.conf, parallel=5 in the channel supervisor'"'"'s agent.conf' test "$(grep -c -x observer=no "$LV/team.conf")$(grep -c -x parallel=5 "$LV/supervisor/agent.conf")$(grep -c '^parallel=' "$LV/lv/agent.conf")" = 110
+check 'create says what it saved, and how to change it' \
+    eval 'has "$OUT/lv-create.out" "Live view: off: Buzz Desktop does not show what the agents do (agent-team.sh upgrade lv --observer changes it)." && has "$OUT/lv-create.out" "The channel supervisor runs 5 conversations at a time: five adapter processes (agent-team.sh upgrade lv --supervisor-parallel N changes it)."'
+run_team lv-check-off "$LV" -- check
+check 'the check says the live view is off, with the option that turns it on, and names the 5 conversations' \
+    test "$(grep -c -x -F "$(cline ok 'live view' "$LV_OFF")" "$OUT/lv-check-off.out")$(grep -c -x -F "$(cline ok conversations '5 conversations at a time: five adapter processes, so that turns for different conversations run at the same time (agent-team.sh upgrade <team> --supervisor-parallel N changes it)')" "$OUT/lv-check-off.out")" = 21
+run_team lv-status-off "$LV" -- status
+check 'and so does status' test "$(grep -c -x -F "    live view $LV_OFF" "$OUT/lv-status-off.out")$(grep -c -x -F '    5 conversations at a time: five adapter processes (agent-team.sh upgrade <team> --supervisor-parallel N changes it)' "$OUT/lv-status-off.out")" = 21
+# The refusals: nothing is made or changed.
+mkdir -p "$TD/ws/lv2"
+for bad in 0 9 x 03; do
+    run_lv lv-bad -- create --workspace "$TD/ws/lv2" --name lv2 "${LV_NEW[@]}" --supervisor-parallel "$bad"
+    check "--supervisor-parallel $bad is refused, naming the range, and nothing is made" test "$RC$(grep -c "takes a number from 1 to 8 (got: $bad)" "$OUT/lv-bad.out")$([ -e "$LVR/lv2" ] && echo made)" = 11
+done
+run_lv lv-bad-agent -- create --workspace "$TD/ws/lv2" --name lv2 "${LV_NEW[@]}" --roles agent --supervisor-name 'Lv Supervisor' --supervisor-parallel 2
+run_lv lv-bad-rv -- create --workspace "$TD/ws/lv2" --name lv2 "${LV_NEW[@]}" --roles reviewer --supervisor-parallel 2
+check 'a create that makes no channel supervisor refuses --supervisor-parallel, and makes nothing' \
+    test "$(grep -c 'is for the channel supervisor, and this create makes none (--roles agent)' "$OUT/lv-bad-agent.out")$(grep -c 'is for the channel supervisor, and this create makes none (--roles reviewer)' "$OUT/lv-bad-rv.out")$([ -e "$LVR/lv2" ] && echo made)" = 11
+run_lv lv-both -- create --workspace "$TD/ws/lv2" --name lv2 "${LV_NEW[@]}" --observer --no-observer
+check 'and both --observer and --no-observer' test "$RC$(grep -c 'choose --observer or --no-observer, not both' "$OUT/lv-both.out")$([ -e "$LVR/lv2" ] && echo made)" = 11
+lv_sha() { (cd "$LV" && find . -type f ! -name 'agent.log*' | LC_ALL=C sort | xargs shasum -a 256) | shasum -a 256; }
+LV_SHA=$(lv_sha)
+run_lv lv-up-bad -- upgrade lv --supervisor-parallel 9
+run_skill lv-up-rv -- upgrade shop-reviewer --supervisor-parallel 2
+check 'upgrade refuses a number out of range, and --supervisor-parallel for a team without a channel supervisor; nothing is changed' \
+    test "$(grep -c 'takes a number from 1 to 8 (got: 9); nothing was changed' "$OUT/lv-up-bad.out")$(grep -c 'is for the channel supervisor, and workspace "shop-reviewer" has none; nothing was changed' "$OUT/lv-up-rv.out")$([ "$(lv_sha)" = "$LV_SHA" ] && echo same)" = 11same
+# A repeated create keeps the team: an option that would change it says so and saves nothing.
+run_lv lv-again -- create --workspace "$TD/ws/lv" "${LV_NEW[@]}" --observer --supervisor-parallel 4
+check 'a repeated create with other choices keeps the team, saves nothing, and names the upgrade that would' \
+    eval 'rc_is 0 && has "$OUT/lv-again.out" "create keeps its team.conf, so --observer was not saved. Save it with: agent-team.sh upgrade lv --observer" && has "$OUT/lv-again.out" "so --supervisor-parallel was not saved. Save it with: agent-team.sh upgrade lv --supervisor-parallel 4" && [ "$(lv_sha)" = "$LV_SHA" ]'
+# upgrade changes both; its plan names each change; a run without options keeps the saved ones.
+run_lv lv-up-dry -- upgrade lv --observer --supervisor-parallel 2 --dry-run
+check 'the upgrade plan names the live view of each agent, the conversations of the channel supervisor and team.conf, and repeats the options' \
+    eval 'rc_is 0 && [ "$(grep -c -x "    live view: off -> on (BUZZ_ACP_RELAY_OBSERVER=true): you see what it does in Buzz Desktop and can cancel a turn or switch its model there; the frames are encrypted to you" "$OUT/lv-up-dry.out")" = 2 ] && grep -qx "    conversations at a time: 5 -> 2 (BUZZ_ACP_AGENTS=2: two adapter processes)" "$OUT/lv-up-dry.out" && grep -q "^  team.conf: observer=yes (the live view of every agent, on) (kept as team.conf.bak-" "$OUT/lv-up-dry.out" && has "$OUT/lv-up-dry.out" "Run it: agent-team.sh upgrade lv --observer --supervisor-parallel 2" && [ "$(lv_sha)" = "$LV_SHA" ]'
+run_lv lv-up -- upgrade lv --observer --supervisor-parallel 2
+check 'upgrade writes them: the env lines, observer=yes, parallel=2, team.conf first' \
+    test "$RC$(envline "$LV/lv" 'BUZZ_ACP_RELAY_OBSERVER=true')$(envline "$LV/supervisor" 'BUZZ_ACP_AGENTS=2')$(grep -c -x observer=yes "$LV/team.conf")$(grep -c -x parallel=2 "$LV/supervisor/agent.conf")$(grep -n -e '^  team.conf: observer=yes$' -e '^  supervisor: upgraded$' "$OUT/lv-up.out" | cut -d: -f2 | tr -d ' \n')" = 01111team.confsupervisor
+run_lv lv-up2 -- upgrade lv
+check 'a second run without options says it is up to date and keeps them' test "$RC$(grep -c 'up to date; nothing was changed' "$OUT/lv-up2.out")$(grep -c -x parallel=2 "$LV/supervisor/agent.conf")$(grep -c -x observer=yes "$LV/team.conf")" = 0111
+run_lv lv-up-off -- upgrade lv --no-observer
+check 'upgrade --no-observer turns it off again, in team.conf and every env file' test "$RC$(grep -c -x observer=no "$LV/team.conf")$(envline "$LV/lv" 'BUZZ_ACP_RELAY_OBSERVER=false')$(envline "$LV/supervisor" 'BUZZ_ACP_RELAY_OBSERVER=false')" = 0111
+
+scenario 'the Codex CLI of an agent on Codex: CODEX_PATH at a start, the codex line of the check, the model list'
+RUN_CWD=$TD/ws/shop
+# The Codex CLI where versions before 5.0.0 installed theirs, under this test's HOME.
+SKILL_CX=$HOME/.local/share/buzz-agent-team/node_modules/.bin/codex
+mkdir -p "${SKILL_CX%/*}"
+printf '#!/bin/bash\n[ "${1:-}" = --version ] && { echo "codex-cli 0.171.0"; exit 0; }\nexit 2\n' > "$SKILL_CX"
+printf '#!/bin/bash\n[ "${1:-}" = --version ] && { echo "codex-cli 0.172.0"; exit 0; }\nexit 2\n' > "$TD/shell-codex"
+chmod 755 "$SKILL_CX" "$TD/shell-codex"
+codex_path_of() { call_for "$1" | sed -n 's/^CODEX_PATH=//p' | tail -n 1; } # AGENT_DIR: the CODEX_PATH of the last launcher call there
+same_in_both() { # the Codex choice and the words for conversations, line for line in team.sh and agent-team.sh
+    local f
+    for f in codex_choice conversations_text; do
+        [ -n "$(fn_body "$TEMPLATE" "$f")" ] && [ "$(fn_body "$TEMPLATE" "$f")" = "$(fn_body "$SCRIPT" "$f")" ] || return 1
+    done
+    for f in '^CODEX_INSTALL=' '^codex_cli_file() ' '^codex_env() '; do
+        [ -n "$(grep -m1 "$f" "$TEMPLATE")" ] && [ "$(grep -m1 "$f" "$TEMPLATE")" = "$(grep -m1 "$f" "$SCRIPT")" ] || return 1
+    done
+}
+check 'the Codex choice is the same in team.sh and agent-team.sh, line for line' same_in_both
+: > "$STANDIN_RECORD"
+run_team cx-start "$T" -- start supervisor --backend codex
+check 'an agent on Codex starts with CODEX_PATH set to the Codex CLI in ~/.local/share/buzz-agent-team' test "$RC$(codex_path_of "$T/supervisor")" = "0$SKILL_CX"
+check 'the check names it, its version and where it comes from' grep -q -x -F "$(cline ok codex "$SKILL_CX (codex-cli 0.171.0), from ~/.local/share/buzz-agent-team: the adapter runs it (CODEX_PATH)")" "$OUT/cx-start.out"
+run_team cx-start-claude "$T" -- start shop
+check 'an agent on Claude starts without it, and its check has no codex line' test "$RC$(codex_path_of "$T/shop")$(grep -c -E '^  [A-Za-z]+ +codex ' "$OUT/cx-start-claude.out")" = 0unset0
+stop_all "$T"
+: > "$STANDIN_RECORD"
+run_team cx-shell "$T" CODEX_PATH="$TD/shell-codex" -- start supervisor --backend codex
+check 'a CODEX_PATH of the calling shell is left as it is, and wins' test "$RC$(codex_path_of "$T/supervisor")" = "0$TD/shell-codex"
+check 'the check names it, with its version' grep -q -x -F "$(cline ok codex "$TD/shell-codex (codex-cli 0.172.0), from your shell's CODEX_PATH: the adapter runs it")" "$OUT/cx-shell.out"
+stop_all "$T"
+run_team cx-shell-bad "$T" CODEX_PATH="$TD/no-such-codex" -- start supervisor --backend codex
+check 'a CODEX_PATH of the shell that cannot be run is a problem: nothing starts' test "$RC$(grep -c "^  PROBLEM  codex  .*your shell's CODEX_PATH, $TD/no-such-codex, is not a program that can be run" "$OUT/cx-shell-bad.out")$([ -e "$T/supervisor/agent.pid" ] && echo started)" = 11
+: > "$STANDIN_RECORD"
+run_team cx-none "$T" AGENT_TEAM_CODEX_CLI=none -- start supervisor --backend codex
+check 'AGENT_TEAM_CODEX_CLI=none: no CODEX_PATH' test "$RC$(codex_path_of "$T/supervisor")" = 0unset
+stop_all "$T"
+run_team cx-named "$T" AGENT_TEAM_CODEX_CLI="$TD/shell-codex" -- start supervisor --backend codex
+check 'AGENT_TEAM_CODEX_CLI names another file: CODEX_PATH is that one, and the check says so' test "$RC$(codex_path_of "$T/supervisor")$(grep -c -x -F "$(cline ok codex "$TD/shell-codex (codex-cli 0.172.0), from AGENT_TEAM_CODEX_CLI: the adapter runs it (CODEX_PATH)")" "$OUT/cx-named.out")" = "0$TD/shell-codex1"
+stop_all "$T"
+run_team cx-missing "$T" AGENT_TEAM_CODEX_CLI="$TD/no-such-codex" -- start supervisor --backend codex
+check 'a missing file: no CODEX_PATH' test "$RC$(codex_path_of "$T/supervisor")" = 0unset
+stop_all "$T"
+chmod 644 "$SKILL_CX"
+run_team cx-noexec "$T" -- start supervisor --backend codex
+check 'a file that cannot be run: no CODEX_PATH' test "$RC$(codex_path_of "$T/supervisor")" = 0unset
+chmod 755 "$SKILL_CX"
+stop_all "$T"
+# The adapter's own: a note, not a problem, with the line that installs a newer one as its fix.
+mkdir -p "$TD/node_modules/.bin"
+printf '#!/bin/bash\n[ "${1:-}" = --version ] && { echo "codex-cli 0.156.1"; exit 0; }\nexit 2\n' > "$TD/node_modules/.bin/codex"
+chmod 755 "$TD/node_modules/.bin/codex"
+run_team cx-own "$T" AGENT_TEAM_CODEX_CLI=none -- check supervisor --backend codex
+check 'the adapter'"'"'s own Codex is a note: the check passes, says what fails, and gives the install line' \
+    test "$RC$(grep -c -x -F "$(cline note codex "the adapter's own, $TD/node_modules/.bin/codex (codex-cli 0.156.1): it cannot use the newest models with a ChatGPT sign-in, and a turn on one then fails without a line in the log")" "$OUT/cx-own.out")$(grep -c -x -F "$(cline '' '' 'fix: npm install --prefix "$HOME/.local/share/buzz-agent-team" --save-exact @openai/codex@0.171.0')" "$OUT/cx-own.out")" = 011
+rm -rf "$TD/node_modules"
+# The model list of an agent on Codex is retrieved with the Codex CLI it will run.
+rm -f "$HOME/.fake-acp-codex-path"
+echo list > "$ACP_MODE"
+# the channel supervisor: provider 2 (codex); the model menu after the list is retrieved: Enter; the browser: Enter
+ask_team cx-list "$T" '2\n\n\n' -- start supervisor
+check 'the model list is retrieved with the Codex CLI the agent will run' test "$RC$(cat "$HOME/.fake-acp-codex-path")" = "0codex codex_path=$SKILL_CX"
+stop_all "$T"
+rm -f "$HOME/.fake-acp-codex-path"
+export AGENT_TEAM_CODEX_CLI=none
+ask_team cx-list-own "$T" '2\n\n\n' -- start supervisor
+unset AGENT_TEAM_CODEX_CLI
+check 'and with the adapter'"'"'s own, no CODEX_PATH reaches the adapter' test "$RC$(cat "$HOME/.fake-acp-codex-path")" = '0codex codex_path=unset'
+stop_all "$T"
+rm -f "$HOME/.fake-acp-codex-path" "$ACP_MODE" "$ACP_CALLS"
+# The skill's own start sets it the same way.
+: > "$STANDIN_RECORD"
+RC=0; env STANDIN_SKIP_PATHS=yes /bin/bash "$SCRIPT" start shop supervisor --backend codex > "$OUT/cx-skill-start.out" 2>&1 < /dev/null || RC=$?
+check 'agent-team.sh start sets CODEX_PATH the same way for an agent on Codex' test "$RC$(codex_path_of "$T/supervisor")" = "0$SKILL_CX"
+stop_all "$T"
+rm -rf "$HOME/.local/share/buzz-agent-team"
 
 scenario 'reasoning effort: by option, asked, and saved'
 RUN_CWD=$TD/ws/shop

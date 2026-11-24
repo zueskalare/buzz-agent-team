@@ -7,7 +7,8 @@
 # The workspace agent's folder is named after the workspace (team.conf agent_folder=, "agent" when that
 # name is taken by something else in a team folder); the others are supervisor/ and reviewer/.
 #     identity.key         the agent's secret key (mode 600; nothing else holds it)
-#     .env.buzz-acp.local  settings for run-buzz-acp.sh (mode 600; no secret key)
+#     .env.buzz-acp.local  settings for run-buzz-acp.sh (mode 600; no secret key), the live view and the
+#                          conversations it runs at a time included
 #     prompt.md            the agent's role instructions, then the workspace brief if there is one
 #     agent.conf           public facts: id, role, display name, public key, backend
 #     subscriptions.toml   the channel supervisor's rules that decide which messages start its turn
@@ -18,6 +19,11 @@
 # finds everything from its own location, so a team folder runs and moves without this skill.
 # VERSION there is the version of this skill that created or last upgraded the folder.
 # Each agent runs on claude or codex and signs in only through the user's subscription.
+# Every agent has the live view unless the team has it off (team.conf observer=; --observer, --no-observer):
+# Buzz Desktop shows the owner what it does, in frames encrypted to the owner. The channel supervisor runs
+# 3 conversations at a time unless its agent.conf says otherwise (parallel=; --supervisor-parallel N).
+# An agent on Codex runs the Codex CLI in ~/.local/share/buzz-agent-team when one is installed there (see
+# codex_choice).
 # The shared PROJECT.md is initialized in the workspace if absent. The workspace first gets the settings
 # of each backend the agents run on (scripts/workspace-settings.py): for an agent on Claude its sandbox
 # settings, .claude/settings.json; for an agent on Codex the buzz rule, .codex/rules/buzz.rules.
@@ -344,15 +350,51 @@ usable_list() { # FILE: a retrieved list, from the stock adapter
     [ -s "$1" ] || return 1
     case $(sed -n 1p "$1") in *'/runtime/claude-agent-acp' | *'/runtime/codex-acp') return 1 ;; esac
 }
-codex_cli_of() { # the Codex CLI the stock adapter runs
-    local acp py=${AGENT_TEAM_PYTHON:-python3}
-    # The stock adapter runs CODEX_PATH, or else the Codex CLI it bundles (codex-acp dist/index.js,
-    # startCodexConnection), never the one on PATH.
-    if [ -n "${CODEX_PATH:-}" ]; then printf '%s' "$CODEX_PATH"; return 0; fi
+# The Codex CLI of an agent on Codex. The stock adapter runs the program CODEX_PATH names, or else the
+# Codex CLI it bundles (codex-acp dist/index.js, startCodexConnection), never the one on PATH. Adapter
+# 1.13.1 bundles Codex 0.156.1, which lists the newest models but cannot run them with a ChatGPT sign-in:
+# every turn on one ends with HTTP 400, and the harness log records nothing. A newer adapter bundles a
+# newer Codex, but the harness cannot talk to it (2.10.0: session/new, Invalid params), so the adapter stays
+# 1.13.1 and a newer Codex CLI is named to it by CODEX_PATH: codex_cli_file, in the folder where versions
+# before 5.0.0 installed their own Codex (AGENT_TEAM_CODEX_CLI names another file; none means none). When
+# the calling shell has no CODEX_PATH of its own and that file can be run, every start of an agent on
+# Codex, model list and model check uses it; a CODEX_PATH of the calling shell is left as it is and wins.
+# Keep CODEX_INSTALL, codex_cli_file, codex_choice, codex_env and conversations_text identical to those in
+# templates/team.sh (test-team-sh.sh compares them).
+CODEX_INSTALL='npm install --prefix "$HOME/.local/share/buzz-agent-team" --save-exact @openai/codex@0.171.0'
+codex_cli_file() { printf '%s' "${AGENT_TEAM_CODEX_CLI:-$HOME/.local/share/buzz-agent-team/node_modules/.bin/codex}"; }
+# CODEX_RUN: the Codex CLI the adapter will run (empty when it cannot be told); CODEX_FROM: where that comes
+# from, shell (the calling shell's CODEX_PATH), skill (codex_cli_file) or adapter (the one it bundles).
+CODEX_RUN='' CODEX_FROM=adapter
+codex_choice() {
+    local f acp py=${AGENT_TEAM_PYTHON:-python3}
+    CODEX_RUN='' CODEX_FROM=adapter
+    if [ -n "${CODEX_PATH:-}" ]; then CODEX_RUN=$CODEX_PATH CODEX_FROM=shell; return 0; fi
+    f=$(codex_cli_file)
+    case $f in /*) if [ -f "$f" ] && [ -x "$f" ]; then CODEX_RUN=$f CODEX_FROM=skill; return 0; fi ;; esac
     acp=$(command -v codex-acp 2>/dev/null) || return 0
     [ "$py" != none ] && command -v -- "$py" >/dev/null 2>&1 || return 0
     acp=$("$py" -I -c 'import os,sys; print(os.path.dirname(os.path.dirname(os.path.realpath(sys.argv[1]))))' "$acp" 2>/dev/null) || return 0
-    printf '%s' "$acp/node_modules/.bin/codex"
+    if [ -x "$acp/node_modules/.bin/codex" ]; then CODEX_RUN=$acp/node_modules/.bin/codex; fi
+}
+codex_cli_of() { codex_choice; printf '%s' "$CODEX_RUN"; } # the Codex CLI the stock adapter runs
+codex_env() { codex_choice; if [ "$CODEX_FROM" = skill ]; then export CODEX_PATH=$CODEX_RUN; fi; } # in the subshell that runs the adapter
+codex_from_words() { # where CODEX_RUN comes from, in words
+    case $CODEX_FROM in
+        shell) printf "from your shell's CODEX_PATH" ;;
+        skill) if [ -n "${AGENT_TEAM_CODEX_CLI:-}" ]; then printf 'from AGENT_TEAM_CODEX_CLI'; else printf 'from ~/.local/share/buzz-agent-team'; fi ;;
+        *) printf "the adapter's own" ;;
+    esac
+}
+CODEX_VERSION=''
+codex_version() { # FILE -> CODEX_VERSION: the last line of its --version, at most 10 s
+    local out
+    CODEX_VERSION=''
+    [ -n "$1" ] && [ -f "$1" ] && [ -x "$1" ] || return 0
+    out=$(mktemp "${TMPDIR:-/tmp}/agent-team-codex.XXXXXX") || return 0
+    TMP_PATHS+=("$out")
+    if bounded 10 "$out" "$1" --version; then CODEX_VERSION=$(sed -n '$p' "$out" | cut -c1-80); fi
+    rm -f -- "$out"
 }
 codex_bundled_models() { # the slugs the stock adapter's Codex CLI lists in its bundled catalog, offline
     local cli py=${AGENT_TEAM_PYTHON:-python3}
@@ -599,10 +641,12 @@ load_team() {
     set_agent_dirs
 }
 team_format() { conf_get "$T_DIR/team.conf" format 2>/dev/null || printf '1'; }
-team_conf_behind() { # team.conf is not yet as format 4 writes it
+team_record_behind() { # team.conf is not yet as format 4 writes it
     [ "$(team_format)" != "$FORMAT" ] || [ "$(conf_get "$T_DIR/team.conf" agent_folder 2>/dev/null || true)" != "$T_AGENT_TARGET" ] ||
         conf_get "$T_DIR/team.conf" external_assistant >/dev/null 2>&1
 }
+team_observer_behind() { [ "$(conf_get "$T_DIR/team.conf" observer 2>/dev/null || true)" != "$C_OBSERVER" ]; } # since 5.1.0: observer= as C_OBSERVER says
+team_conf_behind() { team_record_behind || team_observer_behind; }
 
 team_agents() { # the roles present in T_DIR, in role order
     local id
@@ -804,9 +848,40 @@ refuse_secret_brief() { # TEXT
     w=''
 }
 
+# ---------------------------------------------------------------- the live view and parallel conversations
+# The live view (since 5.1.0; harness: BUZZ_ACP_RELAY_OBSERVER in crates/buzz-acp/src/config.rs, and in
+# lib.rs run_relay_observer_publisher and handle_relay_observer_control_event): the harness publishes what
+# an agent does as frames encrypted to the owner, which Buzz Desktop shows, and takes three controls back
+# from the owner only: cancel a turn, switch the model, publish project announcements. It finds the owner's
+# key in the stored proof (BUZZ_AUTH_TAG). The choice is the team's, team.conf observer=yes|no; a team
+# without the line has it on, and write_env writes it for every agent (C_OBSERVER).
+# Parallel conversations (harness: BUZZ_ACP_AGENTS, 1 to 32, default 1): the harness runs that many adapter
+# processes, so that turns for different conversations run at the same time instead of waiting in a queue.
+# The channel supervisor runs SUPERVISOR_PARALLEL, or what its agent.conf says (parallel=, 1 to
+# PARALLEL_MAX; W_PARALLEL when it is written). The workspace agent and the reviewer always run one: the
+# workspace agent must not run two jobs on the same files at once, and the reviewer is only mentioned now
+# and then. The harness stays one process, which starts and stops its adapters itself: agent.pid, stop and
+# status follow that process, as before.
+SUPERVISOR_PARALLEL=3 PARALLEL_MAX=8
+C_OBSERVER=yes W_PARALLEL=''
+team_observer() { if [ "$(conf_get "$1/team.conf" observer 2>/dev/null || true)" = no ]; then printf 'no'; else printf 'yes'; fi; } # TEAM_DIR
+valid_parallel() { case $1 in '' | *[!0-9]* | 0*) return 1 ;; esac; [ "$1" -le "$PARALLEL_MAX" ]; }
+saved_parallel() { local v; v=$(conf_get "$1/agent.conf" parallel 2>/dev/null) || v=''; if valid_parallel "$v"; then printf '%s' "$v"; fi; } # HOME: empty when none is saved
+conversations_text() { # N: "3 conversations at a time: three adapter processes"
+    local w
+    case $1 in 1) w=one ;; 2) w=two ;; 3) w=three ;; 4) w=four ;; 5) w=five ;; 6) w=six ;; 7) w=seven ;; 8) w=eight ;; *) w=$1 ;; esac
+    if [ "$1" = 1 ]; then printf '1 conversation at a time: one adapter process'
+    else printf '%s conversations at a time: %s adapter processes' "$1" "$w"; fi
+}
+live_view_text() { # yes|no: what the live view does, in words
+    if [ "$1" = no ]; then printf 'off: Buzz Desktop does not show what the agents do'
+    else printf 'on: you see what each agent does in Buzz Desktop and can cancel a turn or switch its model there; the frames are encrypted to you'; fi
+}
+
 # ---------------------------------------------------------------- files written by create and upgrade
 # One env file per agent. Sign-in is by subscription only (BUZZ_SIGN_IN=subscription): the launcher
 # removes and refuses every API key, token, endpoint and provider variable and checks the sign-in.
+# Since 5.1.0 it also holds the live view (C_OBSERVER) and the conversations the agent runs at a time.
 write_env() { # OUT HOME NAME ROLE BACKEND MODEL_CLAUDE MODEL_CODEX [AUTH_TAG_LINE]
     local answers=''
     if is_workspace_role "$4"; then answers=$(answer_keys); fi
@@ -848,6 +923,24 @@ write_env() { # OUT HOME NAME ROLE BACKEND MODEL_CLAUDE MODEL_CODEX [AUTH_TAG_LI
             printf 'BUZZ_ACP_RESPOND_TO=owner-only\n'
         fi
         printf 'BUZZ_ACP_PERMISSION_MODE=bypass-permissions\n'
+        if [ "$C_OBSERVER" = no ]; then
+            printf '# The live view is off for this team: agent-team.sh upgrade %s --observer turns it on.\n' "$C_NAME"
+            printf 'BUZZ_ACP_RELAY_OBSERVER=false\n'
+        else
+            printf '# The live view: Buzz Desktop shows the owner what this agent does, in frames encrypted to the owner.\n'
+            printf 'BUZZ_ACP_RELAY_OBSERVER=true\n'
+        fi
+        if is_channel_role "$4"; then
+            if [ "${W_PARALLEL:-1}" = 1 ]; then printf '# %s: turns for different conversations wait in a queue.\n' "$(conversations_text 1)"
+            else printf '# %s, so that turns for different conversations do not wait in a queue.\n' "$(conversations_text "$W_PARALLEL")"; fi
+            printf 'BUZZ_ACP_AGENTS=%s\n' "${W_PARALLEL:-1}"
+        elif is_workspace_role "$4"; then
+            printf '# One conversation at a time: it must not run two jobs on the same files at once.\n'
+            printf 'BUZZ_ACP_AGENTS=1\n'
+        else
+            printf '# One conversation at a time: it is only mentioned now and then.\n'
+            printf 'BUZZ_ACP_AGENTS=1\n'
+        fi
     } > "$1"
 }
 
@@ -930,6 +1023,8 @@ write_agent_conf() { # OUT ID NAME PUBKEY ABOUT BACKEND MODEL_CLAUDE MODEL_CODEX
         if [ -n "$W_WMODEL_CODEX" ]; then printf 'worker_model_codex=%s\n' "$W_WMODEL_CODEX"; fi
         if [ -n "$W_WEFFORT_CLAUDE" ]; then printf 'worker_effort_claude=%s\n' "$W_WEFFORT_CLAUDE"; fi
         if [ -n "$W_WEFFORT_CODEX" ]; then printf 'worker_effort_codex=%s\n' "$W_WEFFORT_CODEX"; fi
+        # The conversations the channel supervisor runs at a time (since 5.1.0).
+        if [ -n "$W_PARALLEL" ]; then printf 'parallel=%s\n' "$W_PARALLEL"; fi
     } > "$1"
 }
 
@@ -941,6 +1036,7 @@ write_team_conf() { # OUT
         if [ -n "$C_EXT_SUPERVISOR" ]; then printf 'external_supervisor=%s\n' "$C_EXT_SUPERVISOR"; fi
         if [ -n "$C_EXT_AGENT" ]; then printf 'external_agent=%s\n' "$C_EXT_AGENT"; fi
         printf 'created=%s\n' "$(now_utc)"
+        printf 'observer=%s\n' "$C_OBSERVER"
     } > "$1"
 }
 
@@ -1264,7 +1360,9 @@ Usage: agent-team.sh <command> [options]
             [--roles agent,supervisor|agent] [--roles reviewer] [--reviewer-backend B]
            Check everything a setup needs: the agents' root, the settings file, the
            key generator, the launcher (its path is printed), buzz, buzz-acp, and for
-           each role its ACP adapter and its sign-in. Each agent signs in through your
+           each role its ACP adapter and its sign-in, and on Codex the Codex CLI the
+           adapter will run (a note, with the line that installs a newer one, when it
+           is the adapter's own). Each agent signs in through your
            subscription only: the CLI the adapter runs must report a Claude
            subscription or a ChatGPT sign-in, and no Claude settings file or Codex
            config may add an API key, token, helper or endpoint. With NAME, the team's
@@ -1346,6 +1444,18 @@ Usage: agent-team.sh <command> [options]
                                   playwright that is already there is left as it is.
              --no-browser         take the browser out of both files of the project folder.
                                   Without either, the project folder is left as it is.
+             --observer, --no-observer
+                                  the live view, on unless --no-observer: Buzz Desktop shows you
+                                  what each agent does, in frames encrypted to you, and lets you
+                                  cancel a turn or switch its model. The choice is the team's,
+                                  for every agent (team.conf: observer=yes or no).
+             --supervisor-parallel N
+                                  the conversations the channel supervisor runs at a time, 1 to 8
+                                  (default 3): N adapter processes, so that turns for different
+                                  conversations do not wait in a queue (its agent.conf:
+                                  parallel=N). The workspace agent and the reviewer always run
+                                  one: the workspace agent must not run two jobs on the same
+                                  files at once, and the reviewer is only mentioned now and then.
              --agent-name N       the workspace agent's display name (default "<Name>")
              --supervisor-name N  the channel supervisor's display name (default
                                   "<Name> Supervisor"); with --roles agent: the
@@ -1382,6 +1492,10 @@ Usage: agent-team.sh <command> [options]
            [--browser | --no-browser]   (name the browser in the project folder's file of
            each backend the team's agents run on in this run, or take it out of both files,
            as for create; without either the project folder's browser is left as it is)
+           [--observer | --no-observer] [--supervisor-parallel N]   (the live view of the
+           team, and the conversations the channel supervisor runs at a time, as for create;
+           without them the saved ones stay: a team without a saved one gets the live view
+           on and 3 conversations at a time, and its env files get the lines for them)
            Bring a team to the current format (5) and to the chosen backends: subscription
            sign-in env files for the stock adapter, the current prompts and the channel
            supervisor's subscription rules. From format 4 the channel supervisor and the
@@ -1411,7 +1525,8 @@ Usage: agent-team.sh <command> [options]
            (--role reviewer for a reviewer; without --role: agent)
            List the models your own sign-in offers for that backend and role, without
            a model turn: one ACP session with the stock adapter every role runs, in the agents'
-           subscription-only environment, at most 30 s, no retry. The list is kept in
+           subscription-only environment, at most 30 s, no retry; on Codex the adapter runs
+           the Codex CLI the agents run (see AGENT_TEAM_CODEX_CLI). The list is kept in
            <root>/models/ and used by the model checks. When it cannot be retrieved,
            the reason and the documented list are shown and the exit status is 1.
   proof    NAME AGENT [PROOF | -] [--force] [--no-signature-check]
@@ -1475,6 +1590,9 @@ Environment:
   AGENT_TEAM_KEYGEN      key generator (default: settings.conf, then buzz-admin on PATH)
   AGENT_TEAM_BUZZ        Buzz CLI used by finish (default buzz on PATH)
   AGENT_TEAM_PYTHON      python3 for the offline signature check; "none" skips it
+  AGENT_TEAM_CODEX_CLI   the Codex CLI that agents on Codex run, a full path (default
+                         ~/.local/share/buzz-agent-team/node_modules/.bin/codex, used when
+                         it is there; none: the adapter's own). A CODEX_PATH of your shell wins.
   AGENT_TEAM_TEMPLATES   prompt templates (default: templates/ in the skill folder)
   CLAUDE_AGENT_ACP_PROTOCOL  passed to started agents (default v1)
   AGENT_TEAM_STOP_GRACE  seconds stop waits after SIGTERM (default 30)
@@ -1535,7 +1653,7 @@ cmd_create() {
     local opt_comm='' opt_owner='' opt_model='' model_set=no name_opt='' b_all='' b_a='' b_s='' b_r=''
     local v role id home tmp_home f top roles existing name lc n peers ws pid prole pname
     local brief_arg='' brief_set=no brief_changed=no cr saved b m created_now='' key stamp m_a='' m_s='' m_r='' mc mx e e_all='' e_a='' e_s='' e_r=''
-    local w_m='' w_e='' wm='' we='' br_opt=''
+    local w_m='' w_e='' wm='' we='' br_opt='' obs_opt='' par_opt=''
     C_CHANNEL='' REQ_agent='' REQ_supervisor='' REQ_reviewer='' WORKER_MODEL_NEW='' WORKER_EFFORT_NEW=''
     EFFORT_agent='' EFFORT_supervisor='' EFFORT_reviewer=''
     while [ "$#" -gt 0 ]; do
@@ -1568,6 +1686,11 @@ cmd_create() {
             --browser | --no-browser)
                 [ -z "$br_opt" ] || [ "$br_opt" = "$1" ] || die 'create: choose --browser or --no-browser, not both'
                 br_opt=$1 ;;
+            --observer | --no-observer)
+                v=yes; [ "$1" = --observer ] || v=no
+                [ -z "$obs_opt" ] || [ "$obs_opt" = "$v" ] || die 'create: choose --observer or --no-observer, not both'
+                obs_opt=$v ;;
+            --supervisor-parallel) need_value "$@"; par_opt=$2; shift ;;
             --base-url) die 'create: agents sign in through your subscription only; a gateway address (--base-url) is not used' ;;
             --from-env) need_value "$@"; from_env=$2; shift ;;
             -h | --help) usage; exit 0 ;;
@@ -1596,6 +1719,12 @@ cmd_create() {
         *assistant*) die "create: $(renamed_roles "$roles_arg")" ;;
         *) die "create: --roles must be agent,supervisor, agent or reviewer (got: $roles_arg)" ;;
     esac
+    # The conversations the channel supervisor runs at a time: a number in range, for a create that makes one.
+    if [ -n "$par_opt" ]; then
+        valid_parallel "$par_opt" || die "create: --supervisor-parallel takes a number from 1 to $PARALLEL_MAX (got: $par_opt)"
+        case " $roles " in *' supervisor '*) ;; *) die "create: --supervisor-parallel is for the channel supervisor, and this create makes none (--roles $roles_arg)" ;; esac
+    fi
+    C_OBSERVER=${obs_opt:-yes}
 
     resolve_root git
 
@@ -1690,6 +1819,9 @@ cmd_create() {
             warn "the workspace agent already exists; create keeps it, so --worker-model and --worker-effort were not saved. Save them with: $PROG upgrade $C_NAME --worker-model ID --worker-effort LEVEL"
         fi
     fi
+    if [ -n "$par_opt" ] && [ -f "$(ahome supervisor)/agent.conf" ]; then
+        warn "the channel supervisor already exists; create keeps it, so --supervisor-parallel was not saved. Save it with: $PROG upgrade $C_NAME --supervisor-parallel $par_opt"
+    fi
 
     mkdir -p -- "$ROOT"
     chmod 700 "$ROOT"
@@ -1718,6 +1850,12 @@ cmd_create() {
         [ "$v" = "$FORMAT" ] || die "$(old_format_message "$C_NAME" "$v")"
         C_EXT_AGENT=$T_EXT_AGENT C_EXT_SUPERVISOR=$T_EXT_SUPERVISOR
         say "Workspace \"$C_NAME\" exists: $T_DIR (kept)"
+        # The live view is the team's, and team.conf is kept: an agent made now gets the team's.
+        C_OBSERVER=$(team_observer "$T_DIR")
+        if [ -n "$obs_opt" ] && [ "$obs_opt" != "$C_OBSERVER" ]; then
+            if [ "$obs_opt" = yes ]; then v=--observer; else v=--no-observer; fi
+            warn "the team exists and create keeps its team.conf, so $v was not saved. Save it with: $PROG upgrade $C_NAME $v"
+        fi
     fi
     for id in $ALL_ROLES; do
         [ -f "$(ahome "$id")/agent.conf" ] || continue
@@ -1851,6 +1989,9 @@ EOF
             chmod 700 "$home"
             saved=$(agent_backend "$id")
             mc=$(agent_model "$id" claude) mx=$(agent_model "$id" codex)
+            # A missing env file is written as the agent is kept: its saved conversations, or one.
+            W_PARALLEL=''
+            if is_channel_role "$id"; then W_PARALLEL=$(saved_parallel "$home"); fi
             existing=''
             for f in "$ENV_NAME" prompt.md; do
                 if [ -f "$home/$f" ]; then existing="$existing $f"; continue; fi
@@ -1885,6 +2026,8 @@ EOF
             if [ "$b" = claude ]; then W_WMODEL_CLAUDE=$WORKER_MODEL_NEW W_WEFFORT_CLAUDE=$WORKER_EFFORT_NEW
             else W_WMODEL_CODEX=$WORKER_MODEL_NEW W_WEFFORT_CODEX=$WORKER_EFFORT_NEW; fi
         fi
+        W_PARALLEL=''
+        if is_channel_role "$id"; then W_PARALLEL=${par_opt:-$SUPERVISOR_PARALLEL}; fi
         tmp_home=$(mktemp -d "$T_DIR/.new-$id.XXXXXX")
         TMP_PATHS+=("$tmp_home")
         chmod 700 "$tmp_home"
@@ -1993,6 +2136,13 @@ EOF
     for id in $(team_agents); do
         is_workspace_role "$id" || continue
         say "The workspace agent, $(adir "$id"), answers $(answers_text "$id")."
+    done
+    if [ "$C_OBSERVER" = no ]; then v=--observer; else v=--no-observer; fi
+    say "Live view: $(live_view_text "$C_OBSERVER") ($PROG upgrade $C_NAME $v changes it)."
+    for id in $(team_agents); do
+        is_channel_role "$id" || continue
+        v=$(saved_parallel "$(ahome "$id")")
+        say "The channel supervisor runs $(conversations_text "${v:-1}") ($PROG upgrade $C_NAME --supervisor-parallel N changes it)."
     done
     if [ -s "$T_DIR/brief.md" ]; then say "Workspace brief: $T_DIR/brief.md"; else say 'Workspace brief: none'; fi
     say ''
@@ -2379,8 +2529,9 @@ cmd_start() {
             # Never a worker variable of the calling shell: the prompt names the workers.
             unset CLAUDE_CODE_SUBAGENT_MODEL CLAUDE_CODE_SUBAGENT_MODEL_FORCE CLAUDE_CODE_SUBAGENT_EFFORT
             if [ -n "$rp" ]; then export BUZZ_ACP_SYSTEM_PROMPT_FILE=$rp; fi
-            # The stock Codex adapter's workspace-write mode, whatever the calling shell exports.
-            if [ "$b" = codex ]; then export INITIAL_AGENT_MODE=agent; fi
+            # The stock Codex adapter's workspace-write mode, whatever the calling shell exports, and the
+            # Codex CLI it runs: the one in ~/.local/share/buzz-agent-team when it is there (codex_choice).
+            if [ "$b" = codex ]; then export INITIAL_AGENT_MODE=agent; codex_env; fi
             trap '' HUP
             cd -- "$home" && exec "$launcher" --run --backend "$b" ${am:+--model "$am"}
         ) >> "$log" 2>&1 < /dev/null &
@@ -2660,6 +2811,17 @@ pf_role() { # ID BACKEND WORKDIR
             *' 1.13.1') pf_line ok 'adapter protocol' '1.13.1 (Buzz-compatible)' ;;
             *) pf_line PROBLEM 'adapter protocol' 'unverified adapter version' 'install @agentclientprotocol/codex-acp@1.13.1 under the user npm prefix' ;;
         esac
+        # The Codex CLI that adapter will run (codex_choice): the adapter's own cannot use the newest models.
+        codex_choice
+        codex_version "$CODEX_RUN"
+        cmd=$CODEX_VERSION
+        case $CODEX_FROM in
+            skill) pf_line ok codex "$CODEX_RUN${cmd:+ ($cmd)}, $(codex_from_words): the adapter runs it (CODEX_PATH)" ;;
+            shell)
+                if [ -f "$CODEX_RUN" ] && [ -x "$CODEX_RUN" ]; then pf_line ok codex "$CODEX_RUN${cmd:+ ($cmd)}, $(codex_from_words): the adapter runs it"
+                else pf_line PROBLEM codex "your shell's CODEX_PATH, $CODEX_RUN, is not a program that can be run, and the adapter would run it" 'unset CODEX_PATH, or point it at a Codex CLI'; fi ;;
+            *) pf_line note codex "the adapter's own${CODEX_RUN:+, $CODEX_RUN}${cmd:+ ($cmd)}: it cannot use the newest models with a ChatGPT sign-in, and a turn on one then fails without a line in the log" "$CODEX_INSTALL" ;;
+        esac
     fi
     out=$(mktemp "${TMPDIR:-/tmp}/agent-team-preflight.XXXXXX")
     TMP_PATHS+=("$out")
@@ -2850,9 +3012,13 @@ cmd_models() {
         for n in $(compgen -e); do if credential_name "$n"; then unset "$n"; fi; done
         unset CLAUDE_CODE_EXECUTABLE
         export CLAUDE_AGENT_ACP_PROTOCOL=v1
+        # On Codex, with the Codex CLI the agents run (codex_choice).
+        if [ "$backend" = codex ]; then codex_env; fi
         "$py" -I "$(script_dir)/acp-models.py" --timeout "$timeout" -- "$cmd"
     ) > "$out" 2>/dev/null || status=$?
-    say "Models for $(job_words "$role") on $backend ($cmd):"
+    line=''
+    if [ "$backend" = codex ]; then codex_choice; line="; Codex CLI ${CODEX_RUN:-not found}, $(codex_from_words)"; fi
+    say "Models for $(job_words "$role") on $backend ($cmd$line):"
     if [ "$status" = 0 ] && "$py" -I -c 'import json,sys
 d=json.load(open(sys.argv[1]))
 assert d.get("ok") and d.get("models")
@@ -2910,6 +3076,9 @@ print(d.get("reason") or "the listing gave no answer")' "$out" 2>/dev/null || pr
 # format 2 the two jobs also swap: each agent keeps its key, proof, display name, backend, models and
 # efforts, and gets the generated files of its new job (the subscription rules move from the workspace
 # agent's folder to the supervisor's; every replaced or removed file is kept beside itself).
+# Since 5.1.0 the env files hold the live view and the conversations at a time: a team made by 5.0.0 (the
+# same format) gets those lines, team.conf records observer= (first, see the apply pass) and the channel
+# supervisor's agent.conf parallel=.
 GENERATED_COMMON='agent.conf .env.buzz-acp.local prompt.md'
 GENERATED_RULES='subscriptions.toml'
 generated_files() { # ID: the files upgrade writes for that role
@@ -3039,6 +3208,7 @@ cmd_upgrade() {
     local dry=no b_all='' b_a='' b_s='' b_r='' model_set=no opt_model='' team='' id home fmt old_b new_b st m old_m
     local gen rel f changed added removed any=no stamp prev ws peers dropped k old_keys new_keys tmp list keep pass m_a='' m_s='' m_r='' mc mx e old_e ec ex e_all='' e_a='' e_s='' e_r=''
     local v dest moving w_m='' w_e='' wm we wmc wmx wec wex old_wm old_we eo br_opt='' up_b='' bb rt_aside
+    local obs_opt='' par_opt='' old_obs new_obs old_par new_par
     while [ "$#" -gt 0 ]; do
         case $1 in
             --dry-run) dry=yes ;;
@@ -3059,6 +3229,11 @@ cmd_upgrade() {
             --browser | --no-browser)
                 [ -z "$br_opt" ] || [ "$br_opt" = "$1" ] || die 'upgrade: choose --browser or --no-browser, not both'
                 br_opt=$1 ;;
+            --observer | --no-observer)
+                v=yes; [ "$1" = --observer ] || v=no
+                [ -z "$obs_opt" ] || [ "$obs_opt" = "$v" ] || die 'upgrade: choose --observer or --no-observer, not both'
+                obs_opt=$v ;;
+            --supervisor-parallel) need_value "$@"; par_opt=$2; shift ;;
             --assistant-*) die "upgrade: $(renamed_option "$1")" ;;
             -h | --help) usage; exit 0 ;;
             -*) die "upgrade: unknown option: $1" ;;
@@ -3073,6 +3248,12 @@ cmd_upgrade() {
     if [ -n "$w_m$w_e" ] && [ ! -f "$(ahome agent)/agent.conf" ]; then
         die "upgrade: --worker-model and --worker-effort are for the workspace agent's workers, and workspace \"$team\" has no workspace agent; nothing was changed"
     fi
+    if [ -n "$par_opt" ]; then
+        valid_parallel "$par_opt" || die "upgrade: --supervisor-parallel takes a number from 1 to $PARALLEL_MAX (got: $par_opt); nothing was changed"
+        [ -f "$(ahome supervisor)/agent.conf" ] || die "upgrade: --supervisor-parallel is for the channel supervisor, and workspace \"$team\" has none; nothing was changed"
+    fi
+    # The live view of the team: the option, else the one team.conf records (on for a team without the line).
+    C_OBSERVER=${obs_opt:-$(team_observer "$T_DIR")}
     C_NAME=$T_NAME C_WS_PATH=$T_WORKSPACE C_CHANNEL=$T_CHANNEL C_COMMUNITY=$T_COMMUNITY C_OWNER=$T_OWNER
     C_EXT_AGENT=$T_EXT_AGENT C_EXT_SUPERVISOR=$T_EXT_SUPERVISOR
     [ -d "$C_WS_PATH" ] || die "the workspace folder $C_WS_PATH is missing; nothing was changed"
@@ -3104,6 +3285,18 @@ cmd_upgrade() {
         if [ "$pass" = apply ]; then
             if [ "$dry" = yes ] || [ "$any" = no ]; then break; fi
             [ -n "$LOCK_DIR" ] || take_lock "$T_DIR"
+            # The live view is recorded before the env files are rewritten for it, so that the next run
+            # finishes an upgrade cut short with the same choice.
+            if team_observer_behind; then
+                cp -p -- "$T_DIR/team.conf" "$T_DIR/team.conf.bak-$stamp"
+                tmp=$(mktemp "$T_DIR/.new-team.XXXXXX")
+                TMP_PATHS+=("$tmp")
+                sed -e '/^observer=/d' "$T_DIR/team.conf" > "$tmp"
+                printf 'observer=%s\n' "$C_OBSERVER" >> "$tmp"
+                chmod 600 "$tmp"
+                mv -f -- "$tmp" "$T_DIR/team.conf"
+                say "  team.conf: observer=$C_OBSERVER"
+            fi
         fi
         for id in $(team_agents); do
             home=$(ahome "$id") dest=$(ahome "$id") moving=no
@@ -3191,6 +3384,10 @@ cmd_upgrade() {
                 if [ "$new_b" = claude ]; then wmc=$wm wec=$we; else wmx=$wm wex=$we; fi
             fi
             W_WMODEL_CLAUDE=$wmc W_WMODEL_CODEX=$wmx W_WEFFORT_CLAUDE=$wec W_WEFFORT_CODEX=$wex
+            # The conversations the channel supervisor runs at a time: the option, else the saved one, else
+            # SUPERVISOR_PARALLEL (a channel supervisor made before 5.1.0 has none saved and ran one).
+            W_PARALLEL=''
+            if is_channel_role "$id"; then W_PARALLEL=${par_opt:-$(saved_parallel "$home")}; W_PARALLEL=${W_PARALLEL:-$SUPERVISOR_PARALLEL}; fi
             if [ "$pass" = plan ]; then st=$(mktemp -d "${TMPDIR:-/tmp}/agent-team-plan.XXXXXX")
             else st=$(mktemp -d "$T_DIR/.$id.upgrade.XXXXXX"); fi
             TMP_PATHS+=("$st")
@@ -3209,6 +3406,12 @@ cmd_upgrade() {
             if [ "$pass" = plan ]; then
                 old_keys=$(env_keys "$home/$ENV_NAME")
                 new_keys=$(env_keys "$st/$ENV_NAME")
+                # The live view and the conversations at a time, as the env file has them now and will.
+                old_obs=off new_obs=off
+                if [ "$(env_get "$home/$ENV_NAME" BUZZ_ACP_RELAY_OBSERVER 2>/dev/null || true)" = true ]; then old_obs=on; fi
+                if [ "$(env_get "$st/$ENV_NAME" BUZZ_ACP_RELAY_OBSERVER || true)" = true ]; then new_obs=on; fi
+                old_par=$(env_get "$home/$ENV_NAME" BUZZ_ACP_AGENTS 2>/dev/null) || old_par=1
+                new_par=$(env_get "$st/$ENV_NAME" BUZZ_ACP_AGENTS) || new_par=1
                 dropped=''
                 for k in $old_keys; do case " $new_keys " in *" $k "*) ;; *) dropped="$dropped $k" ;; esac; done
                 say "  $(adir "$id") ($(agent_field "$id" name)): format $fmt -> $FORMAT; backend $old_b -> $new_b"
@@ -3229,6 +3432,11 @@ cmd_upgrade() {
                     say "    tools: from now on every tool of the stock adapter, in bypass-permissions, as the workspace agent has: it can edit files, run commands and use your connected services. What it may do is a rule in its prompt, which nothing enforces"
                 fi
                 if [ "$rt_aside" = yes ]; then say "    runtime/: move aside (kept as runtime.bak-$stamp); the stock adapter, $(backend_command "$new_b"), takes its place"; fi
+                if [ "$old_obs" != "$new_obs" ]; then
+                    if [ "$new_obs" = on ]; then say "    live view: off -> on (BUZZ_ACP_RELAY_OBSERVER=true): you see what it does in Buzz Desktop and can cancel a turn or switch its model there; the frames are encrypted to you"
+                    else say "    live view: on -> off (BUZZ_ACP_RELAY_OBSERVER=false)"; fi
+                fi
+                if [ "$old_par" != "$new_par" ]; then say "    conversations at a time: $old_par -> $new_par (BUZZ_ACP_AGENTS=$new_par: $(conversations_text "$new_par" | sed 's/^[^:]*: //'))"; fi
                 if [ "$fmt" != "$FORMAT" ] && model_not_offered "$new_b" "$id" "$m"; then
                     say "    model ($new_b): $m is not one the stock adapter offers for $(job_words "$id"); it is kept, and a start uses it as saved. To choose another: --$id-model ID ($PROG models --backend $new_b --role $id lists them)"
                 fi
@@ -3286,7 +3494,10 @@ cmd_upgrade() {
             say "  $(adir "$id"): upgraded"
         done
         if [ "$pass" = plan ] && team_conf_behind; then
-            say "  team.conf: format $(team_format) -> $FORMAT, agent_folder=$T_AGENT_TARGET (kept as team.conf.bak-$stamp)"
+            v=''
+            if team_record_behind; then v="format $(team_format) -> $FORMAT, agent_folder=$T_AGENT_TARGET"; fi
+            if team_observer_behind; then v="$v${v:+, }observer=$C_OBSERVER (the live view of every agent, $(live_view_text "$C_OBSERVER" | sed 's/:.*//'))"; fi
+            say "  team.conf: $v (kept as team.conf.bak-$stamp)"
         fi
         if [ "$pass" = plan ] && { [ "$(team_format)" = 1 ] || [ "$(team_format)" = 2 ]; }; then
             # The two jobs swap (the lines of each agent say which it has from now on).
@@ -3394,13 +3605,14 @@ cmd_upgrade() {
         fi
     fi
     if [ "$dry" = no ] && [ "$any" = yes ] && team_conf_behind; then
-        cp -p -- "$T_DIR/team.conf" "$T_DIR/team.conf.bak-$stamp"
+        [ -e "$T_DIR/team.conf.bak-$stamp" ] || cp -p -- "$T_DIR/team.conf" "$T_DIR/team.conf.bak-$stamp"
         tmp=$(mktemp "$T_DIR/.new-team.XXXXXX")
         TMP_PATHS+=("$tmp")
         # Format 4: the record names the workspace agent's folder; external_assistant became external_agent.
-        sed -E -e "s/^format=[0-9]+\$/format=$FORMAT/" -e 's/^external_assistant=/external_agent=/' -e '/^agent_folder=/d' "$T_DIR/team.conf" > "$tmp"
+        # Since 5.1.0 it records the live view of the team (observer=).
+        sed -E -e "s/^format=[0-9]+\$/format=$FORMAT/" -e 's/^external_assistant=/external_agent=/' -e '/^agent_folder=/d' -e '/^observer=/d' "$T_DIR/team.conf" > "$tmp"
         grep -qx "format=$FORMAT" "$tmp" || printf 'format=%s\n' "$FORMAT" >> "$tmp"
-        printf 'agent_folder=%s\n' "$T_AGENT_TARGET" >> "$tmp"
+        printf 'agent_folder=%s\nobserver=%s\n' "$T_AGENT_TARGET" "$C_OBSERVER" >> "$tmp"
         chmod 600 "$tmp"
         mv -f -- "$tmp" "$T_DIR/team.conf"
         say '  team.conf: upgraded'
@@ -3416,7 +3628,7 @@ cmd_upgrade() {
         say "  VERSION: $SKILL_VERSION"
     fi
     if [ "$any" = no ]; then say "Workspace \"$T_NAME\" is up to date; nothing was changed."; return; fi
-    if [ "$dry" = yes ]; then say "Run it: $PROG upgrade $T_NAME$( [ -z "$b_all" ] || printf ' --backend %s' "$b_all")$( [ -z "$b_a" ] || printf ' --agent-backend %s' "$b_a")$( [ -z "$b_s" ] || printf ' --supervisor-backend %s' "$b_s")$( [ -z "$b_r" ] || printf ' --reviewer-backend %s' "$b_r")$( [ "$model_set" = no ] || printf ' --model %s' "$(shquote "$opt_model")")$( [ -z "$m_a" ] || printf ' --agent-model %s' "$(shquote "$m_a")")$( [ -z "$m_s" ] || printf ' --supervisor-model %s' "$(shquote "$m_s")")$( [ -z "$m_r" ] || printf ' --reviewer-model %s' "$(shquote "$m_r")")$( [ -z "$e_all" ] || printf ' --effort %s' "$e_all")$( [ -z "$e_a" ] || printf ' --agent-effort %s' "$e_a")$( [ -z "$e_s" ] || printf ' --supervisor-effort %s' "$e_s")$( [ -z "$e_r" ] || printf ' --reviewer-effort %s' "$e_r")$( [ -z "$w_m" ] || printf ' --worker-model %s' "$(shquote "$w_m")")$( [ -z "$w_e" ] || printf ' --worker-effort %s' "$w_e")$( [ -z "$br_opt" ] || printf ' %s' "$br_opt")"
+    if [ "$dry" = yes ]; then say "Run it: $PROG upgrade $T_NAME$( [ -z "$b_all" ] || printf ' --backend %s' "$b_all")$( [ -z "$b_a" ] || printf ' --agent-backend %s' "$b_a")$( [ -z "$b_s" ] || printf ' --supervisor-backend %s' "$b_s")$( [ -z "$b_r" ] || printf ' --reviewer-backend %s' "$b_r")$( [ "$model_set" = no ] || printf ' --model %s' "$(shquote "$opt_model")")$( [ -z "$m_a" ] || printf ' --agent-model %s' "$(shquote "$m_a")")$( [ -z "$m_s" ] || printf ' --supervisor-model %s' "$(shquote "$m_s")")$( [ -z "$m_r" ] || printf ' --reviewer-model %s' "$(shquote "$m_r")")$( [ -z "$e_all" ] || printf ' --effort %s' "$e_all")$( [ -z "$e_a" ] || printf ' --agent-effort %s' "$e_a")$( [ -z "$e_s" ] || printf ' --supervisor-effort %s' "$e_s")$( [ -z "$e_r" ] || printf ' --reviewer-effort %s' "$e_r")$( [ -z "$w_m" ] || printf ' --worker-model %s' "$(shquote "$w_m")")$( [ -z "$w_e" ] || printf ' --worker-effort %s' "$w_e")$( [ -z "$br_opt" ] || printf ' %s' "$br_opt")$( [ "$obs_opt" != yes ] || printf ' --observer')$( [ "$obs_opt" != no ] || printf ' --no-observer')$( [ -z "$par_opt" ] || printf ' --supervisor-parallel %s' "$par_opt")"
     else say "Upgraded. Next, with the team's own command, from the project folder: cd $(shquote "$T_WORKSPACE") && $T_DIR/team.sh check, then $T_DIR/team.sh"; fi
 }
 

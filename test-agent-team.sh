@@ -47,7 +47,7 @@ export BUZZ_CLAUDE_MANAGED_DIR=$TD/managed-none
 export PATH=$BIN:$PATH
 # A stray exported agent key in the caller's shell must never reach an agent.
 export BUZZ_PRIVATE_KEY=0000000000000000000000000000000000000000000000000000000000000001
-unset AGENT_TEAM_TEMPLATES AGENT_TEAM_PYTHON CLAUDE_AGENT_ACP_PROTOCOL BUZZ_AUTH_TAG
+unset AGENT_TEAM_TEMPLATES AGENT_TEAM_PYTHON CLAUDE_AGENT_ACP_PROTOCOL BUZZ_AUTH_TAG CODEX_PATH AGENT_TEAM_CODEX_CLI
 CHANNEL=0b1c2d3e-4f50-6172-8394-a5b6c7d8e9f0
 CHANNEL2=1c2d3e4f-5061-7283-94a5-b6c7d8e9f0a1
 COMMUNITY=wss://community.example.org
@@ -210,6 +210,7 @@ cat > "$CODEX_PKG/node_modules/.bin/codex" <<'EOF'
 # The Codex CLI the stock adapter bundles: an older catalog, the same sign-in store.
 case "$1 ${2:-}" in
     "debug models") echo '{"models": [{"slug": "gpt-example-old", "visibility": "list"}]}' ;;
+    "--version "*) echo 'codex-cli 0.156.1' ;;
     "login status")
         if [ "$(cat "${CODEX_HOME:-$HOME/.codex}/fake-login" 2>/dev/null)" = chatgpt ]; then echo 'Logged in using ChatGPT'; else echo 'Not logged in'; exit 1; fi ;;
     *) exit 2 ;;
@@ -226,6 +227,9 @@ try:
     mode = open(os.path.join(os.environ["HOME"], ".fake-acp-mode")).read().strip()
 except OSError:
     mode = "list"
+# The Codex CLI the adapter was told to run: $HOME/.fake-acp-codex-path.
+with open(os.path.join(os.environ["HOME"], ".fake-acp-codex-path"), "a") as rec:
+    rec.write("%s codex_path=%s\n" % (backend, os.environ.get("CODEX_PATH", "unset")))
 lists = {"claude": [("default", "Default (recommended)"), ("opus", "Opus 5.5"), ("sonnet", "Sonnet 5.5"), ("claude-opus-5-5", "Opus 5.5")],
          "codex": [("gpt-example-sol", "Example Sol"), ("gpt-example-sol[high]", "Example Sol high")]}
 for line in sys.stdin:
@@ -626,11 +630,25 @@ give_runtime() { # AGENT_DIR: runtime/ and the env lines, as 4.3.0 wrote them
         -e 's/^BUZZ_ACP_PERMISSION_MODE=.*/BUZZ_ACP_PERMISSION_MODE=default/' "$d/.env.buzz-acp.local" > "$d/env.new" && mv "$d/env.new" "$d/.env.buzz-acp.local"
     chmod 600 "$d/.env.buzz-acp.local"
 }
+# Before 5.1.0 a team had no live view and no conversations at a time: this takes their lines out of a
+# team made by this skill (team.conf observer=, the env lines and their comments, agent.conf parallel=).
+# What is left is the team as 5.0.0 wrote it: its create wrote these files without those lines only.
+strip_510() { # TEAM_DIR (inside the test folder)
+    local t=$1 f
+    case $t in "$TD"/*) ;; *) return 1 ;; esac
+    sed -e '/^observer=/d' "$t/team.conf" > "$t/t.new" && mv "$t/t.new" "$t/team.conf"
+    for f in "$t"/*/.env.buzz-acp.local; do
+        sed -E -e '/^# (The live view|[0-9]+ conversations? at a time|One conversation at a time)/d' -e '/^BUZZ_ACP_(RELAY_OBSERVER|AGENTS)=/d' "$f" > "$f.new" && mv "$f.new" "$f"
+    done
+    for f in "$t"/*/agent.conf; do sed -e '/^parallel=/d' "$f" > "$f.new" && mv "$f.new" "$f"; done
+    chmod 600 "$t/team.conf" "$t"/*/.env.buzz-acp.local "$t"/*/agent.conf
+}
 # Before format 4 the workspace agent's role was "assistant" and its folder assistant/. This writes a
 # team made by this skill back into that layout, as the earlier versions wrote it.
 to_old_layout() { # TEAM_DIR FORMAT
     local t=$1 f
     case $t in "$TD"/*) ;; *) return 1 ;; esac
+    strip_510 "$t"
     mv "$t/shop" "$t/assistant"
     sed -e "s/^format=5\$/format=$2/" -e '/^agent_folder=/d' "$t/team.conf" > "$t/team.conf.new" && mv "$t/team.conf.new" "$t/team.conf"
     sed -e "s/^format=5\$/format=$2/" -e 's/^id=agent$/id=assistant/' -e 's/^role=agent$/role=assistant/' "$t/assistant/agent.conf" > "$t/a.new" && mv "$t/a.new" "$t/assistant/agent.conf"
@@ -827,6 +845,7 @@ make_format4() {
     rm -rf -- "$L4" "$L4W"
     mkdir -p "$L4T" "$L4/models" "$L4W"
     cp -R "$ROOT/shop/." "$L4T/"
+    strip_510 "$L4T"
     for f in team.conf shop/agent.conf supervisor/agent.conf; do
         sed -e 's/^format=5$/format=4/' -e "s|^workspace=.*|workspace=$L4W|" "$L4T/$f" > "$L4T/$f.new" && mv "$L4T/$f.new" "$L4T/$f"
     done
@@ -859,13 +878,14 @@ run_tool l4-dry AGENT_TEAM_ROOT="$L4" -- upgrade shop --dry-run
 plan_of "$OUT/l4-dry.out" supervisor > "$OUT/l4-dry-s.txt"; plan_of "$OUT/l4-dry.out" shop > "$OUT/l4-dry-a.txt"
 check 'the plan says in plain words that the channel supervisor gets every tool from now on and that its limits are prompt rules' eval 'rc_is 0 && grep -qx "    tools: from now on every tool of the stock adapter, in bypass-permissions, as the workspace agent has: it can edit files, run commands and use your connected services. What it may do is a rule in its prompt, which nothing enforces" "$OUT/l4-dry-s.txt" && hasnt "$OUT/l4-dry-a.txt" "tools:"'
 check 'that its runtime is moved aside and its files replaced, and that its saved model is not one the stock adapter offers' eval 'grep -q "^    runtime/: move aside (kept as runtime.bak-[0-9TZ]*); the stock adapter, codex-acp, takes its place$" "$OUT/l4-dry-s.txt" && grep -q "^    replace (each kept as <file>.bak-[0-9TZ]*): agent.conf .env.buzz-acp.local prompt.md$" "$OUT/l4-dry-s.txt" && has "$OUT/l4-dry-s.txt" "model (codex): gpt-runtime-only is not one the stock adapter offers for the channel supervisor; it is kept, and a start uses it as saved. To choose another: --supervisor-model ID"'
-check 'and for the team: format 4 -> 5, the buzz rule for the agent on Codex, VERSION; a dry run changes nothing' eval 'has "$OUT/l4-dry.out" "team.conf: format 4 -> 5" && has "$OUT/l4-dry.out" "  $L4W/.codex/rules/buzz.rules: add (the buzz rule of the agents on Codex)" && has "$OUT/l4-dry.out" "  $L4W/.claude/settings.json: add (the sandbox settings of the agents on Claude)" && has "$OUT/l4-dry.out" "  VERSION: 4.3.0 -> $(cat "$SKILL_DIR/VERSION")" && [ "$(tree_sha "$L4T")" = "$SHA_L4" ] && [ -z "$(ls -A "$L4W")" ]'
+check 'and for the team: format 4 -> 5 and the live view, the buzz rule for the agent on Codex, VERSION; a dry run changes nothing' eval 'has "$OUT/l4-dry.out" "team.conf: format 4 -> 5, agent_folder=shop, observer=yes (the live view of every agent, on)" && has "$OUT/l4-dry.out" "  $L4W/.codex/rules/buzz.rules: add (the buzz rule of the agents on Codex)" && has "$OUT/l4-dry.out" "  $L4W/.claude/settings.json: add (the sandbox settings of the agents on Claude)" && has "$OUT/l4-dry.out" "  VERSION: 4.3.0 -> $(cat "$SKILL_DIR/VERSION")" && [ "$(tree_sha "$L4T")" = "$SHA_L4" ] && [ -z "$(ls -A "$L4W")" ]'
 run_tool l4-up AGENT_TEAM_ROOT="$L4" -- upgrade shop
 RTB=$(ls -d "$L4S"/runtime.bak-* 2>/dev/null | head -n 1)
 check 'upgrade moves the runtime aside, whole and byte for byte, as runtime.bak-<time>' eval 'rc_is 0 && [ ! -e "$L4S/runtime" ] && [ -n "$RTB" ] && diff -r "$TD/l4-before/supervisor/runtime" "$RTB" > /dev/null && [ "$(mode_of "$RTB")" = 700 ]'
 check 'its env file: the stock adapter in bypass-permissions; whom it answers, its rules and its model as they were' eval 'grep -qx BUZZ_ACP_AGENT_COMMAND=codex-acp "$L4S/.env.buzz-acp.local" && grep -qx BUZZ_ACP_PERMISSION_MODE=bypass-permissions "$L4S/.env.buzz-acp.local" && grep -qx BUZZ_ACP_RESPOND_TO=anyone "$L4S/.env.buzz-acp.local" && grep -qx BUZZ_ACP_SUBSCRIBE=config "$L4S/.env.buzz-acp.local" && grep -qx "BUZZ_ACP_CONFIG=$L4S/subscriptions.toml" "$L4S/.env.buzz-acp.local" && grep -qx BUZZ_MODEL_CODEX=gpt-runtime-only "$L4S/.env.buzz-acp.local" && ls "$L4S"/.env.buzz-acp.local.bak-* > /dev/null'
 check 'its prompt is this version'"'"'s, and the 4.x prompt is kept beside it' eval 'has "$L4S/prompt.md" "## Who you act for" && cmp -s "$TD/l4-before/supervisor/prompt.md" "$(ls "$L4S"/prompt.md.bak-* | head -n 1)"'
 check 'keys, proofs and saved models are byte-identical; the records and team.conf say format 5' eval 'cmp -s "$TD/l4-before/shop/identity.key" "$L4A/identity.key" && cmp -s "$TD/l4-before/supervisor/identity.key" "$L4S/identity.key" && [ "$(grep "^BUZZ_AUTH_TAG=" "$L4S/.env.buzz-acp.local")" = "$(grep "^BUZZ_AUTH_TAG=" "$TD/l4-before/supervisor/.env.buzz-acp.local")" ] && grep -qx model_codex=gpt-runtime-only "$L4S/agent.conf" && grep -qx format=5 "$L4T/team.conf" && grep -qx format=5 "$L4A/agent.conf" && grep -qx format=5 "$L4S/agent.conf"'
+check 'it goes straight to 5.1.0: the live view in every env file, 3 conversations for the channel supervisor, both recorded' eval 'grep -qx BUZZ_ACP_RELAY_OBSERVER=true "$L4A/.env.buzz-acp.local" && grep -qx BUZZ_ACP_RELAY_OBSERVER=true "$L4S/.env.buzz-acp.local" && grep -qx BUZZ_ACP_AGENTS=3 "$L4S/.env.buzz-acp.local" && grep -qx BUZZ_ACP_AGENTS=1 "$L4A/.env.buzz-acp.local" && grep -qx observer=yes "$L4T/team.conf" && grep -qx parallel=3 "$L4S/agent.conf"'
 check 'the buzz rule and the sandbox settings are in the project folder, and VERSION is written last' eval '[ -s "$L4W/.codex/rules/buzz.rules" ] && [ -s "$L4W/.claude/settings.json" ] && cmp -s "$SKILL_DIR/VERSION" "$L4T/VERSION" && [ "$(grep -n -e "^  team.conf: upgraded$" -e "^  supervisor: upgraded$" -e "^  shop: upgraded$" -e "^  VERSION: " "$OUT/l4-up.out" | tail -n 1 | cut -d: -f2-)" = "  VERSION: $(cat "$SKILL_DIR/VERSION")" ]'
 l4_state() { # the upgraded team, without the times it records
     local d
@@ -910,6 +930,68 @@ run_tool l4r-up AGENT_TEAM_ROOT="$L4R" -- upgrade shop-reviewer
 check 'and the same upgrade: the runtime aside, the stock adapter in bypass-permissions, its prompt, format 5' eval 'rc_is 0 && [ ! -e "$L4RV/runtime" ] && ls -d "$L4RV"/runtime.bak-* > /dev/null && grep -qx BUZZ_ACP_AGENT_COMMAND=claude-agent-acp "$L4RV/.env.buzz-acp.local" && grep -qx BUZZ_ACP_PERMISSION_MODE=bypass-permissions "$L4RV/.env.buzz-acp.local" && grep -qx BUZZ_ACP_RESPOND_TO=anyone "$L4RV/.env.buzz-acp.local" && has "$L4RV/prompt.md" "You never change the work you review" && grep -qx format=5 "$L4RV/agent.conf" && grep -qx format=5 "$L4R/shop-reviewer/team.conf"'
 run_tool l4r-up2 AGENT_TEAM_ROOT="$L4R" -- upgrade shop-reviewer
 check 'a second run says "up to date"' eval 'rc_is 0 && has "$OUT/l4r-up2.out" "is up to date"'
+scenario 'A team made by 5.0.0 (format 5, before the live view) gets the live view and 3 conversations at a time from upgrade'
+# A team as 5.0.0 wrote it: this version's team without the 5.1.0 lines (strip_510), its own project folder, a
+# stored proof, VERSION 5.0.0 and the team command of that version (here: one that differs from this one).
+L5=$TD/legacy5 L5T=$TD/legacy5/shop L5W=$TD/ws/l5
+make_v500() {
+    local d
+    rm -rf -- "$L5" "$L5W"
+    mkdir -p "$L5T" "$L5W"
+    cp -R "$ROOT/shop/." "$L5T/"
+    sed -e "s|^workspace=.*|workspace=$L5W|" "$L5T/team.conf" > "$L5T/t.new" && mv "$L5T/t.new" "$L5T/team.conf"
+    for d in shop supervisor; do
+        sed -e "s|$ROOT/shop/|$L5T/|g" -e "s|^RUN_BUZZ_ACP_WORKDIR=.*|RUN_BUZZ_ACP_WORKDIR=$L5W|" \
+            -e 's/^BUZZ_AUTH_TAG=.*/BUZZ_AUTH_TAG=["auth","'"$OWNER"'","created_at<9999999999","'"$(printf '%0128d' 5)"'"]/' "$L5T/$d/.env.buzz-acp.local" > "$L5T/$d/e.new" && mv "$L5T/$d/e.new" "$L5T/$d/.env.buzz-acp.local"
+        rm -f -- "$L5T/$d/agent.pid" "$L5T/$d/agent.log"
+    done
+    strip_510 "$L5T"
+    printf '5.0.0\n' > "$L5T/VERSION"
+    printf '\n# the team command of 5.0.0\n' >> "$L5T/team.sh"
+    chmod 600 "$L5T/VERSION"
+}
+make_v500
+check 'the fixture is a team as 5.0.0 wrote it: format 5, no live view or conversations line anywhere' \
+    eval 'grep -qx format=5 "$L5T/team.conf" && hasnt "$L5T/team.conf" observer= && ! grep -q -e BUZZ_ACP_RELAY_OBSERVER -e BUZZ_ACP_AGENTS -e "conversation" -e "live view" "$L5T"/*/.env.buzz-acp.local && hasnt "$L5T/supervisor/agent.conf" parallel='
+run_tool l5-start AGENT_TEAM_ROOT="$L5" -- start shop --check
+check 'it starts as it is: the format did not change' eval 'rc_is 0 && has "$OUT/l5-start.out" "Launcher checks passed."'
+rm -rf -- "$TD/l5-before"
+cp -Rp "$L5T" "$TD/l5-before"
+SHA_L5=$(tree_sha "$L5T")
+run_tool l5-dry AGENT_TEAM_ROOT="$L5" -- upgrade shop --dry-run
+plan_of "$OUT/l5-dry.out" shop > "$OUT/l5-dry-a.txt"; plan_of "$OUT/l5-dry.out" supervisor > "$OUT/l5-dry-s.txt"
+LVON='    live view: off -> on (BUZZ_ACP_RELAY_OBSERVER=true): you see what it does in Buzz Desktop and can cancel a turn or switch its model there; the frames are encrypted to you'
+check 'the plan names the live view of each agent: off -> on, with what that means' eval 'rc_is 0 && grep -qxF "$LVON" "$OUT/l5-dry-a.txt" && grep -qxF "$LVON" "$OUT/l5-dry-s.txt"'
+check 'and the channel supervisor'"'"'s conversations, 1 -> 3; none for the workspace agent' eval 'grep -qx "    conversations at a time: 1 -> 3 (BUZZ_ACP_AGENTS=3: three adapter processes)" "$OUT/l5-dry-s.txt" && hasnt "$OUT/l5-dry-a.txt" conversation'
+check 'the files it replaces: each env file, and the channel supervisor'"'"'s agent.conf' eval 'grep -q "^    replace (each kept as <file>.bak-[0-9TZ]*): .env.buzz-acp.local$" "$OUT/l5-dry-a.txt" && grep -q "^    replace (each kept as <file>.bak-[0-9TZ]*): agent.conf .env.buzz-acp.local$" "$OUT/l5-dry-s.txt"'
+check 'for the team: observer=yes in team.conf and no format change, the team command, VERSION 5.0.0 -> this one; a dry run changes nothing' \
+    eval 'grep -q "^  team.conf: observer=yes (the live view of every agent, on) (kept as team.conf.bak-" "$OUT/l5-dry.out" && ! grep -q "^  team.conf: format" "$OUT/l5-dry.out" && grep -q "^  team.sh: replace (kept as team.sh.bak-" "$OUT/l5-dry.out" && has "$OUT/l5-dry.out" "  VERSION: 5.0.0 -> $(cat "$SKILL_DIR/VERSION")" && [ "$(tree_sha "$L5T")" = "$SHA_L5" ]'
+run_tool l5-up AGENT_TEAM_ROOT="$L5" -- upgrade shop
+norm_env() { sed -e "s|$2/|ROOT/|g" -e '/^BUZZ_AUTH_TAG=/d' -e '/^RUN_BUZZ_ACP_WORKDIR=/d' "$1"; } # ENV_FILE TEAM_DIR
+check 'each env file is now the one this version writes: the new lines, and everything else as an upgrade keeps it' \
+    eval 'rc_is 0 && [ "$(norm_env "$L5T/shop/.env.buzz-acp.local" "$L5T")" = "$(norm_env "$ROOT/shop/shop/.env.buzz-acp.local" "$ROOT/shop")" ] && [ "$(norm_env "$L5T/supervisor/.env.buzz-acp.local" "$L5T")" = "$(norm_env "$ROOT/shop/supervisor/.env.buzz-acp.local" "$ROOT/shop")" ] && grep -qx "RUN_BUZZ_ACP_WORKDIR=$L5W" "$L5T/shop/.env.buzz-acp.local"'
+check 'keys and proofs byte-identical, and the earlier env file kept beside the new one' \
+    eval '[ "$(grep "^BUZZ_AUTH_TAG=" "$L5T/supervisor/.env.buzz-acp.local")" = "$(grep "^BUZZ_AUTH_TAG=" "$TD/l5-before/supervisor/.env.buzz-acp.local")" ] && cmp -s "$TD/l5-before/shop/identity.key" "$L5T/shop/identity.key" && cmp -s "$TD/l5-before/supervisor/identity.key" "$L5T/supervisor/identity.key" && cmp -s "$TD/l5-before/shop/.env.buzz-acp.local" "$(ls "$L5T"/shop/.env.buzz-acp.local.bak-* | head -n 1)"'
+check 'the two settings are recorded, and nothing else in those records changes: observer=yes in team.conf, parallel=3 in the channel supervisor'"'"'s agent.conf' \
+    eval '[ "$(grep -v "^observer=" "$L5T/team.conf")" = "$(cat "$TD/l5-before/team.conf")" ] && [ "$(sed -n "\$p" "$L5T/team.conf")" = observer=yes ] && [ "$(grep -v "^parallel=" "$L5T/supervisor/agent.conf")" = "$(cat "$TD/l5-before/supervisor/agent.conf")" ] && grep -qx parallel=3 "$L5T/supervisor/agent.conf" && cmp -s "$TD/l5-before/shop/agent.conf" "$L5T/shop/agent.conf"'
+check 'team.conf is written first, VERSION last, and the team command is this version'"'"'s' \
+    eval '[ "$(grep -n "^  team.conf: observer=yes$" "$OUT/l5-up.out" | cut -d: -f1)" -lt "$(grep -n "^  shop: upgraded$" "$OUT/l5-up.out" | cut -d: -f1)" ] && [ "$(grep -n -e "^  team.conf: observer=yes$" -e "^  supervisor: upgraded$" -e "^  shop: upgraded$" -e "^  team.sh: replaced$" -e "^  VERSION: " "$OUT/l5-up.out" | tail -n 1 | cut -d: -f2-)" = "  VERSION: $(cat "$SKILL_DIR/VERSION")" ] && cmp -s "$SKILL_DIR/VERSION" "$L5T/VERSION" && cmp -s "$SKILL_DIR/templates/team.sh" "$L5T/team.sh" && ls "$L5T"/team.sh.bak-* > /dev/null'
+SHA_L5=$(tree_sha "$L5T")
+run_tool l5-up2 AGENT_TEAM_ROOT="$L5" -- upgrade shop
+check 'a second upgrade says "up to date" and changes nothing' eval 'rc_is 0 && has "$OUT/l5-up2.out" "is up to date" && [ "$(tree_sha "$L5T")" = "$SHA_L5" ]'
+run_tool l5-start2 AGENT_TEAM_ROOT="$L5" -- start shop --check
+check 'and it starts' eval 'rc_is 0 && has "$OUT/l5-start2.out" "Launcher checks passed."'
+# Cut short with a choice: the next run, without the option, finishes with the same choice.
+make_v500
+run_tool l5-cut AGENT_TEAM_ROOT="$L5" AGENT_TEAM_UPGRADE_FAULT=between-renames -- upgrade shop --no-observer
+check 'an upgrade with --no-observer cut between the two renames of a folder has recorded observer=no already' eval '[ "$RC" != 0 ] && grep -qx observer=no "$L5T/team.conf" && ls -d "$L5T"/.agent.prev.* "$L5T"/.agent.upgrade.* > /dev/null && [ "$(cat "$L5T/VERSION")" = 5.0.0 ]'
+run_tool l5-cut-up AGENT_TEAM_ROOT="$L5" -- upgrade shop
+check 'the next run, without the option, finishes it with that choice: the live view off in every env file' \
+    eval 'rc_is 0 && has "$OUT/l5-cut-up.out" "shop: finished an interrupted upgrade" && grep -qx observer=no "$L5T/team.conf" && grep -qx BUZZ_ACP_RELAY_OBSERVER=false "$L5T/shop/.env.buzz-acp.local" && grep -qx BUZZ_ACP_RELAY_OBSERVER=false "$L5T/supervisor/.env.buzz-acp.local" && cmp -s "$SKILL_DIR/VERSION" "$L5T/VERSION"'
+make_v500
+run_tool l5-cut2 AGENT_TEAM_ROOT="$L5" AGENT_TEAM_UPGRADE_FAULT=before-version -- upgrade shop
+check 'an upgrade killed before its last write leaves VERSION 5.0.0, with the agents already upgraded; the next run writes it' \
+    eval '[ "$RC" != 0 ] && [ "$(cat "$L5T/VERSION")" = 5.0.0 ] && grep -qx BUZZ_ACP_AGENTS=3 "$L5T/supervisor/.env.buzz-acp.local" && run_tool l5-cut2-up AGENT_TEAM_ROOT="$L5" -- upgrade shop && has "$OUT/l5-cut2-up.out" "  VERSION: $(cat "$SKILL_DIR/VERSION")" && cmp -s "$SKILL_DIR/VERSION" "$L5T/VERSION"'
 scenario 'A missing prompt is recreated; the key is never regenerated (C2)'
 SHA_KEY=$(sha "$ROOT/shop/supervisor/identity.key") SHA_P=$(sha "$ROOT/shop/supervisor/prompt.md")
 rm -f "$ROOT/shop/supervisor/prompt.md"
@@ -1801,6 +1883,19 @@ fi
 scenario 'Preflight per role: subscription sign-in and settings overrides (F2, F3)'
 run_tool pf-mixed AGENT_TEAM_ROOT="$RB" -- preflight mixed
 check 'preflight of a team checks each role on its saved backend and its stock adapter' eval 'rc_is 0 && has "$OUT/pf-mixed.out" "The workspace agent: claude" && has "$OUT/pf-mixed.out" "The channel supervisor: codex" && has "$OUT/pf-mixed.out" "1.13.1 (Buzz-compatible)" && has "$OUT/pf-mixed.out" "your Claude subscription (max)" && hasnt "$OUT/pf-mixed.out" runtime/'
+# The Codex CLI the channel supervisor's adapter will run: one line, ok or a note with the install line as its fix.
+pfl() { printf '  %-8s %-17s %s' "$1" "$2" "$3"; } # STATE NAME DETAIL: a preflight line, as it is printed
+INSTALL_FIX=$(pfl '' '' 'fix: npm install --prefix "$HOME/.local/share/buzz-agent-team" --save-exact @openai/codex@0.171.0')
+check 'preflight names the Codex CLI the adapter of an agent on Codex will run: its own, as a note with the install line as its fix' \
+    eval 'grep -qxF "$(pfl note codex "the adapter'"'"'s own, $CODEX_PKG/node_modules/.bin/codex (codex-cli 0.156.1): it cannot use the newest models with a ChatGPT sign-in, and a turn on one then fails without a line in the log")" "$OUT/pf-mixed.out" && grep -qxF "$INSTALL_FIX" "$OUT/pf-mixed.out" && [ "$(grep -c " codex  " "$OUT/pf-mixed.out")" = 1 ]'
+PF_CX=$HOME/.local/share/buzz-agent-team/node_modules/.bin/codex
+mkdir -p "${PF_CX%/*}"
+printf '#!/bin/bash\n[ "${1:-}" = --version ] && { echo "codex-cli 0.171.0"; exit 0; }\nexit 2\n' > "$PF_CX"; chmod 755 "$PF_CX"
+run_tool pf-cx-skill AGENT_TEAM_ROOT="$RB" -- preflight mixed
+run_tool pf-cx-shell AGENT_TEAM_ROOT="$RB" CODEX_PATH="$CODEX_PKG/node_modules/.bin/codex" -- preflight mixed
+rm -rf "$HOME/.local/share/buzz-agent-team"
+check 'with a Codex CLI in ~/.local/share/buzz-agent-team, the line is ok and names it; a CODEX_PATH of the shell wins over it' \
+    eval 'grep -qxF "$(pfl ok codex "$PF_CX (codex-cli 0.171.0), from ~/.local/share/buzz-agent-team: the adapter runs it (CODEX_PATH)")" "$OUT/pf-cx-skill.out" && hasnt "$OUT/pf-cx-skill.out" "fix: npm install" && grep -qxF "$(pfl ok codex "$CODEX_PKG/node_modules/.bin/codex (codex-cli 0.156.1), from your shell'"'"'s CODEX_PATH: the adapter runs it")" "$OUT/pf-cx-shell.out"'
 echo oauth_token > "$HOME/.claude/fake-auth"; run_tool pf-token AGENT_TEAM_ROOT="$RB" -- preflight --backend claude; echo claude.ai > "$HOME/.claude/fake-auth"
 check 'preflight fails a token sign-in with a fix line' eval 'rc_is 1 && has "$OUT/pf-token.out" "uses oauth_token, not your Claude subscription" && has "$OUT/pf-token.out" "fix: remove that credential"'
 run_tool pf-exported ANTHROPIC_API_KEY=example-not-a-key AGENT_TEAM_ROOT="$RB" -- preflight --backend claude
@@ -1875,6 +1970,33 @@ run_tool mod-wk-rv2 AGENT_TEAM_ROOT="$RB" -- upgrade mixed --worker-model sonnet
 check 'upgrade names the workers'"'"' change in its plan' eval 'rc_is 0 && has "$OUT/mod-wk-rv2.out" "model of its workers (claude): the same as the agent -> sonnet"'
 run_tool mod-upg-bad AGENT_TEAM_ROOT="$RB" -- upgrade models-ws --agent-model claude-haiku-5-5
 check 'upgrade refuses an unlisted model and changes nothing' eval 'rc_is 1 && grep -qx model_claude=sonnet "$RB/models-ws/models-ws/agent.conf"'
+# The catalog and the list of an agent on Codex come from the Codex CLI it will run: here a newer one, named by
+# AGENT_TEAM_CODEX_CLI, whose catalog has a model the one the stock adapter bundles has not.
+NEWCX=$TD/newer-codex RCX=$TD/root-codexcli
+cat > "$NEWCX" <<'EOF'
+#!/bin/bash
+case "$1 ${2:-}" in
+    "debug models") echo '{"models": [{"slug": "gpt-example-new", "visibility": "list"}]}' ;;
+    "--version "*) echo 'codex-cli 0.171.0' ;;
+    *) exit 2 ;;
+esac
+EOF
+chmod 755 "$NEWCX"
+mkdir -p "$TD/ws/cx-ws"
+run_tool cx-own AGENT_TEAM_ROOT="$RCX" -- create --workspace "$TD/ws/cx-ws" --channel "$CHANNEL2" --community "$COMMUNITY" --owner "$OWNER" --backend codex --agent-model gpt-example-new
+check 'with the adapter'"'"'s own Codex, a model only a newer one offers is refused, naming its catalog' eval 'rc_is 1 && has "$OUT/cx-own.out" "not a codex model offered for the workspace agent" && has "$OUT/cx-own.out" gpt-example-old && [ ! -e "$RCX/cx-ws" ]'
+run_tool cx-new AGENT_TEAM_ROOT="$RCX" AGENT_TEAM_CODEX_CLI="$NEWCX" -- create --workspace "$TD/ws/cx-ws" --channel "$CHANNEL2" --community "$COMMUNITY" --owner "$OWNER" --backend codex --agent-model gpt-example-new
+check 'with the newer one, create checks the model against its catalog, and saves it' eval 'rc_is 0 && grep -qx model_codex=gpt-example-new "$RCX/cx-ws/cx-ws/agent.conf"'
+run_tool cx-upg-shell AGENT_TEAM_ROOT="$RCX" AGENT_TEAM_CODEX_CLI="$NEWCX" CODEX_PATH="$CODEX_PKG/node_modules/.bin/codex" -- upgrade cx-ws --supervisor-model gpt-example-new
+run_tool cx-upg AGENT_TEAM_ROOT="$RCX" AGENT_TEAM_CODEX_CLI="$NEWCX" -- upgrade cx-ws --supervisor-model gpt-example-new
+check 'upgrade too; a CODEX_PATH of the shell wins over it' eval '[ "$(grep -c "not a codex model offered for the channel supervisor" "$OUT/cx-upg-shell.out")" = 1 ] && grep -qx model_codex=gpt-example-new "$RCX/cx-ws/supervisor/agent.conf"'
+rm -f "$HOME/.fake-acp-codex-path"; echo list > "$HOME/.fake-acp-mode"
+run_tool cx-models AGENT_TEAM_ROOT="$RCX" AGENT_TEAM_CODEX_CLI="$NEWCX" AGENT_TEAM_MODELS_TIMEOUT=2 -- models --backend codex
+check 'models retrieves the list with that Codex CLI, and says which it is' eval 'rc_is 0 && [ "$(cat "$HOME/.fake-acp-codex-path")" = "codex codex_path=$NEWCX" ] && has "$OUT/cx-models.out" "Models for the workspace agent on codex ($BIN/codex-acp; Codex CLI $NEWCX, from AGENT_TEAM_CODEX_CLI):"'
+rm -f "$HOME/.fake-acp-codex-path"
+run_tool cx-models-own AGENT_TEAM_ROOT="$RCX" AGENT_TEAM_MODELS_TIMEOUT=2 -- models --backend codex
+check 'and without it, with the adapter'"'"'s own: no CODEX_PATH' eval 'rc_is 0 && [ "$(cat "$HOME/.fake-acp-codex-path")" = "codex codex_path=unset" ] && has "$OUT/cx-models-own.out" "; Codex CLI $CODEX_PKG/node_modules/.bin/codex, the adapter'"'"'s own):"'
+rm -f "$HOME/.fake-acp-codex-path"
 # A team record still at format 1 (an upgrade stopped before its last step) is refused even when its agents are current.
 cp -p "$RB/models-ws/team.conf" "$TD/team.conf.keep"; sed 's/^format=5$/format=1/' "$TD/team.conf.keep" > "$RB/models-ws/team.conf"
 run_tool mod-team1 AGENT_TEAM_ROOT="$RB" -- create --workspace "$TD/ws/models-ws" --channel "$CHANNEL2" --community "$COMMUNITY" --owner "$OWNER"

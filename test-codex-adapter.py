@@ -3,8 +3,12 @@ driven over ACP as the Buzz harness drives it (every permission request answered
 option), with a local model. Offline: a loopback model endpoint, a fixture API key, a disposable home folder.
 
     python3 test-codex-adapter.py [--also-browser] [--also-buzz-rule]
+    AGENT_TEAM_CODEX_CLI=/full/path/to/codex python3 test-codex-adapter.py [--also-browser] [--also-buzz-rule]
 
-Each check is opt-in; without an option the program says which there are and runs none.
+Each check is opt-in; without an option the program says which there are and runs none. The adapter runs
+the Codex CLI it bundles, or the one AGENT_TEAM_CODEX_CLI names (as team.sh names it to an agent on Codex,
+by CODEX_PATH), so the checks can be run for adapter 1.13.1 with a newer Codex. Each result line names the
+Codex CLI that was driven and its version.
 
 --also-browser: the browser of the project folder, in a project folder whose .codex/config.toml names the
 Playwright server exactly as workspace-browser.py writes it. The local model asks the browser to open a
@@ -39,11 +43,30 @@ SKILL = Path(__file__).resolve().parent / "buzz-agent-team"
 
 
 def stock_adapter(option):
-    """codex-acp on PATH, and the Codex CLI it bundles, found as agent-team.sh finds it (codex_cli_of)."""
+    """codex-acp on PATH, and the Codex CLI to drive: the file AGENT_TEAM_CODEX_CLI names (a full path; none
+    means none), as team.sh takes it, else the one the adapter bundles, found as agent-team.sh finds it
+    (codex_choice). Unlike team.sh, an unset AGENT_TEAM_CODEX_CLI means the adapter's own here, so that a
+    plain run measures the adapter as it is installed."""
     adapter = shutil.which("codex-acp")
     if not adapter:
         raise SystemExit(f"{option} needs codex-acp (@agentclientprotocol/codex-acp@1.13.1) on PATH.")
+    named = os.environ.get("AGENT_TEAM_CODEX_CLI", "")
+    if named and named != "none":
+        cli = Path(named)
+        if not (cli.is_absolute() and cli.is_file() and os.access(cli, os.X_OK)):
+            raise SystemExit(f"AGENT_TEAM_CODEX_CLI={named} is not a program that can be run (a full path).")
+        return adapter, cli
     return adapter, Path(os.path.realpath(adapter)).parent.parent / "node_modules/.bin/codex"
+
+
+def codex_words(cli):
+    """The Codex CLI that was driven, and its version, for the result lines."""
+    try:
+        version = subprocess.run([str(cli), "--version"], capture_output=True, text=True, timeout=30).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        version = ""
+    source = "AGENT_TEAM_CODEX_CLI" if os.environ.get("AGENT_TEAM_CODEX_CLI", "none") != "none" else "the adapter's own"
+    return f"{cli} ({version or 'version unknown'}, {source})"
 
 
 def codex_fixture(tmp, cli, port):
@@ -414,7 +437,8 @@ if __name__ == "__main__":
         print("Measured over ACP with the stock Codex adapter in its agent mode and .codex/config.toml as workspace-browser.py "
               "writes it: the browser tools are offered, a loopback page opens, a screenshot without a name lands in "
               ".browser-output/, a named file outside the project folder is refused, and a file: address is refused; "
-              f"Codex's own reviewer was asked {reviews} time(s), and {asked} permission request(s) reached the client.")
+              f"Codex's own reviewer was asked {reviews} time(s), and {asked} permission request(s) reached the client. "
+              f"Codex CLI: {codex_words(stock_adapter('--also-browser')[1])}.")
     if "--also-buzz-rule" in options:
         folder = tempfile.mkdtemp(prefix="buzz-codex-rule-")
         try:
@@ -425,4 +449,5 @@ if __name__ == "__main__":
               "workspace-settings.py writes it: a plain buzz command reached the network, with no review by Codex's "
               f"own reviewer and no permission request; none of the {combined} lines that combine buzz with something "
               "else did; and without the rule file a plain buzz command did not reach the network (Codex's reviewer "
-              f"was asked {reviews} time(s) and {asked} permission request(s) reached the client in that session).")
+              f"was asked {reviews} time(s) and {asked} permission request(s) reached the client in that session). "
+              f"Codex CLI: {codex_words(stock_adapter('--also-buzz-rule')[1])}.")
